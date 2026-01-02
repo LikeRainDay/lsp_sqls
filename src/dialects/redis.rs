@@ -8,6 +8,12 @@ use tower_lsp::lsp_types::{
 
 pub struct RedisDialect;
 
+impl Default for RedisDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RedisDialect {
     pub fn new() -> Self {
         Self
@@ -102,7 +108,7 @@ impl Dialect for RedisDialect {
         ];
 
         // RediSearch 命令
-        let search_commands = vec![
+        let search_commands = [
             "FT.SEARCH",
             "FT.AGGREGATE",
             "FT.CREATE",
@@ -118,7 +124,7 @@ impl Dialect for RedisDialect {
         ];
 
         // RedisGraph 命令
-        let graph_commands = vec![
+        let graph_commands = [
             "GRAPH.QUERY",
             "GRAPH.DELETE",
             "GRAPH.EXPLAIN",
@@ -126,7 +132,7 @@ impl Dialect for RedisDialect {
         ];
 
         // RedisJSON 命令
-        let json_commands = vec![
+        let json_commands = [
             "JSON.GET",
             "JSON.SET",
             "JSON.DEL",
@@ -248,7 +254,7 @@ impl Dialect for RedisDialect {
                     documentation: table
                         .comment
                         .clone()
-                        .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                        .map(tower_lsp::lsp_types::Documentation::String),
                     deprecated: None,
                     preselect: None,
                     sort_text: Some(format!("2{}", table.name)),

@@ -9,6 +9,12 @@ use tower_lsp::lsp_types::{
 /// Elasticsearch EQL (Event Query Language) 方言
 pub struct ElasticsearchEqlDialect;
 
+impl Default for ElasticsearchEqlDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ElasticsearchEqlDialect {
     pub fn new() -> Self {
         Self
@@ -160,7 +166,7 @@ impl Dialect for ElasticsearchEqlDialect {
                     documentation: table
                         .comment
                         .clone()
-                        .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                        .map(tower_lsp::lsp_types::Documentation::String),
                     deprecated: None,
                     preselect: None,
                     sort_text: Some(format!("1{}", table.name)),

@@ -10,6 +10,12 @@ pub struct PostgresDialect {
     parser: std::sync::Mutex<SqlParser>,
 }
 
+impl Default for PostgresDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PostgresDialect {
     pub fn new() -> Self {
         Self {
@@ -51,7 +57,7 @@ impl PostgresDialect {
             documentation: table
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -94,7 +100,7 @@ impl PostgresDialect {
             documentation: column
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),
@@ -420,7 +426,7 @@ impl Dialect for PostgresDialect {
                     if let Some(schema) = schema {
                         // 处理 database.table 格式
                         let table_name = if node_text.contains('.') {
-                            node_text.split('.').last().unwrap_or(&node_text)
+                            node_text.split('.').next_back().unwrap_or(&node_text)
                         } else {
                             &node_text
                         };
@@ -453,22 +459,9 @@ impl Dialect for PostgresDialect {
                         for table in &schema.tables {
                             let full_table_name = format!("{}.{}", schema.database, table.name);
                             if let Some(ref tname) = table_name {
-                                if table.name == *tname || full_table_name == *tname {
-                                    if table.columns.iter().any(|c| c.name == column_name) {
-                                        return Some(Location {
-                                            uri: tower_lsp::lsp_types::Url::parse(
-                                                "file:///schema.sql",
-                                            )
-                                            .unwrap_or_else(|_| {
-                                                tower_lsp::lsp_types::Url::parse("file:///")
-                                                    .unwrap()
-                                            }),
-                                            range: parser.node_range(node),
-                                        });
-                                    }
-                                }
-                            } else {
-                                if table.columns.iter().any(|c| c.name == column_name) {
+                                if (table.name == *tname || full_table_name == *tname)
+                                    && table.columns.iter().any(|c| c.name == column_name)
+                                {
                                     return Some(Location {
                                         uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
                                             .unwrap_or_else(|_| {
@@ -478,6 +471,14 @@ impl Dialect for PostgresDialect {
                                         range: parser.node_range(node),
                                     });
                                 }
+                            } else if table.columns.iter().any(|c| c.name == column_name) {
+                                return Some(Location {
+                                    uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
+                                        .unwrap_or_else(|_| {
+                                            tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                        }),
+                                    range: parser.node_range(node),
+                                });
                             }
                         }
                     }
@@ -527,23 +528,22 @@ impl Dialect for PostgresDialect {
                         .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap());
 
                     for token in tokens {
-                        if token.text.eq_ignore_ascii_case(&identifier) {
-                            if !crate::token::Keywords::is_keyword(&token.text)
-                                && !crate::token::Operators::is_operator(&token.text)
-                                && !crate::token::Delimiters::is_delimiter(&token.text)
-                            {
-                                locations.push(Location {
-                                    uri: current_uri.clone(),
-                                    range: tower_lsp::lsp_types::Range {
-                                        start: token.position,
-                                        end: tower_lsp::lsp_types::Position {
-                                            line: token.position.line,
-                                            character: token.position.character
-                                                + token.text.len() as u32,
-                                        },
+                        if token.text.eq_ignore_ascii_case(&identifier)
+                            && !crate::token::Keywords::is_keyword(&token.text)
+                            && !crate::token::Operators::is_operator(&token.text)
+                            && !crate::token::Delimiters::is_delimiter(&token.text)
+                        {
+                            locations.push(Location {
+                                uri: current_uri.clone(),
+                                range: tower_lsp::lsp_types::Range {
+                                    start: token.position,
+                                    end: tower_lsp::lsp_types::Position {
+                                        line: token.position.line,
+                                        character: token.position.character
+                                            + token.text.len() as u32,
                                     },
-                                });
-                            }
+                                },
+                            });
                         }
                     }
                 }

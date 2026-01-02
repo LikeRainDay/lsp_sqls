@@ -12,6 +12,12 @@ pub struct ElasticsearchDslDialect {
     dsl_parser: std::sync::Mutex<DslParser>,
 }
 
+impl Default for ElasticsearchDslDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ElasticsearchDslDialect {
     pub fn new() -> Self {
         Self {
@@ -92,6 +98,7 @@ impl ElasticsearchDslDialect {
     }
 
     /// 递归查找字段引用
+    #[allow(clippy::only_used_in_recursion)]
     fn find_field_references_recursive(
         &self,
         node: tree_sitter::Node,
@@ -103,7 +110,7 @@ impl ElasticsearchDslDialect {
     ) {
         if node.kind() == "pair" {
             if let Some(key_node) = node.child(0) {
-                if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                     let key = key_text.trim_matches('"').trim_matches('\'');
                     if key == field_name {
                         locations.push(Location {
@@ -358,7 +365,7 @@ impl Dialect for ElasticsearchDslDialect {
                     documentation: table
                         .comment
                         .clone()
-                        .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                        .map(tower_lsp::lsp_types::Documentation::String),
                     deprecated: None,
                     preselect: None,
                     sort_text: Some(format!("3{}", table.name)),

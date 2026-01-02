@@ -10,6 +10,12 @@ pub struct MysqlDialect {
     parser: std::sync::Mutex<SqlParser>,
 }
 
+impl Default for MysqlDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MysqlDialect {
     pub fn new() -> Self {
         Self {
@@ -50,7 +56,7 @@ impl MysqlDialect {
             documentation: table
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -93,7 +99,7 @@ impl MysqlDialect {
             documentation: column
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),
@@ -407,24 +413,10 @@ impl Dialect for MysqlDialect {
                         // 在 Schema 中查找列
                         for table in &schema.tables {
                             if let Some(ref tname) = table_name {
-                                if table.name == *tname {
-                                    if table.columns.iter().any(|c| c.name == column_name) {
-                                        // 返回当前文档中列名第一次出现的位置
-                                        return Some(Location {
-                                            uri: tower_lsp::lsp_types::Url::parse(
-                                                "file:///schema.sql",
-                                            )
-                                            .unwrap_or_else(|_| {
-                                                tower_lsp::lsp_types::Url::parse("file:///")
-                                                    .unwrap()
-                                            }),
-                                            range: parser.node_range(node),
-                                        });
-                                    }
-                                }
-                            } else {
-                                // 在所有表中查找列
-                                if table.columns.iter().any(|c| c.name == column_name) {
+                                if table.name == *tname
+                                    && table.columns.iter().any(|c| c.name == column_name)
+                                {
+                                    // 返回当前文档中列名第一次出现的位置
                                     return Some(Location {
                                         uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
                                             .unwrap_or_else(|_| {
@@ -434,6 +426,15 @@ impl Dialect for MysqlDialect {
                                         range: parser.node_range(node),
                                     });
                                 }
+                            } else if table.columns.iter().any(|c| c.name == column_name) {
+                                // 在所有表中查找列
+                                return Some(Location {
+                                    uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
+                                        .unwrap_or_else(|_| {
+                                            tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                        }),
+                                    range: parser.node_range(node),
+                                });
                             }
                         }
                     }
@@ -488,24 +489,23 @@ impl Dialect for MysqlDialect {
 
                     for token in tokens {
                         // 匹配标识符（忽略大小写）
-                        if token.text.eq_ignore_ascii_case(&identifier) {
+                        if token.text.eq_ignore_ascii_case(&identifier)
+                            && !crate::token::Keywords::is_keyword(&token.text)
+                            && !crate::token::Operators::is_operator(&token.text)
+                            && !crate::token::Delimiters::is_delimiter(&token.text)
+                        {
                             // 检查 token 类型，确保是标识符而不是关键字
-                            if !crate::token::Keywords::is_keyword(&token.text)
-                                && !crate::token::Operators::is_operator(&token.text)
-                                && !crate::token::Delimiters::is_delimiter(&token.text)
-                            {
-                                locations.push(Location {
-                                    uri: current_uri.clone(),
-                                    range: tower_lsp::lsp_types::Range {
-                                        start: token.position,
-                                        end: tower_lsp::lsp_types::Position {
-                                            line: token.position.line,
-                                            character: token.position.character
-                                                + token.text.len() as u32,
-                                        },
+                            locations.push(Location {
+                                uri: current_uri.clone(),
+                                range: tower_lsp::lsp_types::Range {
+                                    start: token.position,
+                                    end: tower_lsp::lsp_types::Position {
+                                        line: token.position.line,
+                                        character: token.position.character
+                                            + token.text.len() as u32,
                                     },
-                                });
-                            }
+                                },
+                            });
                         }
                     }
                 }

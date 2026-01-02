@@ -127,15 +127,13 @@ impl SqlParser {
             // 参考 sqls：过滤常见的误报情况
 
             // 1. SELECT * 中的 * 是有效的
-            if node_text.trim() == "*" {
-                if self.is_in_select_context(node, source) {
-                    // 跳过这个错误，* 在 SELECT 中是有效的
-                    let mut cursor = node.walk();
-                    for child in node.children(&mut cursor) {
-                        self.collect_errors(child, source, diagnostics);
-                    }
-                    return;
+            if node_text.trim() == "*" && self.is_in_select_context(node, source) {
+                // 跳过这个错误，* 在 SELECT 中是有效的
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    self.collect_errors(child, source, diagnostics);
                 }
+                return;
             }
 
             // 2. 过滤空白字符错误（格式问题，不是语法错误）
@@ -207,7 +205,7 @@ impl SqlParser {
             {
                 return true;
             }
-            if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = n.utf8_text(source.as_bytes()) {
                 if text.to_uppercase().contains("SELECT") {
                     return true;
                 }
@@ -271,7 +269,7 @@ impl SqlParser {
         let node_kind = node.kind();
         let start_point = node.start_position();
 
-        if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+        if let Ok(text) = node.utf8_text(source.as_bytes()) {
             let text = text.trim();
             if !text.is_empty() {
                 let token_type = self.classify_token(node_kind, text);
@@ -345,7 +343,7 @@ impl SqlParser {
             || node_kind == "table"
             || (node_kind == "identifier" && self.is_in_from_context(node, source))
         {
-            if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 let text = text.trim();
                 // 过滤关键字和操作符
                 if !text.is_empty()
@@ -379,7 +377,7 @@ impl SqlParser {
                 return true;
             }
             // 检查父节点文本是否包含 FROM/JOIN
-            if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = n.utf8_text(source.as_bytes()) {
                 let upper = text.to_uppercase();
                 if upper.contains("FROM") || upper.contains("JOIN") {
                     return true;
@@ -409,7 +407,7 @@ impl SqlParser {
             || node_kind == "column"
             || (node_kind == "identifier" && self.is_in_column_context(node, source))
         {
-            if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 let text = text.trim();
                 // 过滤关键字和操作符
                 if !text.is_empty()
@@ -447,7 +445,7 @@ impl SqlParser {
                 return true;
             }
             // 检查父节点文本是否包含 SELECT/WHERE/ORDER 等
-            if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = n.utf8_text(source.as_bytes()) {
                 let upper = text.to_uppercase();
                 if upper.contains("SELECT")
                     || upper.contains("WHERE")
@@ -496,7 +494,7 @@ impl SqlParser {
             // 检查是否在表名后（如 table.column）
             if kind == "member_expression" || kind == "dotted_name" {
                 // 检查是否有点号
-                if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+                if let Ok(text) = n.utf8_text(source.as_bytes()) {
                     if text.contains('.') {
                         return CompletionContext::TableColumn;
                     }
@@ -530,7 +528,7 @@ impl SqlParser {
             }
 
             // 检查父节点文本是否包含关键字
-            if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = n.utf8_text(source.as_bytes()) {
                 let upper = text.to_uppercase();
                 if upper.contains("FROM") {
                     return CompletionContext::FromClause;
@@ -565,7 +563,7 @@ impl SqlParser {
 
             // 查找 member_expression 或 dotted_name
             if kind == "member_expression" || kind == "dotted_name" {
-                if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
+                if let Ok(text) = n.utf8_text(source.as_bytes()) {
                     if let Some(dot_pos) = text.find('.') {
                         let table_name = text[..dot_pos].trim();
                         if !table_name.is_empty() && !Keywords::is_keyword(table_name) {
@@ -577,7 +575,7 @@ impl SqlParser {
 
             // 检查父节点
             if let Some(parent) = n.parent() {
-                if let Some(text) = parent.utf8_text(source.as_bytes()).ok() {
+                if let Ok(text) = parent.utf8_text(source.as_bytes()) {
                     if let Some(dot_pos) = text.find('.') {
                         let table_name = text[..dot_pos].trim();
                         if !table_name.is_empty() && !Keywords::is_keyword(table_name) {

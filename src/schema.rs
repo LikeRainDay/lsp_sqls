@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -11,8 +12,12 @@ impl SchemaId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, uuid::Error> {
+impl FromStr for SchemaId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self(Uuid::parse_str(s)?))
     }
 }

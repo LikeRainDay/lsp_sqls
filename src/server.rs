@@ -184,7 +184,6 @@ impl LanguageServer for SqlLspServer {
                 )),
                 ..Default::default()
             },
-            ..Default::default()
         })
     }
 

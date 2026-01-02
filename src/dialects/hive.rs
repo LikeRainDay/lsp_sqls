@@ -10,6 +10,12 @@ pub struct HiveDialect {
     parser: std::sync::Mutex<SqlParser>,
 }
 
+impl Default for HiveDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HiveDialect {
     pub fn new() -> Self {
         Self {
@@ -48,7 +54,7 @@ impl HiveDialect {
             documentation: table
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -84,7 +90,7 @@ impl HiveDialect {
             documentation: column
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),
