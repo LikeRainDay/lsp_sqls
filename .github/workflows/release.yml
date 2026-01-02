@@ -131,6 +131,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write  # 需要写入权限来创建/更新 release
 
     steps:
       - name: Checkout code
@@ -235,6 +237,7 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+          update: true  # 如果 release 已存在，更新它而不是失败
           files: |
             release-assets/*.tar.gz
             release-assets/*.sha256
