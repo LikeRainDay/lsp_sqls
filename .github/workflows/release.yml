@@ -24,13 +24,7 @@ jobs:
             asset_name: sql-lsp-linux-x86_64
             ext: ""
 
-          # Linux ARM64
-          - os: ubuntu-latest
-            arch: aarch64
-            target: aarch64-unknown-linux-gnu
-            artifact_name: sql-lsp-aarch64-unknown-linux-gnu
-            asset_name: sql-lsp-linux-arm64
-            ext: ""
+
 
           # macOS x86_64 (Intel)
           - os: macos-latest
@@ -118,9 +112,10 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          shasum -a 256 sql-lsp.exe > ../../../${{ matrix.artifact_name }}.sha256
+          $hash = (Get-FileHash sql-lsp.exe -Algorithm SHA256).Hash
+          $hash.ToLower() | Out-File -FilePath ../../../${{ matrix.artifact_name }}.sha256 -Encoding utf8
           cd ../../..
-        shell: bash
+        shell: pwsh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -43,6 +43,20 @@ install: build-release ## 安装到系统（需要 root 权限）
 	sudo cp $(RELEASE_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
 	@echo "$(COLOR_GREEN)✓ 安装完成$(COLOR_RESET)"
 
+install-pre-commit: ## 安装 Git pre-commit hook
+	@echo "$(COLOR_BOLD)$(COLOR_BLUE)安装 Git pre-commit hook...$(COLOR_RESET)"
+	@if [ ! -d .git ]; then \
+		echo "$(COLOR_YELLOW)⚠ 警告: 当前目录不是 Git 仓库，请先运行 'git init' 或确保在 Git 仓库中$(COLOR_RESET)"; \
+		exit 1; \
+	fi
+	@if [ ! -d .git/hooks ]; then \
+		mkdir -p .git/hooks; \
+	fi
+	@cp scripts/pre-commit .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "$(COLOR_GREEN)✓ Pre-commit hook 安装完成$(COLOR_RESET)"
+	@echo "$(COLOR_YELLOW)💡 现在每次 git commit 前都会自动运行代码检查$(COLOR_RESET)"
+
 ##@ 开发
 
 run: ## 运行 LSP 服务器（从 stdin/stdout）

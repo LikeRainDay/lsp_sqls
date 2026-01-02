@@ -99,7 +99,10 @@ impl DslParser {
         }
 
         // 如果 JSON 结构有效，检查 Elasticsearch DSL 特定的字段
-        if diagnostics.iter().all(|d| d.severity != Some(DiagnosticSeverity::ERROR)) {
+        if diagnostics
+            .iter()
+            .all(|d| d.severity != Some(DiagnosticSeverity::ERROR))
+        {
             self.validate_dsl_structure(tree.as_ref(), dsl, &mut diagnostics);
         }
 
@@ -107,6 +110,7 @@ impl DslParser {
     }
 
     /// 收集错误节点（参考 SQL 解析器的实现）
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_errors(&self, node: Node, source: &str, diagnostics: &mut Vec<Diagnostic>) {
         // 检查是否是错误节点
         if node.is_error() || node.is_missing() {
@@ -186,7 +190,10 @@ impl DslParser {
             if !has_query && !has_aggs && !has_sort {
                 diagnostics.push(Diagnostic {
                     range: Range {
-                        start: Position { line: 0, character: 0 },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
                         end: Position {
                             line: 0,
                             character: json.len() as u32,
@@ -196,7 +203,9 @@ impl DslParser {
                     code: Some(NumberOrString::String("DSL_HINT".to_string())),
                     code_description: None,
                     source: Some("elasticsearch-dsl".to_string()),
-                    message: "Elasticsearch DSL typically includes 'query', 'aggs', or 'sort' fields".to_string(),
+                    message:
+                        "Elasticsearch DSL typically includes 'query', 'aggs', or 'sort' fields"
+                            .to_string(),
                     related_information: None,
                     tags: None,
                     data: None,
@@ -210,21 +219,37 @@ impl DslParser {
 
     /// 验证 query 结构（如果存在）
     /// 遍历 AST，检查 query 对象的结构
-    fn validate_query_structure(
-        &self,
-        tree: &Tree,
-        json: &str,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
+    fn validate_query_structure(&self, tree: &Tree, json: &str, diagnostics: &mut Vec<Diagnostic>) {
         let root = tree.root_node();
 
         // Elasticsearch DSL 有效的查询类型
         let valid_query_types = vec![
-            "match", "match_all", "match_none", "match_phrase", "match_phrase_prefix",
-            "multi_match", "common", "query_string", "simple_query_string",
-            "term", "terms", "range", "exists", "prefix", "wildcard", "regexp",
-            "fuzzy", "type", "ids", "constant_score", "bool", "boosting",
-            "dis_max", "function_score", "script_score", "percolate",
+            "match",
+            "match_all",
+            "match_none",
+            "match_phrase",
+            "match_phrase_prefix",
+            "multi_match",
+            "common",
+            "query_string",
+            "simple_query_string",
+            "term",
+            "terms",
+            "range",
+            "exists",
+            "prefix",
+            "wildcard",
+            "regexp",
+            "fuzzy",
+            "type",
+            "ids",
+            "constant_score",
+            "bool",
+            "boosting",
+            "dis_max",
+            "function_score",
+            "script_score",
+            "percolate",
         ];
 
         // 查找 "query" 字段
@@ -236,7 +261,12 @@ impl DslParser {
             if query_node.kind() == "object" {
                 // 查找 query 对象中的第一个键（应该是查询类型）
                 let mut found_valid_query = false;
-                self.check_query_types_recursive(query_node, json, &valid_query_types, &mut found_valid_query);
+                self.check_query_types_recursive(
+                    query_node,
+                    json,
+                    &valid_query_types,
+                    &mut found_valid_query,
+                );
 
                 if !found_valid_query {
                     // 如果 query 对象存在但没有找到有效的查询类型，给出警告
@@ -272,7 +302,12 @@ impl DslParser {
     }
 
     /// 在 JSON 对象中查找指定字段
-    fn find_field_in_object<'a>(&self, object_node: Node<'a>, source: &str, field_name: &str) -> Option<Node<'a>> {
+    fn find_field_in_object<'a>(
+        &self,
+        object_node: Node<'a>,
+        source: &str,
+        field_name: &str,
+    ) -> Option<Node<'a>> {
         if object_node.kind() != "object" {
             return None;
         }
@@ -282,7 +317,7 @@ impl DslParser {
             if child.kind() == "pair" {
                 // pair 的第一个子节点是 key（string）
                 if let Some(key_node) = child.child(0) {
-                    if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                    if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                         let key = key_text.trim_matches('"').trim_matches('\'');
                         if key == field_name {
                             // 返回 pair 的第二个子节点（value）
@@ -296,6 +331,7 @@ impl DslParser {
     }
 
     /// 递归检查查询类型
+    #[allow(clippy::only_used_in_recursion)]
     fn check_query_types_recursive<'a>(
         &self,
         node: Node<'a>,
@@ -312,9 +348,9 @@ impl DslParser {
         // 如果是 pair，检查 key 是否是有效的查询类型
         if node_kind == "pair" {
             if let Some(key_node) = node.child(0) {
-                if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                     let key = key_text.trim_matches('"').trim_matches('\'');
-                    if valid_types.iter().any(|&t| t == key) {
+                    if valid_types.contains(&key) {
                         *found = true;
                         return;
                     }
@@ -342,6 +378,7 @@ impl DslParser {
     }
 
     /// 递归提取字段名
+    #[allow(clippy::only_used_in_recursion)]
     fn extract_fields_recursive<'a>(&self, node: Node<'a>, source: &str, fields: &mut Vec<String>) {
         let node_kind = node.kind();
 
@@ -350,7 +387,7 @@ impl DslParser {
             // pair 节点包含 key 和 value
             if let Some(key_node) = node.child(0) {
                 if key_node.kind() == "string" {
-                    if let Some(text) = key_node.utf8_text(source.as_bytes()).ok() {
+                    if let Ok(text) = key_node.utf8_text(source.as_bytes()) {
                         // 移除引号
                         let field_name = text.trim_matches('"').trim_matches('\'');
                         if !field_name.is_empty() && !fields.contains(&field_name.to_string()) {
@@ -411,7 +448,7 @@ impl DslParser {
             if kind == "pair" {
                 // 检查 key 是否是 "query", "aggs", "bool" 等
                 if let Some(key_node) = n.child(0) {
-                    if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                    if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                         let key = key_text.trim_matches('"').trim_matches('\'');
 
                         // 检查 value 节点
@@ -419,7 +456,9 @@ impl DslParser {
                             if value_node.kind() == "object" {
                                 match key {
                                     "query" => return DslCompletionContext::QueryObject,
-                                    "aggs" | "aggregations" => return DslCompletionContext::AggsObject,
+                                    "aggs" | "aggregations" => {
+                                        return DslCompletionContext::AggsObject
+                                    }
                                     "bool" => return DslCompletionContext::BoolQuery,
                                     "sort" => return DslCompletionContext::SortObject,
                                     _ => {}
@@ -436,11 +475,13 @@ impl DslParser {
                 if let Some(parent) = n.parent() {
                     if parent.kind() == "pair" {
                         if let Some(key_node) = parent.child(0) {
-                            if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                            if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                                 let key = key_text.trim_matches('"').trim_matches('\'');
                                 match key {
                                     "query" => return DslCompletionContext::QueryObject,
-                                    "aggs" | "aggregations" => return DslCompletionContext::AggsObject,
+                                    "aggs" | "aggregations" => {
+                                        return DslCompletionContext::AggsObject
+                                    }
                                     "bool" => return DslCompletionContext::BoolQuery,
                                     "sort" => return DslCompletionContext::SortObject,
                                     _ => {}
@@ -451,7 +492,9 @@ impl DslParser {
                 }
 
                 // 检查是否是根对象（顶级）
-                if n.parent().is_none() || (n.parent().is_some() && n.parent().unwrap().kind() == "document") {
+                if n.parent().is_none()
+                    || (n.parent().is_some() && n.parent().unwrap().kind() == "document")
+                {
                     return DslCompletionContext::TopLevel;
                 }
             }
@@ -471,7 +514,7 @@ impl DslParser {
                 if let Some(parent) = n.parent() {
                     if parent.kind() == "pair" {
                         if let Some(key_node) = parent.child(0) {
-                            if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                            if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                                 let key = key_text.trim_matches('"').trim_matches('\'');
                                 if key == field_name {
                                     return true;
@@ -492,7 +535,7 @@ impl DslParser {
         // 如果节点是 pair，提取 key
         if node.kind() == "pair" {
             if let Some(key_node) = node.child(0) {
-                if let Some(key_text) = key_node.utf8_text(source.as_bytes()).ok() {
+                if let Ok(key_text) = key_node.utf8_text(source.as_bytes()) {
                     let key = key_text.trim_matches('"').trim_matches('\'');
                     return Some(key.to_string());
                 }
@@ -501,7 +544,7 @@ impl DslParser {
 
         // 如果节点是 string（可能是 key），提取文本
         if node.kind() == "string" {
-            if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
+            if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 let key = text.trim_matches('"').trim_matches('\'');
                 // 检查是否是 key（在 pair 的第一个子节点）
                 if let Some(parent) = node.parent() {

@@ -61,28 +61,90 @@ impl Keywords {
     pub fn all() -> Vec<&'static str> {
         vec![
             // DML
-            "SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE",
+            "SELECT",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "REPLACE",
             // DDL
-            "CREATE", "DROP", "ALTER", "TRUNCATE", "RENAME",
+            "CREATE",
+            "DROP",
+            "ALTER",
+            "TRUNCATE",
+            "RENAME",
             // 表相关
-            "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA",
+            "TABLE",
+            "INDEX",
+            "VIEW",
+            "DATABASE",
+            "SCHEMA",
             // JOIN
-            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "ON",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "OUTER",
+            "CROSS",
+            "ON",
             // WHERE/HAVING
-            "WHERE", "HAVING", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL",
+            "WHERE",
+            "HAVING",
+            "AND",
+            "OR",
+            "NOT",
+            "IN",
+            "LIKE",
+            "BETWEEN",
+            "IS",
+            "NULL",
             // GROUP/ORDER
-            "GROUP", "BY", "ORDER", "ASC", "DESC",
+            "GROUP",
+            "BY",
+            "ORDER",
+            "ASC",
+            "DESC",
             // LIMIT/OFFSET
-            "LIMIT", "OFFSET", "FETCH",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
             // 聚合函数
-            "COUNT", "SUM", "AVG", "MAX", "MIN", "DISTINCT",
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MAX",
+            "MIN",
+            "DISTINCT",
             // 其他
-            "AS", "FROM", "INTO", "SET", "VALUES", "UNION", "ALL", "EXISTS",
-            "CASE", "WHEN", "THEN", "ELSE", "END",
-            "IF", "ELSEIF", "ELSE", "ENDIF",
-            "FOR", "WHILE", "LOOP", "END",
-            "DECLARE", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION",
-            "GRANT", "REVOKE", "PRIVILEGES",
+            "AS",
+            "FROM",
+            "INTO",
+            "SET",
+            "VALUES",
+            "UNION",
+            "ALL",
+            "EXISTS",
+            "CASE",
+            "WHEN",
+            "THEN",
+            "ELSE",
+            "END",
+            "IF",
+            "ELSEIF",
+            "ELSE",
+            "ENDIF",
+            "FOR",
+            "WHILE",
+            "LOOP",
+            "END",
+            "DECLARE",
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+            "TRANSACTION",
+            "GRANT",
+            "REVOKE",
+            "PRIVILEGES",
         ]
     }
 
@@ -94,26 +156,49 @@ impl Keywords {
     /// 获取 MySQL 特定关键字
     pub fn mysql() -> Vec<&'static str> {
         vec![
-            "AUTO_INCREMENT", "ENGINE", "CHARSET", "COLLATE",
-            "SHOW", "DESCRIBE", "EXPLAIN", "USE",
-            "LOCK", "UNLOCK", "TABLES",
+            "AUTO_INCREMENT",
+            "ENGINE",
+            "CHARSET",
+            "COLLATE",
+            "SHOW",
+            "DESCRIBE",
+            "EXPLAIN",
+            "USE",
+            "LOCK",
+            "UNLOCK",
+            "TABLES",
         ]
     }
 
     /// 获取 PostgreSQL 特定关键字
     pub fn postgres() -> Vec<&'static str> {
         vec![
-            "ILIKE", "SIMILAR", "TO", "ARRAY", "JSONB",
-            "RETURNING", "WITH", "RECURSIVE",
+            "ILIKE",
+            "SIMILAR",
+            "TO",
+            "ARRAY",
+            "JSONB",
+            "RETURNING",
+            "WITH",
+            "RECURSIVE",
         ]
     }
 
     /// 获取 Hive 特定关键字
     pub fn hive() -> Vec<&'static str> {
         vec![
-            "PARTITION", "PARTITIONED", "CLUSTERED", "SORTED",
-            "STORED", "AS", "TEXTFILE", "ORCFILE", "PARQUET",
-            "LATERAL", "VIEW", "EXPLODE",
+            "PARTITION",
+            "PARTITIONED",
+            "CLUSTERED",
+            "SORTED",
+            "STORED",
+            "AS",
+            "TEXTFILE",
+            "ORCFILE",
+            "PARQUET",
+            "LATERAL",
+            "VIEW",
+            "EXPLODE",
         ]
     }
 }
@@ -126,12 +211,9 @@ impl Operators {
     pub fn all() -> Vec<&'static str> {
         vec![
             // 算术操作符
-            "+", "-", "*", "/", "%",
-            // 比较操作符
-            "=", "!=", "<>", "<", ">", "<=", ">=", "<=>",
-            // 逻辑操作符
-            "AND", "OR", "NOT",
-            // 其他
+            "+", "-", "*", "/", "%", // 比较操作符
+            "=", "!=", "<>", "<", ">", "<=", ">=", "<=>", // 逻辑操作符
+            "AND", "OR", "NOT", // 其他
             "||", "&&", "::", "->", "->>", "#>", "#>>",
         ]
     }

@@ -3,12 +3,17 @@ use crate::parser::SqlParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
-    MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
 };
 
 pub struct HiveDialect {
     parser: std::sync::Mutex<SqlParser>,
+}
+
+impl Default for HiveDialect {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HiveDialect {
@@ -49,7 +54,7 @@ impl HiveDialect {
             documentation: table
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -85,7 +90,7 @@ impl HiveDialect {
             documentation: column
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),

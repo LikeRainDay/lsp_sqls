@@ -3,12 +3,17 @@ use crate::parser::SqlParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
-    MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
 };
 
 pub struct ClickHouseDialect {
     parser: std::sync::Mutex<SqlParser>,
+}
+
+impl Default for ClickHouseDialect {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClickHouseDialect {
@@ -46,7 +51,10 @@ impl ClickHouseDialect {
             label: table.name.clone(),
             kind: Some(CompletionItemKind::CLASS),
             detail: Some(format!("Table: {}", table.name)),
-            documentation: table.comment.clone().map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+            documentation: table
+                .comment
+                .clone()
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -64,7 +72,11 @@ impl ClickHouseDialect {
         }
     }
 
-    fn create_column_item(&self, column: &crate::schema::Column, table_name: Option<&str>) -> CompletionItem {
+    fn create_column_item(
+        &self,
+        column: &crate::schema::Column,
+        table_name: Option<&str>,
+    ) -> CompletionItem {
         let label = if let Some(table) = table_name {
             format!("{}.{}", table, column.name)
         } else {
@@ -75,7 +87,10 @@ impl ClickHouseDialect {
             label,
             kind: Some(CompletionItemKind::FIELD),
             detail: Some(format!("Column: {} ({})", column.name, column.data_type)),
-            documentation: column.comment.clone().map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+            documentation: column
+                .comment
+                .clone()
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),
@@ -127,19 +142,77 @@ impl Dialect for ClickHouseDialect {
 
         let mut items = Vec::new();
         let keywords = &[
-            "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "CREATE", "DROP", "ALTER",
-            "TABLE", "DATABASE", "ENGINE", "MergeTree", "ReplacingMergeTree", "SummingMergeTree",
-            "AggregatingMergeTree", "CollapsingMergeTree", "VersionedCollapsingMergeTree",
-            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON", "GROUP", "BY", "ORDER",
-            "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS", "AND", "OR", "NOT",
-            "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL", "CAST", "ARRAY", "TUPLE", "MAP",
-            "Nested", "AggregateFunction", "Array", "String", "Int8", "Int16", "Int32", "Int64",
-            "UInt8", "UInt16", "UInt32", "UInt64", "Float32", "Float64", "Date", "DateTime",
+            "SELECT",
+            "FROM",
+            "WHERE",
+            "INSERT",
+            "INTO",
+            "VALUES",
+            "CREATE",
+            "DROP",
+            "ALTER",
+            "TABLE",
+            "DATABASE",
+            "ENGINE",
+            "MergeTree",
+            "ReplacingMergeTree",
+            "SummingMergeTree",
+            "AggregatingMergeTree",
+            "CollapsingMergeTree",
+            "VersionedCollapsingMergeTree",
+            "JOIN",
+            "INNER",
+            "LEFT",
+            "RIGHT",
+            "FULL",
+            "OUTER",
+            "ON",
+            "GROUP",
+            "BY",
+            "ORDER",
+            "HAVING",
+            "LIMIT",
+            "OFFSET",
+            "UNION",
+            "ALL",
+            "DISTINCT",
+            "AS",
+            "AND",
+            "OR",
+            "NOT",
+            "IN",
+            "LIKE",
+            "ILIKE",
+            "BETWEEN",
+            "IS",
+            "NULL",
+            "CAST",
+            "ARRAY",
+            "TUPLE",
+            "MAP",
+            "Nested",
+            "AggregateFunction",
+            "Array",
+            "String",
+            "Int8",
+            "Int16",
+            "Int32",
+            "Int64",
+            "UInt8",
+            "UInt16",
+            "UInt32",
+            "UInt64",
+            "Float32",
+            "Float64",
+            "Date",
+            "DateTime",
         ];
 
         match context {
-            crate::parser::CompletionContext::FromClause | crate::parser::CompletionContext::JoinClause => {
-                let join_keywords: Vec<&str> = keywords.iter()
+            crate::parser::CompletionContext::FromClause
+            | crate::parser::CompletionContext::JoinClause => {
+                let join_keywords: Vec<&str> = keywords
+                    .iter()
                     .filter(|&&k| matches!(k, "JOIN" | "INNER" | "LEFT" | "RIGHT" | "OUTER" | "ON"))
                     .copied()
                     .collect();
@@ -153,7 +226,8 @@ impl Dialect for ClickHouseDialect {
                 }
             }
             crate::parser::CompletionContext::SelectClause => {
-                let select_keywords: Vec<&str> = keywords.iter()
+                let select_keywords: Vec<&str> = keywords
+                    .iter()
                     .filter(|&&k| matches!(k, "SELECT" | "DISTINCT" | "AS" | "FROM"))
                     .copied()
                     .collect();
@@ -163,14 +237,31 @@ impl Dialect for ClickHouseDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
             crate::parser::CompletionContext::WhereClause => {
-                let where_keywords: Vec<&str> = keywords.iter()
-                    .filter(|&&k| matches!(k, "AND" | "OR" | "NOT" | "IN" | "LIKE" | "ILIKE" | "BETWEEN" | "IS" | "NULL"))
+                let where_keywords: Vec<&str> = keywords
+                    .iter()
+                    .filter(|&&k| {
+                        matches!(
+                            k,
+                            "AND"
+                                | "OR"
+                                | "NOT"
+                                | "IN"
+                                | "LIKE"
+                                | "ILIKE"
+                                | "BETWEEN"
+                                | "IS"
+                                | "NULL"
+                        )
+                    })
                     .copied()
                     .collect();
                 for keyword in where_keywords {
@@ -202,13 +293,18 @@ impl Dialect for ClickHouseDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
-            crate::parser::CompletionContext::OrderByClause | crate::parser::CompletionContext::GroupByClause => {
-                let keywords_list: Vec<&str> = keywords.iter()
+            crate::parser::CompletionContext::OrderByClause
+            | crate::parser::CompletionContext::GroupByClause => {
+                let keywords_list: Vec<&str> = keywords
+                    .iter()
                     .filter(|&&k| matches!(k, "ASC" | "DESC" | "BY"))
                     .copied()
                     .collect();
@@ -218,14 +314,31 @@ impl Dialect for ClickHouseDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
             crate::parser::CompletionContext::HavingClause => {
-                let having_keywords: Vec<&str> = keywords.iter()
-                    .filter(|&&k| matches!(k, "AND" | "OR" | "NOT" | "IN" | "LIKE" | "ILIKE" | "BETWEEN" | "IS" | "NULL"))
+                let having_keywords: Vec<&str> = keywords
+                    .iter()
+                    .filter(|&&k| {
+                        matches!(
+                            k,
+                            "AND"
+                                | "OR"
+                                | "NOT"
+                                | "IN"
+                                | "LIKE"
+                                | "ILIKE"
+                                | "BETWEEN"
+                                | "IS"
+                                | "NULL"
+                        )
+                    })
                     .copied()
                     .collect();
                 for keyword in having_keywords {
@@ -238,7 +351,10 @@ impl Dialect for ClickHouseDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
@@ -248,7 +364,10 @@ impl Dialect for ClickHouseDialect {
                     if let Some(node) = parser.get_node_at_position(tree, position) {
                         if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
                             if let Some(schema) = schema {
-                                if let Some(table) = schema.tables.iter().find(|t| t.name == table_name || format!("{}.{}", schema.database, t.name) == table_name) {
+                                if let Some(table) = schema.tables.iter().find(|t| {
+                                    t.name == table_name
+                                        || format!("{}.{}", schema.database, t.name) == table_name
+                                }) {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));
                                     }

@@ -43,6 +43,7 @@ async fn test_postgres_dialect() {
     let dialect = PostgresDialect::new();
     assert_eq!(dialect.name(), "postgres");
 
+    // 在 SELECT 子句中，应该返回 SELECT 相关的关键字
     let items = dialect
         .completion(
             "SELECT ",
@@ -54,7 +55,23 @@ async fn test_postgres_dialect() {
         )
         .await;
     assert!(!items.is_empty());
-    assert!(items.iter().any(|item| item.label == "ILIKE"));
+    // SELECT 子句中应该包含 SELECT 相关关键字
+    assert!(items
+        .iter()
+        .any(|item| item.label == "FROM" || item.label == "DISTINCT"));
+
+    // 在默认上下文中，应该包含 ILIKE（WHERE 子句相关）
+    let items_default = dialect
+        .completion(
+            "",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        )
+        .await;
+    assert!(items_default.iter().any(|item| item.label == "ILIKE"));
 }
 
 #[tokio::test]
@@ -62,6 +79,7 @@ async fn test_hive_dialect() {
     let dialect = HiveDialect::new();
     assert_eq!(dialect.name(), "hive");
 
+    // 在 SELECT 子句中，应该返回 SELECT 相关的关键字
     let items = dialect
         .completion(
             "SELECT ",
@@ -73,7 +91,23 @@ async fn test_hive_dialect() {
         )
         .await;
     assert!(!items.is_empty());
-    assert!(items.iter().any(|item| item.label == "PARTITION"));
+    // SELECT 子句中应该包含 SELECT 相关关键字
+    assert!(items
+        .iter()
+        .any(|item| item.label == "FROM" || item.label == "DISTINCT"));
+
+    // 在默认上下文中，应该包含 PARTITION（CREATE TABLE 相关）
+    let items_default = dialect
+        .completion(
+            "",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        )
+        .await;
+    assert!(items_default.iter().any(|item| item.label == "PARTITION"));
 }
 
 #[tokio::test]
@@ -122,6 +156,7 @@ async fn test_clickhouse_dialect() {
     let dialect = ClickHouseDialect::new();
     assert_eq!(dialect.name(), "clickhouse");
 
+    // 在 SELECT 子句中，应该返回 SELECT 相关的关键字
     let items = dialect
         .completion(
             "SELECT ",
@@ -133,7 +168,23 @@ async fn test_clickhouse_dialect() {
         )
         .await;
     assert!(!items.is_empty());
-    assert!(items.iter().any(|item| item.label == "MergeTree"));
+    // SELECT 子句中应该包含 SELECT 相关关键字
+    assert!(items
+        .iter()
+        .any(|item| item.label == "FROM" || item.label == "DISTINCT"));
+
+    // 在默认上下文中，应该包含 MergeTree（CREATE TABLE 相关）
+    let items_default = dialect
+        .completion(
+            "",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        )
+        .await;
+    assert!(items_default.iter().any(|item| item.label == "MergeTree"));
 }
 
 #[tokio::test]
@@ -197,8 +248,14 @@ async fn test_dialect_with_schema() {
     // 应该包含表名和列名（在 SELECT 子句中，应该包含列名）
     // 注意：由于现在使用 AST 上下文分析，在 SELECT 后可能只返回列名和 SELECT 相关关键字
     // 检查是否有列名补全
-    assert!(items.iter().any(|item| item.label == "id" || item.label.contains("id")));
-    assert!(items.iter().any(|item| item.label == "name" || item.label.contains("name")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "id" || item.label.contains("id")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "name" || item.label.contains("name")));
     // 检查是否有表名（可能在 Default 上下文中）
-    assert!(items.iter().any(|item| item.label == "users" || item.label.contains("users")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "users" || item.label.contains("users")));
 }

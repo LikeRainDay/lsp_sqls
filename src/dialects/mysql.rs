@@ -10,6 +10,12 @@ pub struct MysqlDialect {
     parser: std::sync::Mutex<SqlParser>,
 }
 
+impl Default for MysqlDialect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MysqlDialect {
     pub fn new() -> Self {
         Self {
@@ -50,7 +56,7 @@ impl MysqlDialect {
             documentation: table
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", table.name)),
@@ -69,7 +75,11 @@ impl MysqlDialect {
     }
 
     /// 创建列补全项
-    fn create_column_item(&self, column: &crate::schema::Column, table_name: Option<&str>) -> CompletionItem {
+    fn create_column_item(
+        &self,
+        column: &crate::schema::Column,
+        table_name: Option<&str>,
+    ) -> CompletionItem {
         let label = if let Some(table) = table_name {
             format!("{}.{}", table, column.name)
         } else {
@@ -89,7 +99,7 @@ impl MysqlDialect {
             documentation: column
                 .comment
                 .clone()
-                .map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+                .map(tower_lsp::lsp_types::Documentation::String),
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", column.name)),
@@ -145,7 +155,8 @@ impl Dialect for MysqlDialect {
 
         // 根据上下文提供不同的补全
         match context {
-            crate::parser::CompletionContext::FromClause | crate::parser::CompletionContext::JoinClause => {
+            crate::parser::CompletionContext::FromClause
+            | crate::parser::CompletionContext::JoinClause => {
                 // FROM/JOIN 子句：只补全表名和 JOIN 相关关键字
                 let join_keywords = vec!["JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON"];
                 for keyword in join_keywords {
@@ -179,7 +190,9 @@ impl Dialect for MysqlDialect {
 
             crate::parser::CompletionContext::WhereClause => {
                 // WHERE 子句：补全列名、操作符、关键字
-                let where_keywords = vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL", "TRUE", "FALSE"];
+                let where_keywords = vec![
+                    "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL", "TRUE", "FALSE",
+                ];
                 for keyword in where_keywords {
                     items.push(self.create_keyword_item(keyword));
                 }
@@ -219,7 +232,8 @@ impl Dialect for MysqlDialect {
                 }
             }
 
-            crate::parser::CompletionContext::OrderByClause | crate::parser::CompletionContext::GroupByClause => {
+            crate::parser::CompletionContext::OrderByClause
+            | crate::parser::CompletionContext::GroupByClause => {
                 // ORDER BY / GROUP BY：补全列名和关键字
                 let keywords = vec!["ASC", "DESC", "BY"];
                 for keyword in keywords {
@@ -238,7 +252,8 @@ impl Dialect for MysqlDialect {
 
             crate::parser::CompletionContext::HavingClause => {
                 // HAVING 子句：类似 WHERE，补全列名、操作符、关键字
-                let having_keywords = vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL"];
+                let having_keywords =
+                    vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL"];
                 for keyword in having_keywords {
                     items.push(self.create_keyword_item(keyword));
                 }
@@ -265,7 +280,9 @@ impl Dialect for MysqlDialect {
                     if let Some(node) = parser.get_node_at_position(tree, position) {
                         if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
                             if let Some(schema) = schema {
-                                if let Some(table) = schema.tables.iter().find(|t| t.name == table_name) {
+                                if let Some(table) =
+                                    schema.tables.iter().find(|t| t.name == table_name)
+                                {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));
                                     }
@@ -279,11 +296,11 @@ impl Dialect for MysqlDialect {
             crate::parser::CompletionContext::Default => {
                 // 默认：返回所有关键字
                 let keywords = vec![
-                    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
-                    "TABLE", "INDEX", "DATABASE", "SHOW", "DESCRIBE", "EXPLAIN", "JOIN", "INNER", "LEFT",
-                    "RIGHT", "OUTER", "ON", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION",
-                    "ALL", "DISTINCT", "AS", "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL",
-                    "TRUE", "FALSE",
+                    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+                    "ALTER", "TABLE", "INDEX", "DATABASE", "SHOW", "DESCRIBE", "EXPLAIN", "JOIN",
+                    "INNER", "LEFT", "RIGHT", "OUTER", "ON", "GROUP", "BY", "ORDER", "HAVING",
+                    "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS", "AND", "OR", "NOT", "IN",
+                    "LIKE", "BETWEEN", "IS", "NULL", "TRUE", "FALSE",
                 ];
 
                 for keyword in keywords {
@@ -346,7 +363,8 @@ impl Dialect for MysqlDialect {
                 // 过滤关键字、操作符、分隔符
                 if crate::token::Keywords::is_keyword(&node_text)
                     || crate::token::Operators::is_operator(&node_text)
-                    || crate::token::Delimiters::is_delimiter(&node_text) {
+                    || crate::token::Delimiters::is_delimiter(&node_text)
+                {
                     return None;
                 }
 
@@ -382,43 +400,41 @@ impl Dialect for MysqlDialect {
                 if is_column {
                     if let Some(schema) = schema {
                         // 检查是否是 table.column 格式
-                        let (table_name, column_name) = if let Some(table_name) =
-                            parser.get_table_name_for_column(node, sql)
-                        {
-                            (Some(table_name), node_text.clone())
-                        } else {
-                            // 查找列所属的表
-                            let tables = parser.extract_tables(tree, sql);
-                            let table_name = tables.first().cloned();
-                            (table_name, node_text.clone())
-                        };
+                        let (table_name, column_name) =
+                            if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
+                                (Some(table_name), node_text.clone())
+                            } else {
+                                // 查找列所属的表
+                                let tables = parser.extract_tables(tree, sql);
+                                let table_name = tables.first().cloned();
+                                (table_name, node_text.clone())
+                            };
 
                         // 在 Schema 中查找列
                         for table in &schema.tables {
                             if let Some(ref tname) = table_name {
-                                if table.name == *tname {
-                                    if table.columns.iter().any(|c| c.name == column_name) {
-                                        // 返回当前文档中列名第一次出现的位置
-                                        return Some(Location {
-                                            uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                                .unwrap_or_else(|_| {
-                                                    tower_lsp::lsp_types::Url::parse("file:///").unwrap()
-                                                }),
-                                            range: parser.node_range(node),
-                                        });
-                                    }
-                                }
-                            } else {
-                                // 在所有表中查找列
-                                if table.columns.iter().any(|c| c.name == column_name) {
+                                if table.name == *tname
+                                    && table.columns.iter().any(|c| c.name == column_name)
+                                {
+                                    // 返回当前文档中列名第一次出现的位置
                                     return Some(Location {
                                         uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
                                             .unwrap_or_else(|_| {
-                                                tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                                tower_lsp::lsp_types::Url::parse("file:///")
+                                                    .unwrap()
                                             }),
                                         range: parser.node_range(node),
                                     });
                                 }
+                            } else if table.columns.iter().any(|c| c.name == column_name) {
+                                // 在所有表中查找列
+                                return Some(Location {
+                                    uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
+                                        .unwrap_or_else(|_| {
+                                            tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                        }),
+                                    range: parser.node_range(node),
+                                });
                             }
                         }
                     }
@@ -449,7 +465,8 @@ impl Dialect for MysqlDialect {
                 // 过滤关键字、操作符、分隔符
                 if crate::token::Keywords::is_keyword(&identifier)
                     || crate::token::Operators::is_operator(&identifier)
-                    || crate::token::Delimiters::is_delimiter(&identifier) {
+                    || crate::token::Delimiters::is_delimiter(&identifier)
+                {
                     return locations;
                 }
 
@@ -472,23 +489,23 @@ impl Dialect for MysqlDialect {
 
                     for token in tokens {
                         // 匹配标识符（忽略大小写）
-                        if token.text.eq_ignore_ascii_case(&identifier) {
+                        if token.text.eq_ignore_ascii_case(&identifier)
+                            && !crate::token::Keywords::is_keyword(&token.text)
+                            && !crate::token::Operators::is_operator(&token.text)
+                            && !crate::token::Delimiters::is_delimiter(&token.text)
+                        {
                             // 检查 token 类型，确保是标识符而不是关键字
-                            if !crate::token::Keywords::is_keyword(&token.text)
-                                && !crate::token::Operators::is_operator(&token.text)
-                                && !crate::token::Delimiters::is_delimiter(&token.text) {
-                                locations.push(Location {
-                                    uri: current_uri.clone(),
-                                    range: tower_lsp::lsp_types::Range {
-                                        start: token.position,
-                                        end: tower_lsp::lsp_types::Position {
-                                            line: token.position.line,
-                                            character: token.position.character
-                                                + token.text.len() as u32,
-                                        },
+                            locations.push(Location {
+                                uri: current_uri.clone(),
+                                range: tower_lsp::lsp_types::Range {
+                                    start: token.position,
+                                    end: tower_lsp::lsp_types::Position {
+                                        line: token.position.line,
+                                        character: token.position.character
+                                            + token.text.len() as u32,
                                     },
-                                });
-                            }
+                                },
+                            });
                         }
                     }
                 }

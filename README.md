@@ -780,6 +780,48 @@ make clippy
 make pre-commit
 ```
 
+### Git Pre-commit Hook
+
+项目提供了 Git pre-commit hook，可以在每次提交前自动运行代码检查，确保代码质量。
+
+#### 安装 Pre-commit Hook
+
+```bash
+# 安装 pre-commit hook（需要先初始化 Git 仓库）
+make install-pre-commit
+```
+
+或者手动安装：
+
+```bash
+# 确保 .git/hooks 目录存在
+mkdir -p .git/hooks
+
+# 复制并设置执行权限
+cp scripts/pre-commit .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+
+#### Pre-commit Hook 功能
+
+安装后，每次执行 `git commit` 时，hook 会自动运行：
+
+1. **代码格式检查** (`cargo fmt --check`)
+2. **Clippy 检查** (`cargo clippy -- -D warnings`)
+
+如果检查失败，提交将被阻止，你需要修复问题后重新提交。
+
+#### 跳过 Pre-commit Hook（不推荐）
+
+如果确实需要跳过检查（例如紧急修复），可以使用：
+
+```bash
+git commit --no-verify -m "紧急修复"
+```
+
+**注意**：跳过检查可能导致代码质量问题，请谨慎使用。
+```
+
 ## 📊 性能
 
 ### 基准测试
