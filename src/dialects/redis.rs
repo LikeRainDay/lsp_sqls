@@ -66,11 +66,39 @@ impl Dialect for RedisDialect {
 
         // Redis 基础命令
         let basic_commands = vec![
-            "SET", "GET", "DEL", "EXISTS", "EXPIRE", "TTL", "PERSIST",
-            "HSET", "HGET", "HGETALL", "HDEL", "HKEYS", "HVALS", "HINCRBY",
-            "LPUSH", "RPUSH", "LPOP", "RPOP", "LLEN", "LRANGE", "LINDEX",
-            "SADD", "SMEMBERS", "SREM", "SCARD", "SISMEMBER", "SINTER",
-            "ZADD", "ZRANGE", "ZREM", "ZCARD", "ZSCORE", "ZRANK",
+            "SET",
+            "GET",
+            "DEL",
+            "EXISTS",
+            "EXPIRE",
+            "TTL",
+            "PERSIST",
+            "HSET",
+            "HGET",
+            "HGETALL",
+            "HDEL",
+            "HKEYS",
+            "HVALS",
+            "HINCRBY",
+            "LPUSH",
+            "RPUSH",
+            "LPOP",
+            "RPOP",
+            "LLEN",
+            "LRANGE",
+            "LINDEX",
+            "SADD",
+            "SMEMBERS",
+            "SREM",
+            "SCARD",
+            "SISMEMBER",
+            "SINTER",
+            "ZADD",
+            "ZRANGE",
+            "ZREM",
+            "ZCARD",
+            "ZSCORE",
+            "ZRANK",
         ];
 
         // RediSearch 命令
@@ -157,20 +185,20 @@ impl Dialect for RedisDialect {
         // RediSearch 查询语法关键字和操作符
         // 注意：Redis 是命令式语言，这些是 RediSearch 查询字符串中的操作符
         let keywords = vec![
-            "@",      // 字段前缀，如 @field:value
-            "AND",    // 逻辑与
-            "OR",     // 逻辑或
-            "NOT",    // 逻辑非
-            "-",      // 排除操作符
-            "+",      // 必须包含
-            "~",      // 模糊匹配
-            "|",      // 或操作符（在聚合中使用）
-            "(",      // 分组开始
-            ")",      // 分组结束
-            "{",      // 范围查询开始
-            "}",      // 范围查询结束
-            "[",      // 范围查询开始（包含）
-            "]",      // 范围查询结束（包含）
+            "@",   // 字段前缀，如 @field:value
+            "AND", // 逻辑与
+            "OR",  // 逻辑或
+            "NOT", // 逻辑非
+            "-",   // 排除操作符
+            "+",   // 必须包含
+            "~",   // 模糊匹配
+            "|",   // 或操作符（在聚合中使用）
+            "(",   // 分组开始
+            ")",   // 分组结束
+            "{",   // 范围查询开始
+            "}",   // 范围查询结束
+            "[",   // 范围查询开始（包含）
+            "]",   // 范围查询结束（包含）
         ];
 
         for keyword in keywords {

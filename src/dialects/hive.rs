@@ -3,8 +3,7 @@ use crate::parser::SqlParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
-    MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
 };
 
 pub struct HiveDialect {

@@ -177,10 +177,7 @@ impl SqlParser {
                 code_description: None,
                 source: Some("tree-sitter-sql".to_string()),
                 message: if node.is_error() {
-                    format!(
-                        "Syntax error: {}",
-                        node_text
-                    )
+                    format!("Syntax error: {}", node_text)
                 } else {
                     "Missing syntax element".to_string()
                 },
@@ -206,7 +203,8 @@ impl SqlParser {
                 || kind == "select_expression_list"
                 || kind == "select_statement"
                 || kind == "select"
-                || kind == "query" {
+                || kind == "query"
+            {
                 return true;
             }
             if let Some(text) = n.utf8_text(source.as_bytes()).ok() {
@@ -245,10 +243,16 @@ impl SqlParser {
         if let Some(parent) = node.parent() {
             let parent_kind = parent.kind();
             // 如果父节点是合理的容器节点，可能是误报
-            matches!(parent_kind,
-                "select_list" | "expression" | "where_clause" |
-                "order_by_clause" | "group_by_clause" | "having_clause" |
-                "table_reference" | "column_reference"
+            matches!(
+                parent_kind,
+                "select_list"
+                    | "expression"
+                    | "where_clause"
+                    | "order_by_clause"
+                    | "group_by_clause"
+                    | "having_clause"
+                    | "table_reference"
+                    | "column_reference"
             )
         } else {
             false
@@ -339,7 +343,8 @@ impl SqlParser {
             || node_kind == "table_reference"
             || node_kind == "table_identifier"
             || node_kind == "table"
-            || (node_kind == "identifier" && self.is_in_from_context(node, source)) {
+            || (node_kind == "identifier" && self.is_in_from_context(node, source))
+        {
             if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
                 let text = text.trim();
                 // 过滤关键字和操作符
@@ -347,7 +352,8 @@ impl SqlParser {
                     && !Keywords::is_keyword(text)
                     && !Operators::is_operator(text)
                     && !Delimiters::is_delimiter(text)
-                    && !tables.contains(&text.to_string()) {
+                    && !tables.contains(&text.to_string())
+                {
                     tables.push(text.to_string());
                 }
             }
@@ -368,7 +374,8 @@ impl SqlParser {
             if kind == "from_clause"
                 || kind == "join_clause"
                 || kind == "table_reference"
-                || kind == "table_expression" {
+                || kind == "table_expression"
+            {
                 return true;
             }
             // 检查父节点文本是否包含 FROM/JOIN
@@ -400,7 +407,8 @@ impl SqlParser {
             || node_kind == "column_reference"
             || node_kind == "column_identifier"
             || node_kind == "column"
-            || (node_kind == "identifier" && self.is_in_column_context(node, source)) {
+            || (node_kind == "identifier" && self.is_in_column_context(node, source))
+        {
             if let Some(text) = node.utf8_text(source.as_bytes()).ok() {
                 let text = text.trim();
                 // 过滤关键字和操作符
@@ -409,7 +417,8 @@ impl SqlParser {
                     && !Operators::is_operator(text)
                     && !Delimiters::is_delimiter(text)
                     && text != "*"  // 排除通配符
-                    && !columns.contains(&text.to_string()) {
+                    && !columns.contains(&text.to_string())
+                {
                     columns.push(text.to_string());
                 }
             }
@@ -433,7 +442,8 @@ impl SqlParser {
                 || kind == "order_by_clause"
                 || kind == "group_by_clause"
                 || kind == "having_clause"
-                || kind == "column_reference" {
+                || kind == "column_reference"
+            {
                 return true;
             }
             // 检查父节点文本是否包含 SELECT/WHERE/ORDER 等
@@ -443,7 +453,8 @@ impl SqlParser {
                     || upper.contains("WHERE")
                     || upper.contains("ORDER")
                     || upper.contains("GROUP")
-                    || upper.contains("HAVING") {
+                    || upper.contains("HAVING")
+                {
                     return true;
                 }
             }

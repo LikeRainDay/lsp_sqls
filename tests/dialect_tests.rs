@@ -197,8 +197,14 @@ async fn test_dialect_with_schema() {
     // 应该包含表名和列名（在 SELECT 子句中，应该包含列名）
     // 注意：由于现在使用 AST 上下文分析，在 SELECT 后可能只返回列名和 SELECT 相关关键字
     // 检查是否有列名补全
-    assert!(items.iter().any(|item| item.label == "id" || item.label.contains("id")));
-    assert!(items.iter().any(|item| item.label == "name" || item.label.contains("name")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "id" || item.label.contains("id")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "name" || item.label.contains("name")));
     // 检查是否有表名（可能在 Default 上下文中）
-    assert!(items.iter().any(|item| item.label == "users" || item.label.contains("users")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "users" || item.label.contains("users")));
 }

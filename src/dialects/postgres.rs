@@ -3,8 +3,7 @@ use crate::parser::SqlParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
-    MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
 };
 
 pub struct PostgresDialect {
@@ -71,7 +70,11 @@ impl PostgresDialect {
     }
 
     /// 创建列补全项
-    fn create_column_item(&self, column: &crate::schema::Column, table_name: Option<&str>) -> CompletionItem {
+    fn create_column_item(
+        &self,
+        column: &crate::schema::Column,
+        table_name: Option<&str>,
+    ) -> CompletionItem {
         let label = if let Some(table) = table_name {
             format!("{}.{}", table, column.name)
         } else {
@@ -147,7 +150,8 @@ impl Dialect for PostgresDialect {
 
         // 根据上下文提供不同的补全
         match context {
-            crate::parser::CompletionContext::FromClause | crate::parser::CompletionContext::JoinClause => {
+            crate::parser::CompletionContext::FromClause
+            | crate::parser::CompletionContext::JoinClause => {
                 let join_keywords = vec!["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON"];
                 for keyword in join_keywords {
                     items.push(self.create_keyword_item(keyword));
@@ -169,14 +173,20 @@ impl Dialect for PostgresDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
 
             crate::parser::CompletionContext::WhereClause => {
-                let where_keywords = vec!["AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS", "NULL", "TRUE", "FALSE"];
+                let where_keywords = vec![
+                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS", "NULL",
+                    "TRUE", "FALSE",
+                ];
                 for keyword in where_keywords {
                     items.push(self.create_keyword_item(keyword));
                 }
@@ -208,13 +218,17 @@ impl Dialect for PostgresDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
 
-            crate::parser::CompletionContext::OrderByClause | crate::parser::CompletionContext::GroupByClause => {
+            crate::parser::CompletionContext::OrderByClause
+            | crate::parser::CompletionContext::GroupByClause => {
                 let keywords = vec!["ASC", "DESC", "BY"];
                 for keyword in keywords {
                     items.push(self.create_keyword_item(keyword));
@@ -223,14 +237,19 @@ impl Dialect for PostgresDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
             }
 
             crate::parser::CompletionContext::HavingClause => {
-                let having_keywords = vec!["AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL"];
+                let having_keywords = vec![
+                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
+                ];
                 for keyword in having_keywords {
                     items.push(self.create_keyword_item(keyword));
                 }
@@ -243,7 +262,10 @@ impl Dialect for PostgresDialect {
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
                         }
                     }
                 }
@@ -254,7 +276,10 @@ impl Dialect for PostgresDialect {
                     if let Some(node) = parser.get_node_at_position(tree, position) {
                         if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
                             if let Some(schema) = schema {
-                                if let Some(table) = schema.tables.iter().find(|t| t.name == table_name || format!("{}.{}", schema.database, t.name) == table_name) {
+                                if let Some(table) = schema.tables.iter().find(|t| {
+                                    t.name == table_name
+                                        || format!("{}.{}", schema.database, t.name) == table_name
+                                }) {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));
                                     }
@@ -267,12 +292,56 @@ impl Dialect for PostgresDialect {
 
             crate::parser::CompletionContext::Default => {
                 let keywords = vec![
-                    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
-                    "TABLE", "INDEX", "DATABASE", "SCHEMA", "VIEW", "TRIGGER", "FUNCTION", "PROCEDURE",
-                    "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON", "GROUP", "BY", "ORDER",
-                    "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS", "AND", "OR", "NOT",
-                    "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS", "NULL", "TRUE", "FALSE",
-                    "CAST", "::", "ARRAY", "JSONB",
+                    "SELECT",
+                    "FROM",
+                    "WHERE",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "CREATE",
+                    "DROP",
+                    "ALTER",
+                    "TABLE",
+                    "INDEX",
+                    "DATABASE",
+                    "SCHEMA",
+                    "VIEW",
+                    "TRIGGER",
+                    "FUNCTION",
+                    "PROCEDURE",
+                    "JOIN",
+                    "INNER",
+                    "LEFT",
+                    "RIGHT",
+                    "FULL",
+                    "OUTER",
+                    "ON",
+                    "GROUP",
+                    "BY",
+                    "ORDER",
+                    "HAVING",
+                    "LIMIT",
+                    "OFFSET",
+                    "UNION",
+                    "ALL",
+                    "DISTINCT",
+                    "AS",
+                    "AND",
+                    "OR",
+                    "NOT",
+                    "IN",
+                    "LIKE",
+                    "ILIKE",
+                    "SIMILAR",
+                    "BETWEEN",
+                    "IS",
+                    "NULL",
+                    "TRUE",
+                    "FALSE",
+                    "CAST",
+                    "::",
+                    "ARRAY",
+                    "JSONB",
                 ];
 
                 for keyword in keywords {
@@ -332,7 +401,8 @@ impl Dialect for PostgresDialect {
 
                 if crate::token::Keywords::is_keyword(&node_text)
                     || crate::token::Operators::is_operator(&node_text)
-                    || crate::token::Delimiters::is_delimiter(&node_text) {
+                    || crate::token::Delimiters::is_delimiter(&node_text)
+                {
                     return None;
                 }
 
@@ -355,10 +425,15 @@ impl Dialect for PostgresDialect {
                             &node_text
                         };
 
-                        if schema.tables.iter().any(|t| t.name == table_name || format!("{}.{}", schema.database, t.name) == node_text) {
+                        if schema.tables.iter().any(|t| {
+                            t.name == table_name
+                                || format!("{}.{}", schema.database, t.name) == node_text
+                        }) {
                             return Some(Location {
                                 uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                    .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap()),
+                                    .unwrap_or_else(|_| {
+                                        tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                    }),
                                 range: parser.node_range(node),
                             });
                         }
@@ -367,12 +442,13 @@ impl Dialect for PostgresDialect {
 
                 if is_column {
                     if let Some(schema) = schema {
-                        let (table_name, column_name) = if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
-                            (Some(table_name), node_text.clone())
-                        } else {
-                            let tables = parser.extract_tables(tree, sql);
-                            (tables.first().cloned(), node_text.clone())
-                        };
+                        let (table_name, column_name) =
+                            if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
+                                (Some(table_name), node_text.clone())
+                            } else {
+                                let tables = parser.extract_tables(tree, sql);
+                                (tables.first().cloned(), node_text.clone())
+                            };
 
                         for table in &schema.tables {
                             let full_table_name = format!("{}.{}", schema.database, table.name);
@@ -380,8 +456,13 @@ impl Dialect for PostgresDialect {
                                 if table.name == *tname || full_table_name == *tname {
                                     if table.columns.iter().any(|c| c.name == column_name) {
                                         return Some(Location {
-                                            uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                                .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap()),
+                                            uri: tower_lsp::lsp_types::Url::parse(
+                                                "file:///schema.sql",
+                                            )
+                                            .unwrap_or_else(|_| {
+                                                tower_lsp::lsp_types::Url::parse("file:///")
+                                                    .unwrap()
+                                            }),
                                             range: parser.node_range(node),
                                         });
                                     }
@@ -390,7 +471,10 @@ impl Dialect for PostgresDialect {
                                 if table.columns.iter().any(|c| c.name == column_name) {
                                     return Some(Location {
                                         uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                            .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap()),
+                                            .unwrap_or_else(|_| {
+                                                tower_lsp::lsp_types::Url::parse("file:///")
+                                                    .unwrap()
+                                            }),
                                         range: parser.node_range(node),
                                     });
                                 }
@@ -422,7 +506,8 @@ impl Dialect for PostgresDialect {
 
                 if crate::token::Keywords::is_keyword(&identifier)
                     || crate::token::Operators::is_operator(&identifier)
-                    || crate::token::Delimiters::is_delimiter(&identifier) {
+                    || crate::token::Delimiters::is_delimiter(&identifier)
+                {
                     return locations;
                 }
 
@@ -445,14 +530,16 @@ impl Dialect for PostgresDialect {
                         if token.text.eq_ignore_ascii_case(&identifier) {
                             if !crate::token::Keywords::is_keyword(&token.text)
                                 && !crate::token::Operators::is_operator(&token.text)
-                                && !crate::token::Delimiters::is_delimiter(&token.text) {
+                                && !crate::token::Delimiters::is_delimiter(&token.text)
+                            {
                                 locations.push(Location {
                                     uri: current_uri.clone(),
                                     range: tower_lsp::lsp_types::Range {
                                         start: token.position,
                                         end: tower_lsp::lsp_types::Position {
                                             line: token.position.line,
-                                            character: token.position.character + token.text.len() as u32,
+                                            character: token.position.character
+                                                + token.text.len() as u32,
                                         },
                                     },
                                 });

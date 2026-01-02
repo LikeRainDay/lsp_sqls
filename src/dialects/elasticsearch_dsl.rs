@@ -3,8 +3,7 @@ use crate::parser::dsl::DslParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
-    MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
 };
 
 /// Elasticsearch DSL (Domain Specific Language) 方言
@@ -162,10 +161,24 @@ impl Dialect for ElasticsearchDslDialect {
             crate::parser::DslCompletionContext::TopLevel => {
                 // 顶级字段
                 let top_level_fields = vec![
-                    "query", "aggs", "aggregations", "sort", "from", "size",
-                    "source", "_source", "fields", "highlight", "suggest",
-                    "script_fields", "docvalue_fields", "stored_fields",
-                    "post_filter", "min_score", "timeout", "terminate_after",
+                    "query",
+                    "aggs",
+                    "aggregations",
+                    "sort",
+                    "from",
+                    "size",
+                    "source",
+                    "_source",
+                    "fields",
+                    "highlight",
+                    "suggest",
+                    "script_fields",
+                    "docvalue_fields",
+                    "stored_fields",
+                    "post_filter",
+                    "min_score",
+                    "timeout",
+                    "terminate_after",
                 ];
 
                 for field in top_level_fields {
@@ -176,11 +189,32 @@ impl Dialect for ElasticsearchDslDialect {
             crate::parser::DslCompletionContext::QueryObject => {
                 // 查询类型
                 let query_types = vec![
-                    "match", "match_all", "match_none", "match_phrase", "match_phrase_prefix",
-                    "multi_match", "common", "query_string", "simple_query_string",
-                    "term", "terms", "range", "exists", "prefix", "wildcard", "regexp",
-                    "fuzzy", "type", "ids", "constant_score", "bool", "boosting",
-                    "dis_max", "function_score", "script_score", "percolate",
+                    "match",
+                    "match_all",
+                    "match_none",
+                    "match_phrase",
+                    "match_phrase_prefix",
+                    "multi_match",
+                    "common",
+                    "query_string",
+                    "simple_query_string",
+                    "term",
+                    "terms",
+                    "range",
+                    "exists",
+                    "prefix",
+                    "wildcard",
+                    "regexp",
+                    "fuzzy",
+                    "type",
+                    "ids",
+                    "constant_score",
+                    "bool",
+                    "boosting",
+                    "dis_max",
+                    "function_score",
+                    "script_score",
+                    "percolate",
                 ];
 
                 for query_type in query_types {
@@ -191,14 +225,43 @@ impl Dialect for ElasticsearchDslDialect {
             crate::parser::DslCompletionContext::AggsObject => {
                 // 聚合类型
                 let agg_types = vec![
-                    "terms", "range", "date_range", "ip_range", "histogram", "date_histogram",
-                    "geo_distance", "geohash_grid", "geotile_grid", "filters",
-                    "adjacency_matrix", "sampler", "diversified_sampler", "global", "filter",
-                    "missing", "nested", "reverse_nested", "children", "parent",
-                    "cardinality", "avg", "sum", "min", "max", "stats", "extended_stats",
-                    "percentiles", "percentile_ranks", "top_hits", "scripted_metric",
-                    "matrix_stats", "bucket_script", "bucket_selector", "bucket_sort",
-                    "serial_diff", "moving_avg",
+                    "terms",
+                    "range",
+                    "date_range",
+                    "ip_range",
+                    "histogram",
+                    "date_histogram",
+                    "geo_distance",
+                    "geohash_grid",
+                    "geotile_grid",
+                    "filters",
+                    "adjacency_matrix",
+                    "sampler",
+                    "diversified_sampler",
+                    "global",
+                    "filter",
+                    "missing",
+                    "nested",
+                    "reverse_nested",
+                    "children",
+                    "parent",
+                    "cardinality",
+                    "avg",
+                    "sum",
+                    "min",
+                    "max",
+                    "stats",
+                    "extended_stats",
+                    "percentiles",
+                    "percentile_ranks",
+                    "top_hits",
+                    "scripted_metric",
+                    "matrix_stats",
+                    "bucket_script",
+                    "bucket_selector",
+                    "bucket_sort",
+                    "serial_diff",
+                    "moving_avg",
                 ];
 
                 for agg_type in agg_types {
@@ -233,11 +296,32 @@ impl Dialect for ElasticsearchDslDialect {
             crate::parser::DslCompletionContext::Default => {
                 // 默认：返回所有类型
                 let query_types = vec![
-                    "match", "match_all", "match_none", "match_phrase", "match_phrase_prefix",
-                    "multi_match", "common", "query_string", "simple_query_string",
-                    "term", "terms", "range", "exists", "prefix", "wildcard", "regexp",
-                    "fuzzy", "type", "ids", "constant_score", "bool", "boosting",
-                    "dis_max", "function_score", "script_score", "percolate",
+                    "match",
+                    "match_all",
+                    "match_none",
+                    "match_phrase",
+                    "match_phrase_prefix",
+                    "multi_match",
+                    "common",
+                    "query_string",
+                    "simple_query_string",
+                    "term",
+                    "terms",
+                    "range",
+                    "exists",
+                    "prefix",
+                    "wildcard",
+                    "regexp",
+                    "fuzzy",
+                    "type",
+                    "ids",
+                    "constant_score",
+                    "bool",
+                    "boosting",
+                    "dis_max",
+                    "function_score",
+                    "script_score",
+                    "percolate",
                 ];
 
                 for query_type in query_types {
@@ -245,8 +329,17 @@ impl Dialect for ElasticsearchDslDialect {
                 }
 
                 let top_level_fields = vec![
-                    "query", "aggs", "aggregations", "sort", "from", "size",
-                    "source", "_source", "fields", "highlight", "suggest",
+                    "query",
+                    "aggs",
+                    "aggregations",
+                    "sort",
+                    "from",
+                    "size",
+                    "source",
+                    "_source",
+                    "fields",
+                    "highlight",
+                    "suggest",
                 ];
 
                 for field in top_level_fields {
@@ -330,7 +423,9 @@ impl Dialect for ElasticsearchDslDialect {
                         if schema.tables.iter().any(|t| t.name == field_name) {
                             return Some(Location {
                                 uri: tower_lsp::lsp_types::Url::parse("file:///schema.json")
-                                    .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///").unwrap()),
+                                    .unwrap_or_else(|_| {
+                                        tower_lsp::lsp_types::Url::parse("file:///").unwrap()
+                                    }),
                                 range: parser.node_range(node),
                             });
                         }
@@ -364,7 +459,14 @@ impl Dialect for ElasticsearchDslDialect {
                     let root = tree.root_node();
                     let mut cursor = root.walk();
                     for child in root.children(&mut cursor) {
-                        self.find_field_references_recursive(child, dsl, &field_name, &current_uri, &mut locations, &parser);
+                        self.find_field_references_recursive(
+                            child,
+                            dsl,
+                            &field_name,
+                            &current_uri,
+                            &mut locations,
+                            &parser,
+                        );
                     }
                 }
             }

@@ -86,7 +86,8 @@ impl SqlLspServer {
 
                 if !tables.is_empty() {
                     // 3. 查找最佳匹配的 Schema
-                    let best_match = self.schema_manager
+                    let best_match = self
+                        .schema_manager
                         .list_ids()
                         .iter()
                         .filter_map(|&schema_id| {
@@ -124,8 +125,9 @@ impl SqlLspServer {
             } else {
                 // 模糊匹配：+5 分
                 for schema_table in &schema.tables {
-                    if schema_table.name.contains(table_name) ||
-                       table_name.contains(&schema_table.name) {
+                    if schema_table.name.contains(table_name)
+                        || table_name.contains(&schema_table.name)
+                    {
                         score += 5;
                         break; // 每个表名只匹配一次
                     }
@@ -134,7 +136,8 @@ impl SqlLspServer {
         }
 
         // 如果匹配的表数量越多，额外加分
-        let matched_count = tables.iter()
+        let matched_count = tables
+            .iter()
             .filter(|table_name| schema.tables.iter().any(|t| t.name == **table_name))
             .count();
 
@@ -389,7 +392,9 @@ fn infer_dialect_from_uri_and_language(uri: &str, language_id: &str) -> String {
         "postgresql" | "postgres" | "pgsql" => "postgres".to_string(),
         "hive" | "hql" => "hive".to_string(),
         "elasticsearch-eql" | "eql" => "elasticsearch-eql".to_string(),
-        "elasticsearch-dsl" | "es-dsl" | "json" if uri_lower.contains("elasticsearch") => "elasticsearch-dsl".to_string(),
+        "elasticsearch-dsl" | "es-dsl" | "json" if uri_lower.contains("elasticsearch") => {
+            "elasticsearch-dsl".to_string()
+        }
         "clickhouse" | "ch" => "clickhouse".to_string(),
         "redis" => "redis".to_string(),
         _ => "mysql".to_string(), // 默认使用 MySQL

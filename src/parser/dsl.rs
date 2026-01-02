@@ -99,7 +99,10 @@ impl DslParser {
         }
 
         // 如果 JSON 结构有效，检查 Elasticsearch DSL 特定的字段
-        if diagnostics.iter().all(|d| d.severity != Some(DiagnosticSeverity::ERROR)) {
+        if diagnostics
+            .iter()
+            .all(|d| d.severity != Some(DiagnosticSeverity::ERROR))
+        {
             self.validate_dsl_structure(tree.as_ref(), dsl, &mut diagnostics);
         }
 
@@ -186,7 +189,10 @@ impl DslParser {
             if !has_query && !has_aggs && !has_sort {
                 diagnostics.push(Diagnostic {
                     range: Range {
-                        start: Position { line: 0, character: 0 },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
                         end: Position {
                             line: 0,
                             character: json.len() as u32,
@@ -196,7 +202,9 @@ impl DslParser {
                     code: Some(NumberOrString::String("DSL_HINT".to_string())),
                     code_description: None,
                     source: Some("elasticsearch-dsl".to_string()),
-                    message: "Elasticsearch DSL typically includes 'query', 'aggs', or 'sort' fields".to_string(),
+                    message:
+                        "Elasticsearch DSL typically includes 'query', 'aggs', or 'sort' fields"
+                            .to_string(),
                     related_information: None,
                     tags: None,
                     data: None,
@@ -210,21 +218,37 @@ impl DslParser {
 
     /// 验证 query 结构（如果存在）
     /// 遍历 AST，检查 query 对象的结构
-    fn validate_query_structure(
-        &self,
-        tree: &Tree,
-        json: &str,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
+    fn validate_query_structure(&self, tree: &Tree, json: &str, diagnostics: &mut Vec<Diagnostic>) {
         let root = tree.root_node();
 
         // Elasticsearch DSL 有效的查询类型
         let valid_query_types = vec![
-            "match", "match_all", "match_none", "match_phrase", "match_phrase_prefix",
-            "multi_match", "common", "query_string", "simple_query_string",
-            "term", "terms", "range", "exists", "prefix", "wildcard", "regexp",
-            "fuzzy", "type", "ids", "constant_score", "bool", "boosting",
-            "dis_max", "function_score", "script_score", "percolate",
+            "match",
+            "match_all",
+            "match_none",
+            "match_phrase",
+            "match_phrase_prefix",
+            "multi_match",
+            "common",
+            "query_string",
+            "simple_query_string",
+            "term",
+            "terms",
+            "range",
+            "exists",
+            "prefix",
+            "wildcard",
+            "regexp",
+            "fuzzy",
+            "type",
+            "ids",
+            "constant_score",
+            "bool",
+            "boosting",
+            "dis_max",
+            "function_score",
+            "script_score",
+            "percolate",
         ];
 
         // 查找 "query" 字段
@@ -236,7 +260,12 @@ impl DslParser {
             if query_node.kind() == "object" {
                 // 查找 query 对象中的第一个键（应该是查询类型）
                 let mut found_valid_query = false;
-                self.check_query_types_recursive(query_node, json, &valid_query_types, &mut found_valid_query);
+                self.check_query_types_recursive(
+                    query_node,
+                    json,
+                    &valid_query_types,
+                    &mut found_valid_query,
+                );
 
                 if !found_valid_query {
                     // 如果 query 对象存在但没有找到有效的查询类型，给出警告
@@ -272,7 +301,12 @@ impl DslParser {
     }
 
     /// 在 JSON 对象中查找指定字段
-    fn find_field_in_object<'a>(&self, object_node: Node<'a>, source: &str, field_name: &str) -> Option<Node<'a>> {
+    fn find_field_in_object<'a>(
+        &self,
+        object_node: Node<'a>,
+        source: &str,
+        field_name: &str,
+    ) -> Option<Node<'a>> {
         if object_node.kind() != "object" {
             return None;
         }
@@ -419,7 +453,9 @@ impl DslParser {
                             if value_node.kind() == "object" {
                                 match key {
                                     "query" => return DslCompletionContext::QueryObject,
-                                    "aggs" | "aggregations" => return DslCompletionContext::AggsObject,
+                                    "aggs" | "aggregations" => {
+                                        return DslCompletionContext::AggsObject
+                                    }
                                     "bool" => return DslCompletionContext::BoolQuery,
                                     "sort" => return DslCompletionContext::SortObject,
                                     _ => {}
@@ -440,7 +476,9 @@ impl DslParser {
                                 let key = key_text.trim_matches('"').trim_matches('\'');
                                 match key {
                                     "query" => return DslCompletionContext::QueryObject,
-                                    "aggs" | "aggregations" => return DslCompletionContext::AggsObject,
+                                    "aggs" | "aggregations" => {
+                                        return DslCompletionContext::AggsObject
+                                    }
                                     "bool" => return DslCompletionContext::BoolQuery,
                                     "sort" => return DslCompletionContext::SortObject,
                                     _ => {}
@@ -451,7 +489,9 @@ impl DslParser {
                 }
 
                 // 检查是否是根对象（顶级）
-                if n.parent().is_none() || (n.parent().is_some() && n.parent().unwrap().kind() == "document") {
+                if n.parent().is_none()
+                    || (n.parent().is_some() && n.parent().unwrap().kind() == "document")
+                {
                     return DslCompletionContext::TopLevel;
                 }
             }
