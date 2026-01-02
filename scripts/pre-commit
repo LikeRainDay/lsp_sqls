@@ -37,5 +37,14 @@ if ! cargo clippy -- -D warnings; then
 fi
 echo -e "${GREEN}✅ Clippy check passed${NC}"
 
+# 3. Run tests
+echo -e "${YELLOW}🧪 Running tests...${NC}"
+if ! cargo test --all-features; then
+    echo -e "${RED}❌ Tests failed!${NC}"
+    echo -e "${YELLOW}💡 Fix the failing tests above and try again.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ All tests passed${NC}"
+
 echo -e "${GREEN}✨ All pre-commit checks passed!${NC}"
 exit 0

@@ -9,7 +9,7 @@ fn test_schema_id() {
     assert_ne!(id1, id2);
 
     let id_str = id1.0.to_string();
-    let id3 = SchemaId::from_str(&id_str).unwrap();
+    let id3: SchemaId = id_str.parse().unwrap();
     assert_eq!(id1, id3);
 }
 
