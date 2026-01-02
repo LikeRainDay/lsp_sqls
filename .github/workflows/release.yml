@@ -1,0 +1,247 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # 匹配 v1.0.0, v1.0.0-beta 等格式的 tag
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            artifact_name: sql-lsp-x86_64-unknown-linux-gnu
+            asset_name: sql-lsp-linux-x86_64
+            ext: ""
+
+          # Linux ARM64
+          - os: ubuntu-latest
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            artifact_name: sql-lsp-aarch64-unknown-linux-gnu
+            asset_name: sql-lsp-linux-arm64
+            ext: ""
+
+          # macOS x86_64 (Intel)
+          - os: macos-latest
+            arch: x86_64
+            target: x86_64-apple-darwin
+            artifact_name: sql-lsp-x86_64-apple-darwin
+            asset_name: sql-lsp-macos-x86_64
+            ext: ""
+
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-latest
+            arch: arm64
+            target: aarch64-apple-darwin
+            artifact_name: sql-lsp-aarch64-apple-darwin
+            asset_name: sql-lsp-macos-arm64
+            ext: ""
+
+          # Windows x86_64
+          - os: windows-latest
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            artifact_name: sql-lsp-x86_64-pc-windows-msvc
+            asset_name: sql-lsp-windows-x86_64
+            ext: .exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          strip target/${{ matrix.target }}/release/sql-lsp
+
+      - name: Strip binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          strip target/${{ matrix.target }}/release/sql-lsp.exe
+        continue-on-error: true
+
+      - name: Create archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact_name }}.tar.gz sql-lsp
+          cd ../../..
+
+      - name: Create archive (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact_name }}.tar.gz sql-lsp.exe
+          cd ../../..
+        shell: bash
+
+      - name: Create checksum (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          shasum -a 256 sql-lsp > ../../../${{ matrix.artifact_name }}.sha256
+          cd ../../..
+
+      - name: Create checksum (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          shasum -a 256 sql-lsp.exe > ../../../${{ matrix.artifact_name }}.sha256
+          cd ../../..
+        shell: bash
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}.tar.gz
+            ${{ matrix.artifact_name }}.sha256
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/*/; do
+            cp "$dir"*.tar.gz release-assets/ 2>/dev/null || true
+            cp "$dir"*.sha256 release-assets/ 2>/dev/null || true
+          done
+
+          # 重命名文件以包含版本号
+          VERSION=${GITHUB_REF#refs/tags/}
+          for file in release-assets/*.tar.gz; do
+            if [ -f "$file" ]; then
+              basename=$(basename "$file" .tar.gz)
+              mv "$file" "release-assets/${basename}-${VERSION}.tar.gz"
+            fi
+          done
+
+          for file in release-assets/*.sha256; do
+            if [ -f "$file" ]; then
+              basename=$(basename "$file" .sha256)
+              mv "$file" "release-assets/${basename}-${VERSION}.sha256"
+            fi
+          done
+
+          ls -lh release-assets/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          cat > release-notes.md << EOF
+          # SQL LSP ${VERSION}
+
+          ## 下载
+
+          请根据您的操作系统和架构下载对应的文件：
+
+          ### Linux
+          - **x86_64**: \`sql-lsp-x86_64-unknown-linux-gnu-${VERSION}.tar.gz\`
+          - **ARM64**: \`sql-lsp-aarch64-unknown-linux-gnu-${VERSION}.tar.gz\`
+
+          ### macOS
+          - **Intel (x86_64)**: \`sql-lsp-x86_64-apple-darwin-${VERSION}.tar.gz\`
+          - **Apple Silicon (ARM64)**: \`sql-lsp-aarch64-apple-darwin-${VERSION}.tar.gz\`
+
+          ### Windows
+          - **x86_64**: \`sql-lsp-x86_64-pc-windows-msvc-${VERSION}.tar.gz\`
+
+          ## 安装
+
+          ### Linux / macOS
+
+          \`\`\`bash
+          # 解压
+          tar xzf sql-lsp-<platform>-<arch>-${VERSION}.tar.gz
+
+          # 移动到 PATH
+          sudo mv sql-lsp /usr/local/bin/
+
+          # 验证安装
+          sql-lsp --version
+          \`\`\`
+
+          ### Windows
+
+          \`\`\`powershell
+          # 解压
+          tar xzf sql-lsp-x86_64-pc-windows-msvc-${VERSION}.tar.gz
+
+          # 添加到 PATH 或移动到合适的位置
+          \`\`\`
+
+          ## 校验
+
+          下载后可以使用 SHA256 校验文件验证完整性：
+
+          \`\`\`bash
+          shasum -a 256 -c sql-lsp-<platform>-<arch>-${VERSION}.sha256
+          \`\`\`
+
+          ## 变更日志
+
+          查看 [CHANGELOG.md](CHANGELOG.md) 了解详细变更。
+          EOF
+          cat release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: SQL LSP ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
