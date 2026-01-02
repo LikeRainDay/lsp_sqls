@@ -1,0 +1,327 @@
+use crate::dialect::Dialect;
+use crate::parser::SqlParser;
+use crate::schema::Schema;
+use async_trait::async_trait;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location,
+    MarkedString, Position,
+};
+
+pub struct ClickHouseDialect {
+    parser: std::sync::Mutex<SqlParser>,
+}
+
+impl ClickHouseDialect {
+    pub fn new() -> Self {
+        Self {
+            parser: std::sync::Mutex::new(SqlParser::new()),
+        }
+    }
+
+    fn create_keyword_item(&self, keyword: &str) -> CompletionItem {
+        CompletionItem {
+            label: keyword.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some(format!("ClickHouse keyword: {}", keyword)),
+            documentation: None,
+            deprecated: None,
+            preselect: None,
+            sort_text: Some(format!("0{}", keyword)),
+            filter_text: None,
+            insert_text: Some(keyword.to_string()),
+            insert_text_format: None,
+            insert_text_mode: None,
+            text_edit: None,
+            additional_text_edits: None,
+            commit_characters: None,
+            command: None,
+            data: None,
+            tags: None,
+            label_details: None,
+        }
+    }
+
+    fn create_table_item(&self, table: &crate::schema::Table) -> CompletionItem {
+        CompletionItem {
+            label: table.name.clone(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some(format!("Table: {}", table.name)),
+            documentation: table.comment.clone().map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+            deprecated: None,
+            preselect: None,
+            sort_text: Some(format!("1{}", table.name)),
+            filter_text: None,
+            insert_text: Some(table.name.clone()),
+            insert_text_format: None,
+            insert_text_mode: None,
+            text_edit: None,
+            additional_text_edits: None,
+            commit_characters: None,
+            command: None,
+            data: None,
+            tags: None,
+            label_details: None,
+        }
+    }
+
+    fn create_column_item(&self, column: &crate::schema::Column, table_name: Option<&str>) -> CompletionItem {
+        let label = if let Some(table) = table_name {
+            format!("{}.{}", table, column.name)
+        } else {
+            column.name.clone()
+        };
+
+        CompletionItem {
+            label,
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(format!("Column: {} ({})", column.name, column.data_type)),
+            documentation: column.comment.clone().map(|c| tower_lsp::lsp_types::Documentation::String(c)),
+            deprecated: None,
+            preselect: None,
+            sort_text: Some(format!("2{}", column.name)),
+            filter_text: None,
+            insert_text: Some(column.name.clone()),
+            insert_text_format: None,
+            insert_text_mode: None,
+            text_edit: None,
+            additional_text_edits: None,
+            commit_characters: None,
+            command: None,
+            data: None,
+            tags: None,
+            label_details: None,
+        }
+    }
+}
+
+#[async_trait]
+impl Dialect for ClickHouseDialect {
+    fn name(&self) -> &str {
+        "clickhouse"
+    }
+
+    async fn parse(&self, sql: &str, _schema: Option<&Schema>) -> Vec<Diagnostic> {
+        let mut parser = self.parser.lock().unwrap();
+        let parse_result = parser.parse(sql);
+        parse_result.diagnostics
+    }
+
+    async fn completion(
+        &self,
+        sql: &str,
+        position: Position,
+        schema: Option<&Schema>,
+    ) -> Vec<CompletionItem> {
+        let mut parser = self.parser.lock().unwrap();
+        let parse_result = parser.parse(sql);
+
+        let context = if let Some(tree) = &parse_result.tree {
+            if let Some(node) = parser.get_node_at_position(tree, position) {
+                parser.analyze_completion_context(node, sql)
+            } else {
+                crate::parser::CompletionContext::Default
+            }
+        } else {
+            crate::parser::CompletionContext::Default
+        };
+
+        let mut items = Vec::new();
+        let keywords = &[
+            "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "CREATE", "DROP", "ALTER",
+            "TABLE", "DATABASE", "ENGINE", "MergeTree", "ReplacingMergeTree", "SummingMergeTree",
+            "AggregatingMergeTree", "CollapsingMergeTree", "VersionedCollapsingMergeTree",
+            "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON", "GROUP", "BY", "ORDER",
+            "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS", "AND", "OR", "NOT",
+            "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL", "CAST", "ARRAY", "TUPLE", "MAP",
+            "Nested", "AggregateFunction", "Array", "String", "Int8", "Int16", "Int32", "Int64",
+            "UInt8", "UInt16", "UInt32", "UInt64", "Float32", "Float64", "Date", "DateTime",
+        ];
+
+        match context {
+            crate::parser::CompletionContext::FromClause | crate::parser::CompletionContext::JoinClause => {
+                let join_keywords: Vec<&str> = keywords.iter()
+                    .filter(|&&k| matches!(k, "JOIN" | "INNER" | "LEFT" | "RIGHT" | "OUTER" | "ON"))
+                    .copied()
+                    .collect();
+                for keyword in join_keywords {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        items.push(self.create_table_item(table));
+                    }
+                }
+            }
+            crate::parser::CompletionContext::SelectClause => {
+                let select_keywords: Vec<&str> = keywords.iter()
+                    .filter(|&&k| matches!(k, "SELECT" | "DISTINCT" | "AS" | "FROM"))
+                    .copied()
+                    .collect();
+                for keyword in select_keywords {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::WhereClause => {
+                let where_keywords: Vec<&str> = keywords.iter()
+                    .filter(|&&k| matches!(k, "AND" | "OR" | "NOT" | "IN" | "LIKE" | "ILIKE" | "BETWEEN" | "IS" | "NULL"))
+                    .copied()
+                    .collect();
+                for keyword in where_keywords {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
+                for op in operators {
+                    items.push(CompletionItem {
+                        label: op.to_string(),
+                        kind: Some(CompletionItemKind::OPERATOR),
+                        detail: Some(format!("Operator: {}", op)),
+                        documentation: None,
+                        deprecated: None,
+                        preselect: None,
+                        sort_text: Some(format!("1{}", op)),
+                        filter_text: None,
+                        insert_text: Some(op.to_string()),
+                        insert_text_format: None,
+                        insert_text_mode: None,
+                        text_edit: None,
+                        additional_text_edits: None,
+                        commit_characters: None,
+                        command: None,
+                        data: None,
+                        tags: None,
+                        label_details: None,
+                    });
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::OrderByClause | crate::parser::CompletionContext::GroupByClause => {
+                let keywords_list: Vec<&str> = keywords.iter()
+                    .filter(|&&k| matches!(k, "ASC" | "DESC" | "BY"))
+                    .copied()
+                    .collect();
+                for keyword in keywords_list {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::HavingClause => {
+                let having_keywords: Vec<&str> = keywords.iter()
+                    .filter(|&&k| matches!(k, "AND" | "OR" | "NOT" | "IN" | "LIKE" | "ILIKE" | "BETWEEN" | "IS" | "NULL"))
+                    .copied()
+                    .collect();
+                for keyword in having_keywords {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
+                for func in aggregate_functions {
+                    items.push(self.create_keyword_item(func));
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            items.push(self.create_column_item(column, Some(&format!("{}.{}", schema.database, table.name))));
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::TableColumn => {
+                if let Some(tree) = &parse_result.tree {
+                    if let Some(node) = parser.get_node_at_position(tree, position) {
+                        if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
+                            if let Some(schema) = schema {
+                                if let Some(table) = schema.tables.iter().find(|t| t.name == table_name || format!("{}.{}", schema.database, t.name) == table_name) {
+                                    for column in &table.columns {
+                                        items.push(self.create_column_item(column, None));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::Default => {
+                for keyword in keywords {
+                    items.push(self.create_keyword_item(keyword));
+                }
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        items.push(self.create_table_item(table));
+                    }
+                }
+            }
+        }
+
+        items
+    }
+
+    async fn hover(
+        &self,
+        sql: &str,
+        _position: Position,
+        schema: Option<&Schema>,
+    ) -> Option<Hover> {
+        if let Some(schema) = schema {
+            for table in &schema.tables {
+                if sql.contains(&table.name) {
+                    return Some(Hover {
+                        contents: tower_lsp::lsp_types::HoverContents::Scalar(
+                            MarkedString::String(format!(
+                                "ClickHouse Table: {}.{}\n{}",
+                                schema.database,
+                                table.name,
+                                table.comment.as_deref().unwrap_or("No description")
+                            )),
+                        ),
+                        range: None,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    async fn goto_definition(
+        &self,
+        _sql: &str,
+        _position: Position,
+        _schema: Option<&Schema>,
+    ) -> Option<Location> {
+        None
+    }
+
+    async fn references(
+        &self,
+        _sql: &str,
+        _position: Position,
+        _schema: Option<&Schema>,
+    ) -> Vec<Location> {
+        Vec::new()
+    }
+
+    async fn format(&self, sql: &str) -> String {
+        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
+        self.parse(sql, schema).await
+    }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "sql-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tower-lsp = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+dashmap = "5.5"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tree-sitter = "0.26.3"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-json = "0.24"
+sqlparser = { version = "0.40", default-features = false, features = ["std"], optional = true }
+
+[features]
+default = []
+strict-parser = ["sqlparser"]
+
+[dev-dependencies]
+tokio-test = "0.4"
