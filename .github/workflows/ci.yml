@@ -13,6 +13,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # CI 只需要读取权限
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
