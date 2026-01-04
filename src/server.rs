@@ -50,6 +50,7 @@ pub struct SqlLspServer {
 
 impl SqlLspServer {
     pub fn new(client: Client) -> Self {
+        tracing::info!("Creating new SQL LSP server instance");
         Self {
             client,
             dialect_registry: Arc::new(DialectRegistry::new()),
@@ -147,6 +148,20 @@ impl SqlLspServer {
 
         score
     }
+
+    /// 将 LSP Position 转换为字符串字节偏移
+    fn position_to_offset(&self, text: &str, position: tower_lsp::lsp_types::Position) -> usize {
+        let mut offset = 0;
+        for (line_idx, line) in text.lines().enumerate() {
+            if line_idx < position.line as usize {
+                offset += line.len() + 1; // +1 for newline
+            } else {
+                offset += position.character.min(line.len() as u32) as usize;
+                break;
+            }
+        }
+        offset.min(text.len())
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -188,6 +203,7 @@ impl LanguageServer for SqlLspServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        tracing::info!("SQL LSP server initialized and ready");
         self.client
             .log_message(MessageType::INFO, "SQL LSP server initialized")
             .await;
@@ -195,6 +211,52 @@ impl LanguageServer for SqlLspServer {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        tracing::debug!("Received configuration change");
+        // 解析配置 JSON
+        if let Some(settings) = params.settings.as_object() {
+            // 处理 schemas 配置
+            if let Some(schemas_value) = settings.get("schemas") {
+                if let Ok(schemas) =
+                    serde_json::from_value::<Vec<crate::schema::Schema>>(schemas_value.clone())
+                {
+                    // 清空旧的 schema 并注册新的
+                    self.schema_manager.clear();
+                    let count = schemas.len();
+                    for schema in schemas {
+                        self.schema_manager.register(schema);
+                    }
+                    self.client
+                        .log_message(MessageType::INFO, format!("Updated {} schemas", count))
+                        .await;
+                } else {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            "Failed to parse schemas configuration",
+                        )
+                        .await;
+                }
+            }
+
+            // 处理文件到 schema 的映射配置
+            if let Some(file_schemas_value) = settings.get("fileSchemas") {
+                if let Some(file_schemas_obj) = file_schemas_value.as_object() {
+                    for (uri, schema_id_str) in file_schemas_obj {
+                        if let Some(id_str) = schema_id_str.as_str() {
+                            if let Ok(schema_id) = id_str.parse::<crate::schema::SchemaId>() {
+                                self.file_schemas.insert(uri.clone(), schema_id);
+                            }
+                        }
+                    }
+                    self.client
+                        .log_message(MessageType::INFO, "Updated file-schema mappings")
+                        .await;
+                }
+            }
+        }
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -223,18 +285,45 @@ impl LanguageServer for SqlLspServer {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
 
-        // 更新文档内容（简化处理：使用最后一个变更）
-        // 实际应该根据 TextDocumentSyncKind::INCREMENTAL 进行增量更新
-        if let Some(last_change) = params.content_changes.last() {
-            let text = last_change.text.clone();
-            self.document_manager.update(uri.clone(), text.clone());
+        // 处理增量同步
+        for change in params.content_changes {
+            if let Some(range) = change.range {
+                // 增量更新：应用部分文本变更
+                if let Some(mut current_text) = self.document_manager.get(&uri) {
+                    // 将 LSP Range 转换为字节偏移
+                    let start_offset = self.position_to_offset(&current_text, range.start);
+                    let end_offset = self.position_to_offset(&current_text, range.end);
 
-            if let Some(dialect) = self.get_dialect_for_file(&uri) {
-                let schema = self.get_schema_for_file(&uri);
-                let diagnostics = dialect.parse(&text, schema.as_ref()).await;
-                self.client
-                    .publish_diagnostics(params.text_document.uri, diagnostics, None)
-                    .await;
+                    // 应用变更
+                    current_text.replace_range(start_offset..end_offset, &change.text);
+                    self.document_manager
+                        .update(uri.clone(), current_text.clone());
+
+                    // 重新解析并发布诊断
+                    if let Some(dialect) = self.get_dialect_for_file(&uri) {
+                        let schema = self.get_schema_for_file(&uri);
+                        let diagnostics = dialect.parse(&current_text, schema.as_ref()).await;
+                        self.client
+                            .publish_diagnostics(
+                                params.text_document.uri.clone(),
+                                diagnostics,
+                                None,
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                // 完整文档更新
+                let text = change.text.clone();
+                self.document_manager.update(uri.clone(), text.clone());
+
+                if let Some(dialect) = self.get_dialect_for_file(&uri) {
+                    let schema = self.get_schema_for_file(&uri);
+                    let diagnostics = dialect.parse(&text, schema.as_ref()).await;
+                    self.client
+                        .publish_diagnostics(params.text_document.uri.clone(), diagnostics, None)
+                        .await;
+                }
             }
         }
     }

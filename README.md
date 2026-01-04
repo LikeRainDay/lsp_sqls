@@ -1,234 +1,240 @@
 # SQL LSP
 
-A multi-dialect SQL Language Server Protocol (LSP) implementation in Rust, supporting MySQL, PostgreSQL, Hive, Elasticsearch, ClickHouse, Redis, and more.
+<div align="center">
+
+A **high-performance**, **multi-dialect** SQL Language Server Protocol (LSP) implementation in Rust.
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/your-username/sql-lsp/workflows/CI/badge.svg)](https://github.com/your-username/sql-lsp/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/your-org/lsp_sqls/workflows/CI/badge.svg)](https://github.com/your-org/lsp_sqls/actions)
+
+[Features](#-features) • [Quick Start](#-quick-start) • [Documentation](#-documentation) • [Contributing](#-contributing)
+
+</div>
+
+---
 
 ## ✨ Features
 
-- ✅ **Multi-dialect support**: MySQL, PostgreSQL, Hive, Elasticsearch EQL/DSL, ClickHouse, Redis
-- ✅ **Fault-tolerant parsing**: Tree-sitter based parser handles incomplete SQL gracefully
-- ✅ **Intelligent code completion**: AST-based context-aware completion for keywords, tables, and columns
-- ✅ **Go to definition**: Navigate to table and column definitions
-- ✅ **Find references**: Find all occurrences of tables and columns
-- ✅ **Real-time diagnostics**: Accurate syntax error detection
-- ✅ **Schema management**: Auto-inference, priority handling, and isolation
-- ✅ **Thread-safe**: Concurrent access support
+### Core Capabilities
+
+- 🎯 **Multi-Dialect Support** - MySQL, PostgreSQL, Hive, ClickHouse, Elasticsearch (EQL/DSL), Redis
+- 🔍 **Intelligent Completion** - Context-aware suggestions for keywords, tables, columns, and functions
+- 📍 **Code Navigation** - Go-to-definition with source location tracking
+- 🔎 **Find References** - Locate all usages of tables and columns
+- ⚡ **Real-Time Diagnostics** - Instant syntax error detection as you type
+- 🎨 **SQL Formatting** - Professional formatting with customizable options
+- 📊 **Rich Hover Information** - Detailed schema information in Markdown format
+
+### Advanced Features
+
+- � **Runtime Configuration** - Update schemas without restarting the server
+- 📝 **Incremental Sync** - Efficient text synchronization for large files
+- 🌳 **AST-Based Analysis** - Tree-sitter powered parsing for accuracy
+- 🧵 **Thread-Safe** - Concurrent request handling
+- 📦 **Schema Management** - Auto-inference with priority-based matching
+- 📋 **Structured Logging** - Observable with `tracing` framework
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-- **Rust**: 1.70+ and Cargo
-- **Make**: Optional, for Makefile commands
-
 ### Installation
 
-#### Build from Source
+#### Option 1: Build from Source
 
 ```bash
-git clone https://github.com/your-username/sql-lsp.git
-cd sql-lsp
-
-# Build release binary
-make build-release
+git clone https://github.com/your-org/lsp_sqls.git
+cd lsp_sqls
+cargo build --release
 
 # Binary location: target/release/sql-lsp
 ```
 
-#### Install via Cargo
+#### Option 2: Install via Cargo
 
 ```bash
 cargo install --path .
 ```
 
-### Verify Installation
+### Basic Usage
 
 ```bash
-target/release/sql-lsp --version
+# Start the LSP server
+./target/release/sql-lsp
+
+# With debug logging
+RUST_LOG=debug ./target/release/sql-lsp
 ```
-
-## 📖 Usage
-
-SQL LSP is a standard LSP server that communicates via stdin/stdout. It supports standard LSP protocol messages.
 
 ### Editor Integration
 
-#### VS Code
+Choose your editor for detailed setup instructions:
 
-Create `.vscode/settings.json`:
+- **[VS Code](docs/editor-integration.md#vs-code)** - Extension or manual setup
+- **[Neovim](docs/editor-integration.md#neovim)** - nvim-lspconfig integration
+- **[Vim](docs/editor-integration.md#vim-vim-lsp)** - vim-lsp configuration
+- **[Emacs](docs/editor-integration.md#emacs-lsp-mode)** - lsp-mode setup
+- **[Sublime Text](docs/editor-integration.md#sublime-text-lsp-package)** - LSP package
 
-```json
-{
-  "sql-lsp.serverPath": "/path/to/target/release/sql-lsp"
-}
-```
+## 📖 Documentation
 
-#### Neovim
+### User Guides
 
-Using `nvim-lspconfig`:
+- **[Configuration Guide](docs/configuration.md)** - Schema and dialect configuration
+- **[Editor Integration](docs/editor-integration.md)** - Step-by-step editor setup
+- **[Troubleshooting](docs/configuration.md#troubleshooting)** - Common issues and solutions
 
-```lua
-require('lspconfig').sql_lsp.setup({
-  cmd = {'/path/to/target/release/sql-lsp'},
-  filetypes = {'sql', 'mysql', 'postgresql'}
-})
-```
+### Developer Resources
 
-See [docs/editor-integration.md](docs/editor-integration.md) for detailed setup instructions.
+- **[Architecture](ARCHITECTURE.md)** - System design and components
+- **[Contributing Guide](CONTRIBUTING.md)** - How to contribute
+- **[Error Handling](docs/error-handling.md)** - Error handling strategies
 
-## ⚙️ Configuration
+## 🎯 Example
 
-### Schema Configuration
-
-SQL LSP supports schema configuration via LSP's `workspace/didChangeConfiguration` notification.
-
-**Schema Format**:
+### Configure a Database Schema
 
 ```json
 {
-  "schemas": [{
-    "id": "schema1",
-    "tables": [{
-      "name": "users",
-      "columns": [
-        {"name": "id", "type": "INT"},
-        {"name": "name", "type": "VARCHAR(255)"}
+  "schemas": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "database": "my_app",
+      "source_uri": "file:///path/to/schema.sql",
+      "tables": [
+        {
+          "name": "users",
+          "source_location": ["file:///path/to/schema.sql", 42],
+          "columns": [
+            {
+              "name": "id",
+              "data_type": "INT",
+              "nullable": false,
+              "comment": "Primary key"
+            },
+            {
+              "name": "email",
+              "data_type": "VARCHAR(255)",
+              "nullable": false,
+              "comment": "User email"
+            }
+          ],
+          "comment": "User accounts"
+        }
       ]
-    }]
-  }]
+    }
+  ]
 }
 ```
 
-See [docs/configuration.md](docs/configuration.md) for detailed configuration options.
+### Features in Action
 
-### Dialect Detection
+**Hover Information:**
 
-SQL LSP detects dialects from:
+```markdown
+**Table**: `users`
 
-1. **File extension** (highest priority)
-   - `.mysql.sql` → MySQL
-   - `.postgres.sql` → PostgreSQL
-   - `.hive.sql` → Hive
-   - `.es.eql` → Elasticsearch EQL
-   - `.es.dsl` → Elasticsearch DSL
-   - `.clickhouse.sql` → ClickHouse
-   - `.redis` → Redis
+User accounts
 
-2. **`languageId` parameter** (fallback)
-   - `mysql`, `postgresql`, `hive`, `elasticsearch-eql`, `elasticsearch-dsl`, `clickhouse`, `redis`
+**Columns** (10)
 
-3. **Default**: MySQL (if unable to detect)
+- `id`: INT NOT NULL
+- `email`: VARCHAR(255) NOT NULL
+- `name`: VARCHAR(255) NOT NULL
+  ...
+```
 
-**Note**: SQL LSP supports both `file://` and `untitled://` URIs. See [docs/uri-support.md](docs/uri-support.md) for details.
+**Intelligent Completion:**
 
-## 🧪 Testing
+- Keywords based on context (SELECT, FROM, WHERE, etc.)
+- Tables from your schema
+- Columns context-aware (knows which table you're querying)
+- Functions with parameter hints
+
+## 🛠 Development
+
+### Prerequisites
+
+- Rust 1.70 or later
+- Cargo
+
+### Build
 
 ```bash
-# Run all tests
-make test
+# Development build
+cargo build
 
-# Run specific tests
-make test-mysql
-make test-schema
-
-# Run LSP client integration tests
-python3 scripts/lsp_client_test.py
-python3 scripts/lsp_client_test_es.py
-```
-
-## 📁 Project Structure
-
-```
-sql-lsp/
-├── src/
-│   ├── main.rs              # Entry point
-│   ├── lib.rs                # Library exports
-│   ├── server.rs             # LSP server implementation
-│   ├── dialect.rs            # Dialect trait
-│   ├── schema.rs             # Schema management
-│   ├── parser/               # Parsers (Tree-sitter based)
-│   └── dialects/             # Dialect implementations
-├── tests/                    # Test files
-├── scripts/                  # Test scripts
-├── docs/                     # Documentation
-└── Cargo.toml
-```
-
-## 🔌 Supported Dialects
-
-- **MySQL**: `.mysql.sql`
-- **PostgreSQL**: `.postgres.sql`
-- **Hive**: `.hive.sql`
-- **Elasticsearch EQL**: `.es.eql`
-- **Elasticsearch DSL**: `.es.dsl`
-- **ClickHouse**: `.clickhouse.sql`
-- **Redis**: `.redis`
-
-See [docs/dialects.md](docs/dialects.md) for detailed dialect information and examples.
-
-## 🛠️ Development
-
-### Setup
-
-```bash
-# Install development tools
-make dev-setup
-
-# Format code
-make fmt
-
-# Run Clippy
-make clippy
+# Release build with optimizations
+cargo build --release
 
 # Run tests
-make test
+cargo test
 
-# Pre-commit checks
-make pre-commit
+# Run linter
+cargo clippy
 ```
 
-### Git Pre-commit Hook
+### Project Structure
 
-Install the pre-commit hook to automatically run checks before commits:
-
-```bash
-make install-pre-commit
 ```
-
-The hook runs:
-- Code formatting check (`cargo fmt --check`)
-- Clippy check (`cargo clippy -- -D warnings`)
-- Tests (`cargo test --all-features`)
-
-See [docs/development.md](docs/development.md) for detailed development guide.
-
-## 📚 Documentation
-
-- [Editor Integration](docs/editor-integration.md) - Detailed setup for VS Code, Neovim, Vim, Emacs
-- [Configuration](docs/configuration.md) - Schema configuration and options
-- [API Reference](docs/api.md) - LSP API documentation
-- [Dialects](docs/dialects.md) - Supported SQL dialects and examples
-- [Development](docs/development.md) - Development guide and contributing
-- [Troubleshooting](docs/troubleshooting.md) - Common issues and solutions
-
-## 📝 License
-
-[Add your license here, e.g., MIT, Apache 2.0]
+lsp_sqls/
+├── src/
+│   ├── main.rs           # Entry point
+│   ├── server.rs         # LSP server
+│   ├── dialect.rs        # Dialect trait
+│   ├── dialects/         # SQL dialect implementations
+│   ├── parser/           # SQL parsers (tree-sitter)
+│   ├── schema.rs         # Schema management
+│   └── token.rs          # Token definitions
+├── docs/                 # Documentation
+├── tests/                # Integration tests
+└── scripts/              # Helper scripts
+```
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please see [docs/contributing.md](docs/contributing.md) for guidelines.
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+### Quick Contribution Guide
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make your changes
+4. Run tests: `cargo test`
+5. Commit: `git commit -m 'feat: add amazing feature'`
+6. Push: `git push origin feature/amazing-feature`
+7. Open a Pull Request
+
+## � Supported SQL Dialects
+
+| Dialect           | Status           | Notes                 |
+| ----------------- | ---------------- | --------------------- |
+| MySQL             | ✅ Full support  | MySQL 5.7+ syntax     |
+| PostgreSQL        | ✅ Full support  | PostgreSQL 12+ syntax |
+| Hive              | ✅ Full support  | HiveQL syntax         |
+| ClickHouse        | ✅ Full support  | ClickHouse SQL        |
+| Elasticsearch EQL | ✅ Full support  | Event Query Language  |
+| Elasticsearch DSL | ✅ Full support  | Query DSL (JSON)      |
+| Redis             | ✅ Basic support | Redis commands        |
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP server framework
-- [tree-sitter](https://tree-sitter.github.io/tree-sitter/) - Incremental parser generator
-- [tree-sitter-sql](https://github.com/derekstride/tree-sitter-sql) - SQL Tree-sitter grammar
-- [sqls-server/sqls](https://github.com/sqls-server/sqls) - Reference implementation
+- Built with [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP framework
+- Powered by [tree-sitter](https://tree-sitter.github.io/) - Parser generator
+- Formatted with [sqlformat](https://github.com/shssoichiro/sqlformat-rs) - SQL formatter
+
+## 📬 Contact
+
+- **Issues**: [GitHub Issues](https://github.com/your-org/lsp_sqls/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/lsp_sqls/discussions)
 
 ---
 
-**Made with ❤️ using Rust**
+<div align="center">
+
+Made with ❤️ by the SQL LSP community
+
+</div>

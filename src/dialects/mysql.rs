@@ -3,7 +3,7 @@ use crate::parser::SqlParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
+    CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, Position,
 };
 
 pub struct MysqlDialect {
@@ -319,29 +319,146 @@ impl Dialect for MysqlDialect {
         items
     }
 
-    async fn hover(
-        &self,
-        sql: &str,
-        _position: Position,
-        schema: Option<&Schema>,
-    ) -> Option<Hover> {
-        // 简单的悬停实现
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if sql.contains(&table.name) {
-                    return Some(Hover {
-                        contents: tower_lsp::lsp_types::HoverContents::Scalar(
-                            MarkedString::String(format!(
-                                "Table: {}\n{}",
-                                table.name,
-                                table.comment.as_deref().unwrap_or("No description")
-                            )),
-                        ),
-                        range: None,
-                    });
+    async fn hover(&self, sql: &str, position: Position, schema: Option<&Schema>) -> Option<Hover> {
+        let mut parser = self.parser.lock().unwrap();
+        let parse_result = parser.parse(sql);
+
+        // 获取光标位置的节点
+        if let Some(tree) = &parse_result.tree {
+            if let Some(node) = parser.get_node_at_position(tree, position) {
+                let node_text = parser.node_text(node, sql);
+                let node_kind = node.kind();
+                let node_range = parser.node_range(node);
+
+                // 过滤关键字、操作符、分隔符
+                if crate::token::Keywords::is_keyword(&node_text)
+                    || crate::token::Operators::is_operator(&node_text)
+                    || crate::token::Delimiters::is_delimiter(&node_text)
+                {
+                    return None;
+                }
+
+                if let Some(schema) = schema {
+                    // 检查是否是表名
+                    let is_table = node_kind == "table_name"
+                        || node_kind == "table_reference"
+                        || node_kind == "table_identifier"
+                        || (node_kind == "identifier" && parser.is_in_from_context(node, sql));
+
+                    if is_table {
+                        if let Some(table) = schema.tables.iter().find(|t| t.name == node_text) {
+                            let mut info = format!("**Table**: `{}`\n\n", table.name);
+                            if let Some(comment) = &table.comment {
+                                info.push_str(&format!("{}\n\n", comment));
+                            }
+                            info.push_str(&format!("**Columns** ({})\n", table.columns.len()));
+                            for (idx, col) in table.columns.iter().take(10).enumerate() {
+                                info.push_str(&format!(
+                                    "- `{}`: {} {}\n",
+                                    col.name,
+                                    col.data_type,
+                                    if col.nullable { "" } else { "NOT NULL" }
+                                ));
+                                if idx == 9 && table.columns.len() > 10 {
+                                    info.push_str(&format!(
+                                        "- ... and {} more\n",
+                                        table.columns.len() - 10
+                                    ));
+                                    break;
+                                }
+                            }
+
+                            return Some(Hover {
+                                contents: tower_lsp::lsp_types::HoverContents::Markup(
+                                    tower_lsp::lsp_types::MarkupContent {
+                                        kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                        value: info,
+                                    },
+                                ),
+                                range: Some(node_range),
+                            });
+                        }
+                    }
+
+                    // 检查是否是列名
+                    let is_column = node_kind == "column_name"
+                        || node_kind == "column_reference"
+                        || node_kind == "column_identifier"
+                        || (node_kind == "identifier" && parser.is_in_column_context(node, sql));
+
+                    if is_column {
+                        // 尝试获取表名（如果是 table.column 格式）
+                        let table_name = parser.get_table_name_for_column(node, sql);
+
+                        for table in &schema.tables {
+                            // 如果有明确的表名，只在该表中查找
+                            if let Some(ref tname) = table_name {
+                                if table.name != *tname {
+                                    continue;
+                                }
+                            }
+
+                            if let Some(column) = table.columns.iter().find(|c| c.name == node_text)
+                            {
+                                let mut info =
+                                    format!("**Column**: `{}.{}`\n\n", table.name, column.name);
+                                info.push_str(&format!("**Type**: `{}`\n", column.data_type));
+                                info.push_str(&format!(
+                                    "**Nullable**: {}\n",
+                                    if column.nullable { "Yes" } else { "No" }
+                                ));
+                                if let Some(comment) = &column.comment {
+                                    info.push_str(&format!("\n{}\n", comment));
+                                }
+
+                                return Some(Hover {
+                                    contents: tower_lsp::lsp_types::HoverContents::Markup(
+                                        tower_lsp::lsp_types::MarkupContent {
+                                            kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                            value: info,
+                                        },
+                                    ),
+                                    range: Some(node_range),
+                                });
+                            }
+                        }
+                    }
+
+                    // 检查是否是函数名
+                    if node_kind == "function_name" || node_kind.contains("function") {
+                        if let Some(func) = schema.functions.iter().find(|f| f.name == node_text) {
+                            let mut info = format!("**Function**: `{}`\n\n", func.name);
+                            if let Some(desc) = &func.description {
+                                info.push_str(&format!("{}\n\n", desc));
+                            }
+                            info.push_str(&format!("**Returns**: `{}`\n", func.return_type));
+                            if !func.parameters.is_empty() {
+                                info.push_str("\n**Parameters**:\n");
+                                for param in &func.parameters {
+                                    info.push_str(&format!(
+                                        "- `{}`: `{}`{}\n",
+                                        param.name,
+                                        param.data_type,
+                                        if param.optional { " (optional)" } else { "" }
+                                    ));
+                                }
+                            }
+
+                            return Some(Hover {
+                                contents: tower_lsp::lsp_types::HoverContents::Markup(
+                                    tower_lsp::lsp_types::MarkupContent {
+                                        kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                        value: info,
+                                    },
+                                ),
+                                range: Some(node_range),
+                            });
+                        }
+                    }
                 }
             }
         }
+
         None
     }
 
@@ -382,15 +499,48 @@ impl Dialect for MysqlDialect {
                 // 如果是表名，查找表定义
                 if is_table {
                     if let Some(schema) = schema {
-                        if schema.tables.iter().any(|t| t.name == node_text) {
-                            // 返回当前文档中表名第一次出现的位置（作为定义位置）
-                            // 在实际应用中，这应该是 Schema 文件中的位置
+                        if let Some(table) = schema.tables.iter().find(|t| t.name == node_text) {
+                            // 使用表的源位置（如果有）
+                            let (uri, line) = if let Some((ref source_uri, source_line)) =
+                                table.source_location
+                            {
+                                (
+                                    tower_lsp::lsp_types::Url::parse(source_uri).unwrap_or_else(
+                                        |_| {
+                                            tower_lsp::lsp_types::Url::parse("file:///schema.sql")
+                                                .unwrap()
+                                        },
+                                    ),
+                                    source_line.saturating_sub(1), // 转换为0-indexed
+                                )
+                            } else if let Some(ref schema_uri) = schema.source_uri {
+                                // 回退到 schema 的源文件
+                                (
+                                    tower_lsp::lsp_types::Url::parse(schema_uri).unwrap_or_else(
+                                        |_| {
+                                            tower_lsp::lsp_types::Url::parse("file:///schema.sql")
+                                                .unwrap()
+                                        },
+                                    ),
+                                    0,
+                                )
+                            } else {
+                                // 默认虚拟位置
+                                (
+                                    tower_lsp::lsp_types::Url::parse("file:///schema.sql").unwrap(),
+                                    0,
+                                )
+                            };
+
                             return Some(Location {
-                                uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                    .unwrap_or_else(|_| {
-                                        tower_lsp::lsp_types::Url::parse("file:///").unwrap()
-                                    }),
-                                range: parser.node_range(node),
+                                uri,
+                                range: tower_lsp::lsp_types::Range {
+                                    start: tower_lsp::lsp_types::Position { line, character: 0 },
+                                    end: tower_lsp::lsp_types::Position {
+                                        line,
+                                        character: 100,
+                                    },
+                                },
                             });
                         }
                     }
@@ -516,8 +666,13 @@ impl Dialect for MysqlDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        // 简单的格式化：去除多余空格
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        use sqlformat::{FormatOptions, Indent, QueryParams};
+        let options = FormatOptions {
+            indent: Indent::Spaces(2),
+            uppercase: true,
+            lines_between_queries: 1,
+        };
+        sqlformat::format(sql, &QueryParams::None, options)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

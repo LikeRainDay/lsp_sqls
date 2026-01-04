@@ -39,6 +39,9 @@ pub struct Schema {
     pub tables: Vec<Table>,
     /// 函数列表
     pub functions: Vec<Function>,
+    /// Schema 定义文件的 URI (可选)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
 }
 
 /// 表信息
@@ -50,6 +53,9 @@ pub struct Table {
     pub columns: Vec<Column>,
     /// 表注释
     pub comment: Option<String>,
+    /// 表定义位置的 URI 和行号 (可选)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<(String, u32)>,
 }
 
 /// 列信息
@@ -63,6 +69,9 @@ pub struct Column {
     pub nullable: bool,
     /// 列注释
     pub comment: Option<String>,
+    /// 列定义位置的 URI 和行号 (可选)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<(String, u32)>,
 }
 
 /// 函数信息
