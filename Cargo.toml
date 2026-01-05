@@ -10,6 +10,18 @@ homepage = "https://github.com/LikeRainDay/lsp_sqls"
 readme = "README.md"
 keywords = ["sql", "lsp", "database", "ide", "language-server"]
 categories = ["development-tools", "database"]
+exclude = [
+    "artifacts/*",
+    "release-assets/*",
+    "scripts/*",
+    ".github/*",
+    "Makefile",
+    "test_samples/*",
+    "tests/*",
+    "ARCHITECTURE.md",
+    "GAP_ANALYSIS.md",
+    "IMPROVEMENTS.md",
+]
 
 [dependencies]
 tower-lsp = "0.20"
