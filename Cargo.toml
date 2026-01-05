@@ -2,6 +2,14 @@
 name = "sql-lsp"
 version = "0.1.0"
 edition = "2021"
+authors = ["LikeRainDay"]
+description = "A high-performance, multi-dialect SQL Language Server Protocol (LSP) implementation in Rust."
+license = "MIT"
+repository = "https://github.com/LikeRainDay/lsp_sqls"
+homepage = "https://github.com/LikeRainDay/lsp_sqls"
+readme = "README.md"
+keywords = ["sql", "lsp", "database", "ide", "language-server"]
+categories = ["development-tools", "database"]
 
 [dependencies]
 tower-lsp = "0.20"
