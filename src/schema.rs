@@ -180,6 +180,7 @@ mod tests {
             database: "test_db".to_string(),
             tables: vec![],
             functions: vec![],
+            source_uri: None,
         };
 
         let id = manager.register(schema.clone());
@@ -202,6 +203,7 @@ mod tests {
             database: "db1".to_string(),
             tables: vec![],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -209,6 +211,7 @@ mod tests {
             database: "db2".to_string(),
             tables: vec![],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);

@@ -22,6 +22,7 @@ fn test_schema_manager_basic() {
         database: "test_db".to_string(),
         tables: vec![],
         functions: vec![],
+        source_uri: None,
     };
 
     let id = manager.register(schema.clone());
@@ -46,8 +47,10 @@ fn test_schema_manager_multiple_schemas() {
             name: "table1".to_string(),
             columns: vec![],
             comment: None,
+            source_location: None,
         }],
         functions: vec![],
+        source_uri: None,
     };
 
     let schema2 = Schema {
@@ -57,8 +60,10 @@ fn test_schema_manager_multiple_schemas() {
             name: "table2".to_string(),
             columns: vec![],
             comment: None,
+            source_location: None,
         }],
         functions: vec![],
+        source_uri: None,
     };
 
     let id1 = manager.register(schema1);
@@ -87,6 +92,7 @@ async fn test_schema_manager_concurrent() {
                 database: format!("db_{}", i),
                 tables: vec![],
                 functions: vec![],
+                source_uri: None,
             };
             let id = manager_clone.register(schema);
             manager_clone.get(id)
@@ -115,17 +121,21 @@ fn test_schema_with_tables_and_columns() {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: Some("Primary key".to_string()),
+                    source_location: None,
                 },
                 Column {
                     name: "email".to_string(),
                     data_type: "VARCHAR(255)".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 },
             ],
             comment: Some("User table".to_string()),
+            source_location: None,
         }],
         functions: vec![],
+        source_uri: None,
     };
 
     assert_eq!(schema.tables.len(), 1);
@@ -149,6 +159,7 @@ fn test_schema_with_functions() {
             return_type: "VARCHAR".to_string(),
             description: Some("Test function".to_string()),
         }],
+        source_uri: None,
     };
 
     assert_eq!(schema.functions.len(), 1);

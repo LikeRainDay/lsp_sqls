@@ -21,10 +21,13 @@ mod schema_inference_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -37,10 +40,13 @@ mod schema_inference_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);
@@ -86,8 +92,10 @@ mod schema_inference_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -97,8 +105,10 @@ mod schema_inference_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema1);
@@ -137,8 +147,10 @@ mod schema_inference_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -148,8 +160,10 @@ mod schema_inference_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);
@@ -197,10 +211,13 @@ mod schema_priority_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: Some("Explicit schema".to_string()),
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let inferred_schema = Schema {
@@ -213,10 +230,13 @@ mod schema_priority_tests {
                     data_type: "BIGINT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: Some("Inferred schema".to_string()),
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let explicit_id = manager.register(explicit_schema);
@@ -243,8 +263,10 @@ mod schema_priority_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -254,8 +276,10 @@ mod schema_priority_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);
@@ -280,14 +304,17 @@ mod schema_priority_tests {
                     name: "users".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
             ],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema_with_fewer_tables = Schema {
@@ -297,8 +324,10 @@ mod schema_priority_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema_with_more_tables);
@@ -334,10 +363,13 @@ mod schema_isolation_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -350,10 +382,13 @@ mod schema_isolation_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);
@@ -396,8 +431,10 @@ mod schema_isolation_tests {
                         name: format!("table_{}", i),
                         columns: vec![],
                         comment: None,
+                        source_location: None,
                     }],
                     functions: vec![],
+                    source_uri: None,
                 };
                 let id = manager_clone.register(schema.clone());
                 (id, manager_clone.get(id))
@@ -439,10 +476,13 @@ mod schema_isolation_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: Some("Production users".to_string()),
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -455,10 +495,13 @@ mod schema_isolation_tests {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: None,
+                    source_location: None,
                 }],
                 comment: Some("Test users".to_string()),
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         let id1 = manager.register(schema1);
@@ -491,14 +534,17 @@ mod schema_matching_tests {
                     name: "users".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
             ],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema);
@@ -537,14 +583,17 @@ mod schema_matching_tests {
                     name: "users".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
             ],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema);
@@ -582,14 +631,17 @@ mod schema_matching_tests {
                     name: "users".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
+                    source_location: None,
                 },
             ],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema);
@@ -630,8 +682,10 @@ mod schema_matching_tests {
                 name: "users".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema);
@@ -680,8 +734,10 @@ mod schema_inference_integration_tests {
                         data_type: "INT".to_string(),
                         nullable: false,
                         comment: None,
+                        source_location: None,
                     }],
                     comment: None,
+                    source_location: None,
                 },
                 Table {
                     name: "orders".to_string(),
@@ -690,11 +746,14 @@ mod schema_inference_integration_tests {
                         data_type: "INT".to_string(),
                         nullable: false,
                         comment: None,
+                        source_location: None,
                     }],
                     comment: None,
+                    source_location: None,
                 },
             ],
             functions: vec![],
+            source_uri: None,
         };
 
         let schema2 = Schema {
@@ -704,8 +763,10 @@ mod schema_inference_integration_tests {
                 name: "events".to_string(),
                 columns: vec![],
                 comment: None,
+                source_location: None,
             }],
             functions: vec![],
+            source_uri: None,
         };
 
         manager.register(schema1);

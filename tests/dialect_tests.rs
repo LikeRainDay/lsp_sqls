@@ -35,7 +35,8 @@ async fn test_mysql_dialect() {
 
     // 测试格式化
     let formatted = dialect.format("SELECT   *   FROM   users").await;
-    assert_eq!(formatted, "SELECT * FROM users");
+    // sqlformat 返回的是带格式化的多行输出
+    assert_eq!(formatted, "SELECT\n  *\nFROM\n  users");
 }
 
 #[tokio::test]
@@ -221,17 +222,21 @@ async fn test_dialect_with_schema() {
                     data_type: "INT".to_string(),
                     nullable: false,
                     comment: Some("User ID".to_string()),
+                    source_location: None,
                 },
                 Column {
                     name: "name".to_string(),
                     data_type: "VARCHAR(255)".to_string(),
                     nullable: true,
                     comment: None,
+                    source_location: None,
                 },
             ],
             comment: Some("Users table".to_string()),
+            source_location: None,
         }],
         functions: vec![],
+        source_uri: None,
     };
 
     let items = dialect
