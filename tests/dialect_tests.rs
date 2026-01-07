@@ -40,6 +40,18 @@ async fn test_mysql_dialect() {
 }
 
 #[tokio::test]
+async fn test_mysql_diagnostics() {
+    let dialect = MysqlDialect::new();
+    // 语法错误：SELECT * FROM 后面没有表名
+    let diagnostics = dialect.parse("SELECT * FROM", None).await;
+    // 应该返回语法错误诊断
+    assert!(
+        !diagnostics.is_empty(),
+        "Should return diagnostics for incomplete SQL"
+    );
+}
+
+#[tokio::test]
 async fn test_postgres_dialect() {
     let dialect = PostgresDialect::new();
     assert_eq!(dialect.name(), "postgres");
@@ -263,4 +275,244 @@ async fn test_dialect_with_schema() {
     assert!(items
         .iter()
         .any(|item| item.label == "users" || item.label.contains("users")));
+}
+
+/// 辅助函数：测试补全并打印详细日志
+/// 用于展示智能推断的输入输出
+async fn test_completion_with_log(
+    dialect: &dyn Dialect,
+    name: &str,
+    input_text: &str,
+    line: u32,
+    character: u32,
+    schema: Option<&Schema>,
+) -> Vec<tower_lsp::lsp_types::CompletionItem> {
+    println!("\n[{}] Testing Completion...", name);
+    println!("----------------------------------------");
+    println!("Input Text:");
+    for (i, l) in input_text.lines().enumerate() {
+        println!("{:3} | {}", i, l);
+        if i == line as usize {
+            // Prefix length matches "{:3} | " (4 chars for number+padding, 3 chars for " | ")
+            // Actually {:3} produces 3 chars. " | " is 3 chars. Total 6 chars.
+            let prefix_len = 6;
+            let indent = " ".repeat(prefix_len + character as usize);
+            println!("{}^", indent);
+        }
+    }
+
+    let position = tower_lsp::lsp_types::Position { line, character };
+    let mut items = dialect.completion(input_text, position, schema).await;
+
+    // Sort by sort_text (LSP standard behavior)
+    items.sort_by(|a, b| {
+        let a_sort = a.sort_text.as_ref().unwrap_or(&a.label);
+        let b_sort = b.sort_text.as_ref().unwrap_or(&b.label);
+        a_sort.cmp(b_sort)
+    });
+
+    println!("----------------------------------------");
+    println!("Inference Result ({} items found):", items.len());
+    for (i, item) in items.iter().take(10).enumerate() {
+        let kind = match item.kind {
+            Some(k) => format!("{:?}", k),
+            None => "Unknown".to_string(),
+        };
+        println!(
+            "  {}. [{}] {} - {:?}",
+            i + 1,
+            kind,
+            item.label,
+            item.detail /* .as_deref().unwrap_or("") */
+        );
+    }
+    if items.len() > 10 {
+        println!("  ... and {} more", items.len() - 10);
+    }
+    println!("----------------------------------------");
+
+    items
+}
+
+#[tokio::test]
+async fn test_intelligent_completion_logging() {
+    let dialect = MysqlDialect::new();
+
+    // Shared Schema for tests
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "shop".to_string(),
+        tables: vec![
+            Table {
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "VARCHAR".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                    Column {
+                        name: "created_at".to_string(),
+                        data_type: "DATETIME".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                ],
+                comment: Some("Users table".to_string()),
+                source_location: None,
+            },
+            Table {
+                name: "orders".to_string(),
+                columns: vec![
+                    Column {
+                        name: "order_id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                    Column {
+                        name: "user_id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                    Column {
+                        name: "total_amount".to_string(),
+                        data_type: "DECIMAL".to_string(),
+                        nullable: false,
+                        comment: None,
+                        source_location: None,
+                    },
+                ],
+                comment: Some("Orders table".to_string()),
+                source_location: None,
+            },
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    // 场景 1: WHERE 子句上下文推断
+    let sql1 = "SELECT * FROM users WHERE ";
+    let items1 = test_completion_with_log(
+        &dialect,
+        "MySQL - Where Clause (with Schema)",
+        sql1,
+        0,
+        26, // "SELECT * FROM users WHERE " 的长度
+        Some(&schema),
+    )
+    .await;
+
+    // WHERE clause should suggest operators and columns, NOT general keywords
+    assert!(
+        items1.iter().any(|item| item.label == "="),
+        "Should suggest operator '='"
+    );
+    assert!(
+        items1.iter().any(|item| item.label == "LIKE"),
+        "Should suggest operator 'LIKE'"
+    );
+    assert!(
+        items1
+            .iter()
+            .any(|item| item.label.contains("users.id") || item.label == "id"),
+        "Should suggest columns from users table"
+    );
+    // Should NOT suggest general keywords
+    assert!(
+        !items1
+            .iter()
+            .any(|item| item.label == "SELECT" || item.label == "INSERT"),
+        "Should NOT suggest general SQL keywords in WHERE clause"
+    );
+
+    // 场景 2: Column Completion (SELECT Context)
+    let sql_cols = "SELECT id, na";
+    let items_cols = test_completion_with_log(
+        &dialect,
+        "MySQL - Column Completion",
+        sql_cols,
+        0,
+        13, // "SELECT id, na"
+        Some(&schema),
+    )
+    .await;
+
+    // Here we expect columns
+    // Note: The completion engine returns fully qualified names (e.g., users.name) when multiple tables might be relevant or by default.
+    assert!(
+        items_cols
+            .iter()
+            .any(|item| item.label == "users.name" || item.label == "name"),
+        "Should suggest 'name' column"
+    );
+    assert!(
+        items_cols
+            .iter()
+            .any(|item| item.label == "users.created_at" || item.label == "created_at"),
+        "Should suggest 'created_at' column"
+    );
+
+    // 场景 3: Schema 感知补全 (Alias)
+    let sql2 = "SELECT o. FROM orders o";
+    // 模拟在 "o." 后面输入
+    let items2 = test_completion_with_log(
+        &dialect,
+        "MySQL - Schema Aware & Alias",
+        sql2,
+        0,
+        9,
+        Some(&schema),
+    )
+    .await;
+
+    // 验证是否包含 schema 中的列名
+    assert!(items2.len() > 0);
+    // Should suggest columns from orders table (e.g., order_id)
+    assert!(
+        items2
+            .iter()
+            .any(|item| item.label == "order_id" || item.label == "orders.order_id"),
+        "Should suggest 'order_id' column for alias 'o'"
+    );
+    // Should NOT suggest keywords like "JOIN"
+    assert!(
+        !items2.iter().any(|item| item.label == "JOIN"),
+        "Should NOT suggest keywords like 'JOIN' in TableColumn context"
+    );
+
+    // 场景 4: Join 子句
+    let sql3 = "SELECT * FROM orders JOIN ";
+    let items3 =
+        test_completion_with_log(&dialect, "MySQL - JOIN Clause", sql3, 0, 26, Some(&schema)).await;
+
+    // JOIN clause should suggest ONLY table names
+    assert!(
+        items3.iter().any(|item| item.label == "users"),
+        "Should suggest table 'users' for JOIN"
+    );
+    assert!(
+        items3.iter().any(|item| item.label == "orders"),
+        "Should suggest table 'orders' for JOIN"
+    );
+    // Should NOT suggest keywords
+    assert!(
+        !items3
+            .iter()
+            .any(|item| item.label == "SELECT" || item.label == "INSERT"),
+        "Should NOT suggest general SQL keywords in JOIN clause"
+    );
 }

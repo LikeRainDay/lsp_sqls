@@ -1,3 +1,0 @@
-sequence
-  [process where process.name == "cmd.exe"]
-  [file where file.name == "notepad.exe"]

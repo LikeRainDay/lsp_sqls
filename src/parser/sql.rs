@@ -317,11 +317,27 @@ impl SqlParser {
     /// 获取指定位置的节点
     pub fn get_node_at_position<'a>(&self, tree: &'a Tree, position: Position) -> Option<Node<'a>> {
         let root = tree.root_node();
-        let point = tree_sitter::Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
-        root.descendant_for_point_range(point, point)
+        let row = position.line as usize;
+        let col = position.character as usize;
+
+        // Try exact position
+        let point = tree_sitter::Point { row, column: col };
+        let node = root.descendant_for_point_range(point, point);
+
+        // If we got the root node (and we are not at 0,0), it usually means we are at the end of a token or file
+        // and missed the specific node. Try moving back 1 char.
+        if let Some(n) = node {
+            if n.kind() == "program" && col > 0 {
+                let point_prev = tree_sitter::Point {
+                    row,
+                    column: col - 1,
+                };
+                return root.descendant_for_point_range(point_prev, point_prev);
+            }
+            return Some(n);
+        }
+
+        node
     }
 
     /// 提取查询中的表名
@@ -482,72 +498,99 @@ impl SqlParser {
         }
     }
 
-    /// 分析补全上下文
-    /// 根据光标位置的 AST 节点，判断应该提供什么类型的补全
-    pub fn analyze_completion_context(&self, node: Node, source: &str) -> CompletionContext {
-        let mut current = Some(node);
+    /// 分析补全上下文 (Text-based heuristics for reliability)
+    /// Uses text patterns before cursor instead of unreliable AST node types
+    pub fn analyze_completion_context(
+        &self,
+        _node: Node,
+        source: &str,
+        position: Position,
+    ) -> CompletionContext {
+        // Convert LSP position (line, character) to byte offset
+        let lines: Vec<&str> = source.lines().collect();
+        let mut cursor_offset = 0;
 
-        // 向上遍历 AST，查找上下文
-        while let Some(n) = current {
-            let kind = n.kind();
-
-            // 检查是否在表名后（如 table.column）
-            if kind == "member_expression" || kind == "dotted_name" {
-                // 检查是否有点号
-                if let Ok(text) = n.utf8_text(source.as_bytes()) {
-                    if text.contains('.') {
-                        return CompletionContext::TableColumn;
-                    }
-                }
+        // Add bytes for all complete lines before cursor
+        for (line_idx, line) in lines.iter().enumerate() {
+            if line_idx < position.line as usize {
+                cursor_offset += line.len() + 1; // +1 for newline
+            } else if line_idx == position.line as usize {
+                // Add characters up to cursor position in target line
+                cursor_offset += position.character.min(line.len() as u32) as usize;
+                break;
             }
+        }
 
-            // 检查各种子句
-            match kind {
-                "from_clause" | "table_reference" | "table_expression" => {
-                    return CompletionContext::FromClause;
-                }
-                "join_clause" | "join_expression" => {
-                    return CompletionContext::JoinClause;
-                }
-                "select_list" | "select_expression" | "select_expression_list" => {
-                    return CompletionContext::SelectClause;
-                }
-                "where_clause" | "where_expression" => {
-                    return CompletionContext::WhereClause;
-                }
-                "order_by_clause" | "order_by_expression" => {
-                    return CompletionContext::OrderByClause;
-                }
-                "group_by_clause" | "group_by_expression" => {
-                    return CompletionContext::GroupByClause;
-                }
-                "having_clause" | "having_expression" => {
-                    return CompletionContext::HavingClause;
-                }
-                _ => {}
+        // Extract text before cursor
+        let text_before = &source[..cursor_offset];
+        let text_upper = text_before.to_uppercase();
+
+        // Priority 1: Check for table/alias column access (ends with .)
+        if text_before.trim_end().ends_with('.') {
+            return CompletionContext::TableColumn;
+        }
+
+        // Priority 2: Find the last keyword to determine context
+        // We check in reverse order of precedence (most specific first)
+
+        // Check for WHERE clause (after FROM, before ORDER/GROUP/LIMIT)
+        if let Some(where_pos) = text_upper.rfind("WHERE") {
+            // Make sure WHERE is the most recent clause keyword
+            let has_later_keyword = text_upper[where_pos..]
+                .find("ORDER BY")
+                .or_else(|| text_upper[where_pos..].find("GROUP BY"))
+                .or_else(|| text_upper[where_pos..].find("LIMIT"))
+                .or_else(|| text_upper[where_pos..].find("HAVING"));
+
+            if has_later_keyword.is_none() {
+                return CompletionContext::WhereClause;
             }
+        }
 
-            // 检查父节点文本是否包含关键字
-            if let Ok(text) = n.utf8_text(source.as_bytes()) {
-                let upper = text.to_uppercase();
-                if upper.contains("FROM") {
-                    return CompletionContext::FromClause;
-                } else if upper.contains("JOIN") {
-                    return CompletionContext::JoinClause;
-                } else if upper.contains("SELECT") && !upper.contains("FROM") {
-                    return CompletionContext::SelectClause;
-                } else if upper.contains("WHERE") {
-                    return CompletionContext::WhereClause;
-                } else if upper.contains("ORDER BY") {
-                    return CompletionContext::OrderByClause;
-                } else if upper.contains("GROUP BY") {
-                    return CompletionContext::GroupByClause;
-                } else if upper.contains("HAVING") {
-                    return CompletionContext::HavingClause;
-                }
+        // Check for JOIN clause
+        if let Some(join_pos) = text_upper.rfind("JOIN") {
+            // Check if we're right after JOIN keyword (before ON)
+            let after_join = &text_upper[join_pos + 4..].trim_start();
+            if !after_join.starts_with("ON") && !after_join.contains("ON") {
+                return CompletionContext::JoinClause;
             }
+        }
 
-            current = n.parent();
+        // Check for ORDER BY clause
+        if text_upper.rfind("ORDER BY").is_some() {
+            return CompletionContext::OrderByClause;
+        }
+
+        // Check for GROUP BY clause
+        if text_upper.rfind("GROUP BY").is_some() {
+            return CompletionContext::GroupByClause;
+        }
+
+        // Check for HAVING clause
+        if text_upper.rfind("HAVING").is_some() {
+            return CompletionContext::HavingClause;
+        }
+
+        // Check for FROM clause (table selection)
+        if let Some(from_pos) = text_upper.rfind("FROM") {
+            let after_from = &text_upper[from_pos + 4..].trim_start();
+            // If there's no WHERE/JOIN after FROM, we're in FROM context
+            if !after_from.contains("WHERE")
+                && !after_from.contains("JOIN")
+                && !after_from.contains("ORDER")
+                && !after_from.contains("GROUP")
+            {
+                return CompletionContext::FromClause;
+            }
+        }
+
+        // Check for SELECT clause (column selection)
+        if let Some(select_pos) = text_upper.rfind("SELECT") {
+            let after_select = &text_upper[select_pos + 6..].trim_start();
+            // If there's no FROM after SELECT, we're in SELECT column context
+            if !after_select.contains("FROM") {
+                return CompletionContext::SelectClause;
+            }
         }
 
         CompletionContext::Default
@@ -560,6 +603,16 @@ impl SqlParser {
 
         while let Some(n) = current {
             let kind = n.kind();
+
+            // Try to extract from text directly first, if it looks like "table." or "table.col"
+            if let Ok(text) = n.utf8_text(source.as_bytes()) {
+                if let Some(dot_pos) = text.find('.') {
+                    let table_name = text[..dot_pos].trim();
+                    if !table_name.is_empty() && !Keywords::is_keyword(table_name) {
+                        return Some(table_name.to_string());
+                    }
+                }
+            }
 
             // 查找 member_expression 或 dotted_name
             if kind == "member_expression" || kind == "dotted_name" {
@@ -607,6 +660,93 @@ pub struct AstNode {
 }
 
 impl SqlParser {
+    /// 提取表别名映射 (Alias -> Table Name)
+    /// Uses text-based extraction for reliability
+    pub fn extract_aliases(
+        &self,
+        _tree: &Tree,
+        source: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let mut aliases = std::collections::HashMap::new();
+        let source_upper = source.to_uppercase();
+
+        // Pattern: FROM/JOIN table_name alias
+        // Look for FROM/JOIN keywords followed by identifiers
+        let keywords = ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN"];
+
+        for keyword in keywords {
+            let mut search_pos = 0;
+            while let Some(keyword_pos) = source_upper[search_pos..].find(keyword) {
+                let abs_pos = search_pos + keyword_pos + keyword.len();
+
+                // Extract text after keyword
+                let after_keyword = &source[abs_pos..].trim_start();
+
+                // Try to extract "table_name alias" pattern
+                // Split by whitespace and take first two tokens
+                let tokens: Vec<&str> = after_keyword
+                    .split_whitespace()
+                    .take(3) // table, optional AS, alias
+                    .collect();
+
+                if tokens.len() >= 2 {
+                    let table_name = tokens[0];
+                    let alias_candidate =
+                        if tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("AS") {
+                            tokens[2]
+                        } else if !tokens[1].eq_ignore_ascii_case("WHERE")
+                            && !tokens[1].eq_ignore_ascii_case("ON")
+                            && !tokens[1].eq_ignore_ascii_case("JOIN")
+                            && !tokens[1].eq_ignore_ascii_case("INNER")
+                            && !tokens[1].eq_ignore_ascii_case("LEFT")
+                            && !tokens[1].eq_ignore_ascii_case("RIGHT")
+                        {
+                            tokens[1]
+                        } else {
+                            ""
+                        };
+
+                    if !alias_candidate.is_empty() && !Keywords::is_keyword(alias_candidate) {
+                        aliases.insert(alias_candidate.to_string(), table_name.to_string());
+                    }
+                }
+
+                search_pos = abs_pos + 1;
+            }
+        }
+
+        aliases
+    }
+
+    /// 提取SQL中引用的表名（从FROM和JOIN子句）
+    pub fn extract_referenced_tables(&self, _tree: &Tree, source: &str) -> Vec<String> {
+        let mut tables = Vec::new();
+        let source_upper = source.to_uppercase();
+
+        let keywords = ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN"];
+
+        for keyword in keywords {
+            let mut search_pos = 0;
+            while let Some(keyword_pos) = source_upper[search_pos..].find(keyword) {
+                let abs_pos = search_pos + keyword_pos + keyword.len();
+                let after_keyword = &source[abs_pos..].trim_start();
+
+                // Extract first token (table name)
+                if let Some(first_token) = after_keyword.split_whitespace().next() {
+                    if !Keywords::is_keyword(first_token)
+                        && !tables.contains(&first_token.to_string())
+                    {
+                        tables.push(first_token.to_string());
+                    }
+                }
+
+                search_pos = abs_pos + 1;
+            }
+        }
+
+        tables
+    }
+
     /// 将 Tree-sitter Node 转换为 AstNode
     pub fn node_to_ast_node(&self, node: Node, source: &str) -> AstNode {
         AstNode {

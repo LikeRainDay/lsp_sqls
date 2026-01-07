@@ -143,7 +143,7 @@ impl Dialect for MysqlDialect {
         // 分析补全上下文
         let context = if let Some(tree) = &parse_result.tree {
             if let Some(node) = parser.get_node_at_position(tree, position) {
-                parser.analyze_completion_context(node, sql)
+                parser.analyze_completion_context(node, sql, position)
             } else {
                 crate::parser::CompletionContext::Default
             }
@@ -157,12 +157,7 @@ impl Dialect for MysqlDialect {
         match context {
             crate::parser::CompletionContext::FromClause
             | crate::parser::CompletionContext::JoinClause => {
-                // FROM/JOIN 子句：只补全表名和 JOIN 相关关键字
-                let join_keywords = vec!["JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON"];
-                for keyword in join_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
-
+                // FROM/JOIN 子句：只补全表名，不要关键字
                 // 添加表名补全
                 if let Some(schema) = schema {
                     for table in &schema.tables {
@@ -172,33 +167,69 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                // SELECT 子句：补全列名和 SELECT 相关关键字
-                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
-                for keyword in select_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
+                // SELECT 子句：优先补全列名，然后是 SELECT 相关关键字
+                // Extract prefix from cursor position
+                let prefix = {
+                    let lines: Vec<&str> = sql.lines().collect();
+                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
+                    let text_before =
+                        &line_text[..position.character.min(line_text.len() as u32) as usize];
 
-                // 添加列名补全
+                    // Extract last word/identifier before cursor
+                    text_before
+                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
+                        .last()
+                        .unwrap_or("")
+                        .to_lowercase()
+                };
+
+                // 先添加列名补全（优先级更高）
                 if let Some(schema) = schema {
                     for table in &schema.tables {
                         for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&table.name)));
+                            let mut item = self.create_column_item(column, Some(&table.name));
+
+                            // Smart sorting based on prefix match
+                            if !prefix.is_empty() && column.name.to_lowercase().starts_with(&prefix)
+                            {
+                                // Prefix match: highest priority
+                                item.sort_text = Some(format!("00{}", column.name));
+                            } else {
+                                // No match: normal column priority
+                                item.sort_text = Some(format!("01{}", column.name));
+                            }
+
+                            items.push(item);
                         }
                     }
+                }
+
+                // 然后添加 SELECT 相关关键字（优先级较低）
+                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
+                for keyword in select_keywords {
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("1{}", keyword));
+                    items.push(item);
                 }
             }
 
             crate::parser::CompletionContext::WhereClause => {
-                // WHERE 子句：补全列名、操作符、关键字
-                let where_keywords = vec![
-                    "AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL", "TRUE", "FALSE",
-                ];
-                for keyword in where_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
-
+                // WHERE 子句：只补全列名和操作符，不要关键字
                 // 添加操作符
-                let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
+                let operators = vec![
+                    "=",
+                    "<>",
+                    "!=",
+                    ">",
+                    "<",
+                    ">=",
+                    "<=",
+                    "LIKE",
+                    "IN",
+                    "BETWEEN",
+                    "IS NULL",
+                    "IS NOT NULL",
+                ];
                 for op in operators {
                     items.push(CompletionItem {
                         label: op.to_string(),
@@ -207,7 +238,7 @@ impl Dialect for MysqlDialect {
                         documentation: None,
                         deprecated: None,
                         preselect: None,
-                        sort_text: Some(format!("1{}", op)),
+                        sort_text: Some(format!("0{}", op)), // Operators first
                         filter_text: None,
                         insert_text: Some(op.to_string()),
                         insert_text_format: None,
@@ -222,11 +253,28 @@ impl Dialect for MysqlDialect {
                     });
                 }
 
-                // 添加列名补全
+                // 只添加FROM/JOIN中引用的表的列
                 if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(column, Some(&table.name)));
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
+                        let aliases = parser.extract_aliases(tree, sql);
+
+                        // Resolve aliases to real table names
+                        let mut real_table_names: Vec<String> = referenced_tables
+                            .iter()
+                            .map(|t| aliases.get(t).unwrap_or(t).clone())
+                            .collect();
+                        real_table_names.dedup();
+
+                        for table in &schema.tables {
+                            if real_table_names.contains(&table.name) {
+                                for column in &table.columns {
+                                    let mut item =
+                                        self.create_column_item(column, Some(&table.name));
+                                    item.sort_text = Some(format!("1{}", column.name)); // After operators
+                                    items.push(item);
+                                }
+                            }
                         }
                     }
                 }
@@ -280,8 +328,14 @@ impl Dialect for MysqlDialect {
                     if let Some(node) = parser.get_node_at_position(tree, position) {
                         if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
                             if let Some(schema) = schema {
+                                let aliases = parser.extract_aliases(tree, sql);
+
+                                // Resolve alias to real table name
+                                let real_table_name =
+                                    aliases.get(&table_name).unwrap_or(&table_name);
+
                                 if let Some(table) =
-                                    schema.tables.iter().find(|t| t.name == table_name)
+                                    schema.tables.iter().find(|t| t.name == *real_table_name)
                                 {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));

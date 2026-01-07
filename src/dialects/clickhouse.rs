@@ -132,7 +132,7 @@ impl Dialect for ClickHouseDialect {
 
         let context = if let Some(tree) = &parse_result.tree {
             if let Some(node) = parser.get_node_at_position(tree, position) {
-                parser.analyze_completion_context(node, sql)
+                parser.analyze_completion_context(node, sql, position)
             } else {
                 crate::parser::CompletionContext::Default
             }
