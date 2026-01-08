@@ -262,19 +262,11 @@ async fn test_dialect_with_schema() {
         )
         .await;
 
-    // 应该包含表名和列名（在 SELECT 子句中，应该包含列名）
-    // 注意：由于现在使用 AST 上下文分析，在 SELECT 后可能只返回列名和 SELECT 相关关键字
-    // 检查是否有列名补全
-    assert!(items
-        .iter()
-        .any(|item| item.label == "id" || item.label.contains("id")));
-    assert!(items
-        .iter()
-        .any(|item| item.label == "name" || item.label.contains("name")));
-    // 检查是否有表名（可能在 Default 上下文中）
-    assert!(items
-        .iter()
-        .any(|item| item.label == "users" || item.label.contains("users")));
+    // 应该包含列名（在 SELECT 子句中，应该包含列名）
+    // 注意：由于现在使用 AST 上下文分析，在 SELECT 后只返回列名和 SELECT 相关关键字
+    // 检查是否有列名补全（单表查询，不带表前缀）
+    assert!(items.iter().any(|item| item.label == "id"));
+    assert!(items.iter().any(|item| item.label == "name"));
 }
 
 /// 辅助函数：测试补全并打印详细日志
@@ -425,11 +417,14 @@ async fn test_intelligent_completion_logging() {
         items1.iter().any(|item| item.label == "LIKE"),
         "Should suggest operator 'LIKE'"
     );
+    // Single-table query: expect simple column names without table prefix
     assert!(
-        items1
-            .iter()
-            .any(|item| item.label.contains("users.id") || item.label == "id"),
-        "Should suggest columns from users table"
+        items1.iter().any(|item| item.label == "id"),
+        "Should suggest 'id' column"
+    );
+    assert!(
+        items1.iter().any(|item| item.label == "name"),
+        "Should suggest 'name' column"
     );
     // Should NOT suggest general keywords
     assert!(
@@ -451,18 +446,13 @@ async fn test_intelligent_completion_logging() {
     )
     .await;
 
-    // Here we expect columns
-    // Note: The completion engine returns fully qualified names (e.g., users.name) when multiple tables might be relevant or by default.
+    // Single-table query (no FROM yet): expect simple column names without table prefix
     assert!(
-        items_cols
-            .iter()
-            .any(|item| item.label == "users.name" || item.label == "name"),
+        items_cols.iter().any(|item| item.label == "name"),
         "Should suggest 'name' column"
     );
     assert!(
-        items_cols
-            .iter()
-            .any(|item| item.label == "users.created_at" || item.label == "created_at"),
+        items_cols.iter().any(|item| item.label == "created_at"),
         "Should suggest 'created_at' column"
     );
 

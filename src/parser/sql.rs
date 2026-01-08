@@ -499,10 +499,76 @@ impl SqlParser {
     }
 
     /// 分析补全上下文 (Text-based heuristics for reliability)
-    /// Uses text patterns before cursor instead of unreliable AST node types
+    /// 分析补全上下文 (AST-based)
+    /// Uses Tree-sitter AST node traversal for robust context detection
     pub fn analyze_completion_context(
         &self,
-        _node: Node,
+        node: Node,
+        source: &str,
+        _position: Position,
+    ) -> CompletionContext {
+        let mut current_node = Some(node);
+
+        // First, check if we are inside a specific node type that dictates context directly
+        // Usually we want to find the clause we are in (SELECT, FROM, WHERE, etc.)
+        while let Some(n) = current_node {
+            match n.kind() {
+                // SELECT clause
+                "select_clause" | "select_list" => {
+                    // Check if we are in a column position or after a dot
+                    // (This might need refinement, but select_clause generally means column completion)
+                    return CompletionContext::SelectClause;
+                }
+                // FROM clause
+                "from_clause" | "table_references" => {
+                    return CompletionContext::FromClause;
+                }
+                // JOIN clause
+                // Tree-sitter sql often structures joins inside table_references or as specific join nodes
+                // Depending on the exact grammar structure.
+                // Assuming "join_clause" or similar if available, or fallback to heuristics if tree-sitter is murky here.
+                // Note: tree-sitter-sql often puts joins in `table_expression` or `joined_table`
+                "joined_table" => {
+                    // Verify if we are at the ON part or table part
+                    // For now, treat as JoinClause
+                    return CompletionContext::JoinClause;
+                }
+                // WHERE clause
+                "where_clause" => {
+                    return CompletionContext::WhereClause;
+                }
+                // ORDER BY clause
+                "order_by_clause" => {
+                    return CompletionContext::OrderByClause;
+                }
+                // GROUP BY clause
+                "group_by_clause" => {
+                    return CompletionContext::GroupByClause;
+                }
+                // HAVING clause
+                "having_clause" => {
+                    return CompletionContext::HavingClause;
+                }
+                // If we hit the statement level, we might be in a specific position
+                "select_statement" => {
+                    // If we traversed up to statement without hitting a clause,
+                    // we might be in an empty space between clauses or at the end.
+                    // Fallback or check children?
+                    // For robustness, let's keep searching up or break if root.
+                }
+                _ => {}
+            }
+            current_node = n.parent();
+        }
+
+        // Fallback: Use simple heuristics if AST traversal didn't find a specific clause
+        // This handles cases where Syntax is broken (common during typing) and AST is incomplete
+        self.analyze_completion_context_fallback(source, _position)
+    }
+
+    /// Fallback heuristics for context analysis when AST is incomplete
+    fn analyze_completion_context_fallback(
+        &self,
         source: &str,
         position: Position,
     ) -> CompletionContext {
@@ -522,7 +588,11 @@ impl SqlParser {
         }
 
         // Extract text before cursor
-        let text_before = &source[..cursor_offset];
+        let text_before = if cursor_offset <= source.len() {
+            &source[..cursor_offset]
+        } else {
+            source
+        };
         let text_upper = text_before.to_uppercase();
 
         // Priority 1: Check for table/alias column access (ends with .)
@@ -531,11 +601,9 @@ impl SqlParser {
         }
 
         // Priority 2: Find the last keyword to determine context
-        // We check in reverse order of precedence (most specific first)
 
-        // Check for WHERE clause (after FROM, before ORDER/GROUP/LIMIT)
+        // Check for WHERE clause
         if let Some(where_pos) = text_upper.rfind("WHERE") {
-            // Make sure WHERE is the most recent clause keyword
             let has_later_keyword = text_upper[where_pos..]
                 .find("ORDER BY")
                 .or_else(|| text_upper[where_pos..].find("GROUP BY"))
@@ -547,11 +615,10 @@ impl SqlParser {
             }
         }
 
-        // Check for JOIN clause
+        // Check for JOIN clause (basic check)
         if let Some(join_pos) = text_upper.rfind("JOIN") {
-            // Check if we're right after JOIN keyword (before ON)
             let after_join = &text_upper[join_pos + 4..].trim_start();
-            if !after_join.starts_with("ON") && !after_join.contains("ON") {
+            if !after_join.starts_with("ON") && !after_join.contains(" ON ") {
                 return CompletionContext::JoinClause;
             }
         }
@@ -571,23 +638,22 @@ impl SqlParser {
             return CompletionContext::HavingClause;
         }
 
-        // Check for FROM clause (table selection)
+        // Check for FROM clause
         if let Some(from_pos) = text_upper.rfind("FROM") {
             let after_from = &text_upper[from_pos + 4..].trim_start();
-            // If there's no WHERE/JOIN after FROM, we're in FROM context
             if !after_from.contains("WHERE")
                 && !after_from.contains("JOIN")
                 && !after_from.contains("ORDER")
                 && !after_from.contains("GROUP")
+                && !after_from.contains("LIMIT")
             {
                 return CompletionContext::FromClause;
             }
         }
 
-        // Check for SELECT clause (column selection)
+        // Check for SELECT clause
         if let Some(select_pos) = text_upper.rfind("SELECT") {
             let after_select = &text_upper[select_pos + 6..].trim_start();
-            // If there's no FROM after SELECT, we're in SELECT column context
             if !after_select.contains("FROM") {
                 return CompletionContext::SelectClause;
             }
