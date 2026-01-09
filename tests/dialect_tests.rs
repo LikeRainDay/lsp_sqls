@@ -442,14 +442,16 @@ async fn test_intelligent_completion_logging() {
     )
     .await;
 
-    // Single-table query (no FROM yet): expect simple column names without table prefix
+    // After adding prefix filtering: only columns matching 'na' should be suggested
     assert!(
         items_cols.iter().any(|item| item.label == "name"),
-        "Should suggest 'name' column"
+        "Should suggest 'name' column (matches prefix 'na')"
     );
-    assert!(
-        items_cols.iter().any(|item| item.label == "created_at"),
-        "Should suggest 'created_at' column"
+    // created_at should NOT be suggested since it doesn't match prefix 'na'
+    assert_eq!(
+        items_cols.len(),
+        1,
+        "Should only suggest 1 column matching prefix 'na'"
     );
 
     // 场景 3: Schema 感知补全 (Alias)
