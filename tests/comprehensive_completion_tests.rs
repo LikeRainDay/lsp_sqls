@@ -341,10 +341,10 @@ async fn test_comprehensive_completion_scenarios() {
     )
     .await;
 
-    // 没有 schema 时，应该只返回运算符，不返回列名
+    // 没有 schema 时，应该只返回关键字形式的运算符，不返回列名
     assert!(
-        items8.iter().any(|item| item.label == "="),
-        "Should suggest operators even without schema"
+        items8.iter().any(|item| item.label == "LIKE"),
+        "Should suggest keyword operators even without schema"
     );
     assert!(
         !items8

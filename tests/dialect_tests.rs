@@ -408,11 +408,7 @@ async fn test_intelligent_completion_logging() {
     )
     .await;
 
-    // WHERE clause should suggest operators and columns, NOT general keywords
-    assert!(
-        items1.iter().any(|item| item.label == "="),
-        "Should suggest operator '='"
-    );
+    // WHERE clause should suggest keyword operators and columns, NOT symbol operators or general keywords
     assert!(
         items1.iter().any(|item| item.label == "LIKE"),
         "Should suggest operator 'LIKE'"

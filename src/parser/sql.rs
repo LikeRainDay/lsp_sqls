@@ -623,6 +623,13 @@ impl SqlParser {
             }
         }
 
+        // IMPORTANT: Check for HAVING before GROUP BY and ORDER BY
+        // because HAVING comes after GROUP BY in SQL syntax
+        // When both exist, we want to detect the later one
+        if text_upper.rfind("HAVING").is_some() {
+            return CompletionContext::HavingClause;
+        }
+
         // Check for ORDER BY clause
         if text_upper.rfind("ORDER BY").is_some() {
             return CompletionContext::OrderByClause;
@@ -631,11 +638,6 @@ impl SqlParser {
         // Check for GROUP BY clause
         if text_upper.rfind("GROUP BY").is_some() {
             return CompletionContext::GroupByClause;
-        }
-
-        // Check for HAVING clause
-        if text_upper.rfind("HAVING").is_some() {
-            return CompletionContext::HavingClause;
         }
 
         // Check for FROM clause

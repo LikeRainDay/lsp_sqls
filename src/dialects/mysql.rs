@@ -178,7 +178,7 @@ impl Dialect for MysqlDialect {
                     // Extract last word/identifier before cursor
                     text_before
                         .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
-                        .last()
+                        .next_back()
                         .unwrap_or("")
                         .to_lowercase()
                 };
@@ -263,20 +263,8 @@ impl Dialect for MysqlDialect {
                 }
 
                 // 然后添加操作符 (优先级较低)
-                let operators = vec![
-                    "=",
-                    "<>",
-                    "!=",
-                    ">",
-                    "<",
-                    ">=",
-                    "<=",
-                    "LIKE",
-                    "IN",
-                    "BETWEEN",
-                    "IS NULL",
-                    "IS NOT NULL",
-                ];
+                // 只添加关键字形式的运算符，不添加符号运算符
+                let operators = vec!["LIKE", "IN", "BETWEEN", "IS NULL", "IS NOT NULL"];
                 for op in operators {
                     items.push(CompletionItem {
                         label: op.to_string(),
@@ -301,9 +289,8 @@ impl Dialect for MysqlDialect {
                 }
             }
 
-            crate::parser::CompletionContext::OrderByClause
-            | crate::parser::CompletionContext::GroupByClause => {
-                // ORDER BY / GROUP BY：补全列名和关键字
+            crate::parser::CompletionContext::OrderByClause => {
+                // ORDER BY：补全列名和排序关键字
                 // 添加列名补全 (优先级高)
                 if let Some(schema) = schema {
                     // Check if query has multiple tables (to decide whether to use table prefix)
@@ -349,8 +336,8 @@ impl Dialect for MysqlDialect {
                     }
                 }
 
-                // 添加关键字 (优先级低)
-                let keywords = vec!["ASC", "DESC", "BY"];
+                // 添加 ORDER BY 排序关键字 (优先级低)
+                let keywords = vec!["ASC", "DESC"];
                 for keyword in keywords {
                     let mut item = self.create_keyword_item(keyword);
                     item.sort_text = Some(format!("1{}", keyword)); // Keywords after columns
@@ -358,8 +345,57 @@ impl Dialect for MysqlDialect {
                 }
             }
 
+            crate::parser::CompletionContext::GroupByClause => {
+                // GROUP BY：只补全列名，不需要排序关键字
+                // 添加列名补全
+                if let Some(schema) = schema {
+                    // Check if query has multiple tables (to decide whether to use table prefix)
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
+                        let aliases = parser.extract_aliases(tree, sql);
+
+                        // Resolve aliases to real table names
+                        let mut real_table_names: Vec<String> = referenced_tables
+                            .iter()
+                            .map(|t| aliases.get(t).unwrap_or(t).clone())
+                            .collect();
+                        real_table_names.dedup();
+
+                        // 单表查询时不使用表名前缀，多表查询时使用前缀避免歧义
+                        let use_table_prefix = real_table_names.len() > 1;
+
+                        for table in &schema.tables {
+                            // 只添加查询中引用的表的列
+                            if real_table_names.is_empty() || real_table_names.contains(&table.name)
+                            {
+                                for column in &table.columns {
+                                    let table_name = if use_table_prefix {
+                                        Some(table.name.as_str())
+                                    } else {
+                                        None
+                                    };
+                                    let mut item = self.create_column_item(column, table_name);
+                                    item.sort_text = Some(format!("0{}", column.name)); // Columns first
+                                    items.push(item);
+                                }
+                            }
+                        }
+                    } else {
+                        // 如果没有解析树，默认返回所有列，不带前缀
+                        for table in &schema.tables {
+                            for column in &table.columns {
+                                let mut item = self.create_column_item(column, None);
+                                item.sort_text = Some(format!("0{}", column.name)); // Columns first
+                                items.push(item);
+                            }
+                        }
+                    }
+                }
+                // GROUP BY 不添加任何关键字
+            }
+
             crate::parser::CompletionContext::HavingClause => {
-                // HAVING 子句：列名(优先) > 聚合函数 > 关键字
+                // HAVING 子句：列名(优先) > 聚合函数 > 操作符 > 关键字
 
                 // 1. 添加列名补全 (优先级最高 "0")
                 if let Some(schema) = schema {
@@ -402,12 +438,13 @@ impl Dialect for MysqlDialect {
                     items.push(item);
                 }
 
-                // 3. 添加其他关键字 (优先级低 "2")
+                // 3. 添加逻辑关键字和关键字形式的运算符 (优先级 \"2\")
+                // 只添加关键字形式的运算符，不添加符号运算符
                 let having_keywords =
                     vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL"];
                 for keyword in having_keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("2{}", keyword));
+                    item.sort_text = Some(format!("2{}", keyword)); // Keywords after aggregate functions
                     items.push(item);
                 }
             }

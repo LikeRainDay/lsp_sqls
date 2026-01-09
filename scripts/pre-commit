@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Git pre-commit hook for sql-lsp
+# This hook runs cargo fmt --check and cargo clippy before allowing commits
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Check if cargo is available
+if ! command -v cargo &> /dev/null; then
+    echo -e "${RED}❌ Error: cargo not found. Please install Rust toolchain.${NC}"
+    exit 1
+fi
+
+# 1. Check code formatting
+echo -e "${YELLOW}📝 Checking code formatting...${NC}"
+if ! cargo fmt -- --check; then
+    echo -e "${RED}❌ Code formatting check failed!${NC}"
+    echo -e "${YELLOW}💡 Run 'cargo fmt' to fix formatting issues.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ Code formatting check passed${NC}"
+
+# 2. Run clippy with warnings as errors
+echo -e "${YELLOW}🔧 Running clippy checks...${NC}"
+if ! cargo clippy -- -D warnings; then
+    echo -e "${RED}❌ Clippy check failed!${NC}"
+    echo -e "${YELLOW}💡 Fix the warnings above and try again.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ Clippy check passed${NC}"
+
+# 3. Run tests
+echo -e "${YELLOW}🧪 Running tests...${NC}"
+if ! cargo test --all-features; then
+    echo -e "${RED}❌ Tests failed!${NC}"
+    echo -e "${YELLOW}💡 Fix the failing tests above and try again.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ All tests passed${NC}"
+
+echo -e "${GREEN}✨ All pre-commit checks passed!${NC}"
+exit 0
