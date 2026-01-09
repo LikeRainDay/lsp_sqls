@@ -59,6 +59,21 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Sync version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Syncing version to $VERSION"
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS requires -i with empty string
+            sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          else
+            # Linux
+            sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          fi
+          echo "Version synced to $VERSION in Cargo.toml"
+          grep "^version" Cargo.toml
+        shell: bash
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -244,11 +259,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Sync version from tag
+      - name: Sync version from tag for crates.io
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-          echo "Version synced to $VERSION in Cargo.toml"
+          echo "Version synced to $VERSION in Cargo.toml for crates.io publish"
+          grep "^version" Cargo.toml
 
       - name: Publish to crates.io
         run: cargo publish --token ${CRATES_IO_TOKEN} --allow-dirty
