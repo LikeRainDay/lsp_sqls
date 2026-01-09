@@ -600,7 +600,7 @@ impl SqlParser {
             return CompletionContext::TableColumn;
         }
 
-        // Priority 2: Find the last keyword to determine context
+        // Priority 2: Find the last complete keyword to determine context
 
         // Check for WHERE clause
         if let Some(where_pos) = text_upper.rfind("WHERE") {

@@ -158,16 +158,35 @@ impl Dialect for MysqlDialect {
             crate::parser::CompletionContext::FromClause
             | crate::parser::CompletionContext::JoinClause => {
                 // FROM/JOIN 子句：只补全表名，不要关键字
-                // 添加表名补全
+                // Extract prefix for filtering
+                let prefix = {
+                    let lines: Vec<&str> = sql.lines().collect();
+                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
+                    let text_before =
+                        &line_text[..position.character.min(line_text.len() as u32) as usize];
+
+                    // Extract last word before cursor
+                    text_before
+                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
+                        .next_back()
+                        .unwrap_or("")
+                        .to_lowercase()
+                };
+
+                // 添加表名补全（应用前缀过滤）
                 if let Some(schema) = schema {
                     for table in &schema.tables {
+                        // Filter by prefix
+                        if !prefix.is_empty() && !table.name.to_lowercase().starts_with(&prefix) {
+                            continue;
+                        }
                         items.push(self.create_table_item(table));
                     }
                 }
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                // SELECT 子句：优先补全列名，然后是 SELECT 相关关键字
+                // SELECT 子句：优先补全列名，然后是聚合函数，最后是 SELECT 相关关键字
                 // Extract prefix from cursor position
                 let prefix = {
                     let lines: Vec<&str> = sql.lines().collect();
@@ -201,6 +220,14 @@ impl Dialect for MysqlDialect {
                             } else {
                                 None
                             };
+
+                            // Apply prefix filter
+                            if !prefix.is_empty()
+                                && !column.name.to_lowercase().starts_with(&prefix)
+                            {
+                                continue;
+                            }
+
                             let mut item = self.create_column_item(column, table_name);
 
                             // Smart sorting based on prefix match
@@ -218,11 +245,58 @@ impl Dialect for MysqlDialect {
                     }
                 }
 
-                // 然后添加 SELECT 相关关键字（优先级较低）
+                // 添加聚合函数和常用函数（优先级中等）
+                let functions = vec![
+                    ("COUNT", "Aggregate function: count rows"),
+                    ("SUM", "Aggregate function: sum values"),
+                    ("AVG", "Aggregate function: average"),
+                    ("MIN", "Aggregate function: minimum"),
+                    ("MAX", "Aggregate function: maximum"),
+                    ("CONCAT", "String function: concatenate"),
+                    ("UPPER", "String function: uppercase"),
+                    ("LOWER", "String function: lowercase"),
+                    ("NOW", "Date function: current timestamp"),
+                    ("DATE", "Date function: extract date"),
+                ];
+
+                for (func, desc) in functions {
+                    // Apply prefix filter to functions
+                    if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
+                    items.push(CompletionItem {
+                        label: func.to_string(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(desc.to_string()),
+                        documentation: None,
+                        deprecated: None,
+                        preselect: None,
+                        sort_text: Some(format!("1{}", func)), // Functions after columns
+                        filter_text: None,
+                        insert_text: Some(format!("{}()", func)),
+                        insert_text_format: None,
+                        insert_text_mode: None,
+                        text_edit: None,
+                        additional_text_edits: None,
+                        commit_characters: None,
+                        command: None,
+                        data: None,
+                        tags: None,
+                        label_details: None,
+                    });
+                }
+
+                // 然后添加 SELECT 相关关键字（优先级最低）
                 let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
                 for keyword in select_keywords {
+                    // Apply prefix filter to keywords
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("1{}", keyword));
+                    item.sort_text = Some(format!("2{}", keyword)); // Keywords last
                     items.push(item);
                 }
             }
@@ -475,7 +549,22 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::Default => {
-                // 默认：返回所有关键字
+                // 默认：返回所有关键字和表名
+                // Extract prefix to filter suggestions
+                let prefix = {
+                    let lines: Vec<&str> = sql.lines().collect();
+                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
+                    let text_before =
+                        &line_text[..position.character.min(line_text.len() as u32) as usize];
+
+                    // Extract last word before cursor
+                    text_before
+                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
+                        .next_back()
+                        .unwrap_or("")
+                        .to_uppercase()
+                };
+
                 let keywords = vec![
                     "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
                     "ALTER", "TABLE", "INDEX", "DATABASE", "SHOW", "DESCRIBE", "EXPLAIN", "JOIN",
@@ -485,12 +574,20 @@ impl Dialect for MysqlDialect {
                 ];
 
                 for keyword in keywords {
+                    // Filter by prefix if prefix is not empty
+                    if !prefix.is_empty() && !keyword.starts_with(&prefix) {
+                        continue;
+                    }
                     items.push(self.create_keyword_item(keyword));
                 }
 
-                // 如果提供了 schema，添加表和列补全
+                // 如果提供了 schema，添加表补全（也应用前缀过滤）
                 if let Some(schema) = schema {
                     for table in &schema.tables {
+                        // Filter tables by prefix as well
+                        if !prefix.is_empty() && !table.name.to_uppercase().starts_with(&prefix) {
+                            continue;
+                        }
                         items.push(self.create_table_item(table));
                     }
                 }

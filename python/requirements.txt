@@ -1,0 +1,4 @@
+# Python LSP Interactive Client Dependencies
+
+# Colored terminal output (optional but recommended)
+colorama>=0.4.6
