@@ -124,6 +124,83 @@ async fn test_hive_dialect() {
 }
 
 #[tokio::test]
+async fn test_bigquery_dialect() {
+    let dialect = BigQueryDialect::new();
+    assert_eq!(dialect.name(), "bigquery");
+
+    let items = dialect
+        .completion(
+            "SELECT ",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 7,
+            },
+            None,
+        )
+        .await;
+    assert!(!items.is_empty());
+    assert!(items
+        .iter()
+        .any(|item| item.label == "FROM" || item.label == "DISTINCT"));
+
+    let items_default = dialect
+        .completion(
+            "",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        )
+        .await;
+    assert!(items_default.iter().any(|item| item.label == "QUALIFY"));
+}
+
+#[tokio::test]
+async fn test_bigquery_dynamic_completion() {
+    let dialect = BigQueryDialect::new();
+
+    let table = Table {
+        name: "users".to_string(),
+        columns: vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "STRING".to_string(),
+                nullable: false,
+                comment: None,
+                source_location: None,
+            },
+            Column {
+                name: "email".to_string(),
+                data_type: "STRING".to_string(),
+                nullable: true,
+                comment: None,
+                source_location: None,
+            },
+        ],
+        comment: None,
+        source_location: None,
+    };
+
+    dialect.add_to_cache("users".to_string(), table);
+
+    let items = dialect
+        .completion(
+            "SELECT  FROM users",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 7,
+            },
+            None,
+        )
+        .await;
+
+    assert!(!items.is_empty());
+    assert!(items.iter().any(|item| item.label == "users.id"));
+    assert!(items.iter().any(|item| item.label == "users.email"));
+}
+
+#[tokio::test]
 async fn test_elasticsearch_eql_dialect() {
     let dialect = ElasticsearchEqlDialect::new();
     assert_eq!(dialect.name(), "elasticsearch-eql");
@@ -442,14 +519,16 @@ async fn test_intelligent_completion_logging() {
     )
     .await;
 
-    // Single-table query (no FROM yet): expect simple column names without table prefix
+    // After adding prefix filtering: only columns matching 'na' should be suggested
     assert!(
         items_cols.iter().any(|item| item.label == "name"),
-        "Should suggest 'name' column"
+        "Should suggest 'name' column (matches prefix 'na')"
     );
-    assert!(
-        items_cols.iter().any(|item| item.label == "created_at"),
-        "Should suggest 'created_at' column"
+    // created_at should NOT be suggested since it doesn't match prefix 'na'
+    assert_eq!(
+        items_cols.len(),
+        1,
+        "Should only suggest 1 column matching prefix 'na'"
     );
 
     // 场景 3: Schema 感知补全 (Alias)

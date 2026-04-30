@@ -15,14 +15,14 @@ A **high-performance**, **multi-dialect** SQL Language Server Protocol (LSP) imp
 
 ## ✨ Features
 
-- 🎯 **Multi-Dialect Support** - MySQL, PostgreSQL, Hive, ClickHouse, Elasticsearch (EQL/DSL), Redis
+- 🎯 **Multi-Dialect Support** - MySQL, PostgreSQL, Hive, ClickHouse, Elasticsearch (EQL/DSL), Redis, BigQuery
 - 🔍 **Intelligent Completion** - Context-aware suggestions with AST-based analysis
 - 📍 **Code Navigation** - Go-to-definition and find references
 - ⚡ **Real-Time Diagnostics** - Tree-sitter powered syntax error detection
 - 🎨 **SQL Formatting** - Professional code formatting with sqlformat
 - 📊 **Rich Hover Information** - Detailed schema information in Markdown
 - 🧵 **Thread-Safe** - Concurrent request handling with async/await
-- 📦 **Schema Management** - Dynamic schema updates and auto-inference
+- 📦 **Schema Management** - Dynamic schema updates, auto-inference, and live BigQuery API resolution
 
 ## 🚀 Usage
 

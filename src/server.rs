@@ -274,6 +274,9 @@ impl LanguageServer for SqlLspServer {
 
         // 发布诊断
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
+            // 触发后台异步获取数据（如 BigQuery Schema）
+            dialect.trigger_background_fetch(&text).await;
+
             let schema = self.get_schema_for_file(&uri);
             let diagnostics = dialect.parse(&text, schema.as_ref()).await;
             self.client
@@ -460,6 +463,8 @@ fn infer_dialect_from_uri_and_language(uri: &str, language_id: &str) -> String {
         return "postgres".to_string();
     } else if uri_lower.ends_with(".hive.sql") || uri_lower.ends_with(".hql") {
         return "hive".to_string();
+    } else if uri_lower.ends_with(".bq.sql") || uri_lower.ends_with(".bigquery") {
+        return "bigquery".to_string();
     } else if uri_lower.ends_with(".es.eql") || uri_lower.ends_with(".eql") {
         return "elasticsearch-eql".to_string();
     } else if uri_lower.ends_with(".es.dsl")
@@ -479,6 +484,7 @@ fn infer_dialect_from_uri_and_language(uri: &str, language_id: &str) -> String {
         "mysql" | "mysql-sql" => "mysql".to_string(),
         "postgresql" | "postgres" | "pgsql" => "postgres".to_string(),
         "hive" | "hql" => "hive".to_string(),
+        "bigquery" | "bq" => "bigquery".to_string(),
         "elasticsearch-eql" | "eql" => "elasticsearch-eql".to_string(),
         "elasticsearch-dsl" | "es-dsl" | "json" if uri_lower.contains("elasticsearch") => {
             "elasticsearch-dsl".to_string()

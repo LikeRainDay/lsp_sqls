@@ -124,6 +124,8 @@ impl Keywords {
             "UNION",
             "ALL",
             "EXISTS",
+            "WITH",
+            "EXCEPT",
             "CASE",
             "WHEN",
             "THEN",
@@ -199,6 +201,23 @@ impl Keywords {
             "LATERAL",
             "VIEW",
             "EXPLODE",
+        ]
+    }
+
+    /// 获取 BigQuery 特定关键字
+    pub fn bigquery() -> Vec<&'static str> {
+        vec![
+            "MERGE",
+            "WINDOW",
+            "QUALIFY",
+            "UNNEST",
+            "STRUCT",
+            "ARRAY",
+            "PARTITION",
+            "CLUSTER",
+            "OPTIONS",
+            "SYSTEM_TIME",
+            "OF",
         ]
     }
 }
