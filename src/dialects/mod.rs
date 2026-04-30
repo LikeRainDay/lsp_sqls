@@ -1,3 +1,4 @@
+pub mod bigquery;
 pub mod clickhouse;
 pub mod elasticsearch_dsl;
 pub mod elasticsearch_eql;
@@ -6,6 +7,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod redis;
 
+pub use bigquery::BigQueryDialect;
 pub use clickhouse::ClickHouseDialect;
 pub use elasticsearch_dsl::ElasticsearchDslDialect;
 pub use elasticsearch_eql::ElasticsearchEqlDialect;
@@ -31,6 +33,7 @@ impl DialectRegistry {
         // 注册所有方言
         registry.register(Arc::new(MysqlDialect::new()));
         registry.register(Arc::new(PostgresDialect::new()));
+        registry.register(Arc::new(BigQueryDialect::new()));
         registry.register(Arc::new(HiveDialect::new()));
         registry.register(Arc::new(ElasticsearchEqlDialect::new()));
         registry.register(Arc::new(ElasticsearchDslDialect::new()));

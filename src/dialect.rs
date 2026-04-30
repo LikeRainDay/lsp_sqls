@@ -44,4 +44,7 @@ pub trait Dialect: Send + Sync {
 
     /// 验证 SQL 语法
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic>;
+
+    /// 触发后台异步获取数据（如 Schema）
+    async fn trigger_background_fetch(&self, _sql: &str) {}
 }
