@@ -72,6 +72,7 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "name".to_string(),
@@ -79,6 +80,7 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "email".to_string(),
@@ -86,10 +88,12 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                 ],
                 comment: Some("Users table".to_string()),
                 source_location: None,
+                ..Default::default()
             },
             Table {
                 name: "orders".to_string(),
@@ -100,6 +104,7 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "user_id".to_string(),
@@ -107,6 +112,7 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "total".to_string(),
@@ -114,6 +120,7 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "status".to_string(),
@@ -121,10 +128,12 @@ async fn test_comprehensive_completion_scenarios() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                 ],
                 comment: Some("Orders table".to_string()),
                 source_location: None,
+                ..Default::default()
             },
         ],
         functions: vec![],

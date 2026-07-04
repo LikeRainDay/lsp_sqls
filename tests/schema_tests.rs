@@ -14,6 +14,32 @@ fn test_schema_id() {
 }
 
 #[test]
+fn test_table_documentation_includes_object_type() {
+    let view = Table {
+        name: "active_users".to_string(),
+        object_type: Some("VIEW".to_string()),
+        columns: vec![Column {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+            nullable: false,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let documentation = view.documentation().unwrap();
+    assert!(documentation.contains("Object: View"));
+    assert!(documentation.contains("Columns: id integer"));
+
+    let materialized_view = Table {
+        name: "active_users_mv".to_string(),
+        object_type: Some("MATERIALIZED VIEW".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(materialized_view.object_kind(), "Materialized View");
+}
+
+#[test]
 fn test_schema_manager_basic() {
     let manager = SchemaManager::new();
 
@@ -48,6 +74,7 @@ fn test_schema_manager_multiple_schemas() {
             columns: vec![],
             comment: None,
             source_location: None,
+            ..Default::default()
         }],
         functions: vec![],
         source_uri: None,
@@ -61,6 +88,7 @@ fn test_schema_manager_multiple_schemas() {
             columns: vec![],
             comment: None,
             source_location: None,
+            ..Default::default()
         }],
         functions: vec![],
         source_uri: None,
@@ -122,6 +150,7 @@ fn test_schema_with_tables_and_columns() {
                     nullable: false,
                     comment: Some("Primary key".to_string()),
                     source_location: None,
+                    ..Default::default()
                 },
                 Column {
                     name: "email".to_string(),
@@ -129,10 +158,12 @@ fn test_schema_with_tables_and_columns() {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             comment: Some("User table".to_string()),
             source_location: None,
+            ..Default::default()
         }],
         functions: vec![],
         source_uri: None,
@@ -151,6 +182,7 @@ fn test_schema_with_functions() {
         tables: vec![],
         functions: vec![Function {
             name: "my_function".to_string(),
+            routine_type: Some("function".to_string()),
             parameters: vec![FunctionParameter {
                 name: "param1".to_string(),
                 data_type: "INT".to_string(),
@@ -165,4 +197,24 @@ fn test_schema_with_functions() {
     assert_eq!(schema.functions.len(), 1);
     assert_eq!(schema.functions[0].name, "my_function");
     assert_eq!(schema.functions[0].parameters.len(), 1);
+}
+
+#[test]
+fn test_procedure_documentation_uses_routine_type() {
+    let procedure = Function {
+        name: "rebuild_cache".to_string(),
+        routine_type: Some("procedure".to_string()),
+        parameters: vec![FunctionParameter {
+            name: "tenant_id".to_string(),
+            data_type: "integer".to_string(),
+            optional: false,
+        }],
+        return_type: "void".to_string(),
+        description: None,
+    };
+
+    let documentation = procedure.markdown_documentation();
+    assert!(documentation.contains("**Procedure**: `rebuild_cache(tenant_id integer)`"));
+    assert!(documentation.contains("**Routine type**: `procedure`"));
+    assert!(!documentation.contains("**Returns**"));
 }

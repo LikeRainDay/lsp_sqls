@@ -1,6 +1,7 @@
 use crate::dialect::Dialect;
+use crate::dialects::common;
 use crate::parser::SqlParser;
-use crate::schema::Schema;
+use crate::schema::{Function, Schema};
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, MarkedString, Position,
@@ -25,54 +26,7 @@ impl PostgresDialect {
 
     /// 创建关键字补全项
     fn create_keyword_item(&self, keyword: &str) -> CompletionItem {
-        CompletionItem {
-            label: keyword.to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some(format!("PostgreSQL keyword: {}", keyword)),
-            documentation: None,
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("0{}", keyword)),
-            filter_text: None,
-            insert_text: Some(keyword.to_string()),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
-    }
-
-    /// 创建表补全项
-    fn create_table_item(&self, table: &crate::schema::Table, database: &str) -> CompletionItem {
-        let label = format!("{}.{}", database, table.name);
-        CompletionItem {
-            label: label.clone(),
-            kind: Some(CompletionItemKind::CLASS),
-            detail: Some(format!("Table: {}.{}", database, table.name)),
-            documentation: table
-                .comment
-                .clone()
-                .map(tower_lsp::lsp_types::Documentation::String),
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("1{}", table.name)),
-            filter_text: None,
-            insert_text: Some(label),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
+        common::create_keyword_item("PostgreSQL", keyword)
     }
 
     /// 创建列补全项
@@ -81,41 +35,72 @@ impl PostgresDialect {
         column: &crate::schema::Column,
         table_name: Option<&str>,
     ) -> CompletionItem {
-        let label = if let Some(table) = table_name {
-            format!("{}.{}", table, column.name)
-        } else {
-            column.name.clone()
-        };
+        common::create_column_item(column, table_name)
+    }
 
-        let detail = if let Some(table) = table_name {
-            format!("Column: {}.{} ({})", table, column.name, column.data_type)
-        } else {
-            format!("Column: {} ({})", column.name, column.data_type)
-        };
+    fn add_schema_functions(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: &Schema,
+        prefix: &str,
+        sort_prefix: &str,
+        qualify_with_database: bool,
+    ) {
+        common::add_schema_functions(items, schema, prefix, sort_prefix, qualify_with_database);
+    }
 
-        CompletionItem {
-            label,
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(detail),
-            documentation: column
-                .comment
-                .clone()
-                .map(tower_lsp::lsp_types::Documentation::String),
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("2{}", column.name)),
-            filter_text: None,
-            insert_text: Some(column.name.clone()),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
+    fn table_matches(schema: &Schema, table: &crate::schema::Table, reference: &str) -> bool {
+        common::table_matches(schema, table, reference)
+    }
+
+    fn find_table_by_reference<'a>(
+        schema: &'a Schema,
+        reference: &str,
+    ) -> Option<&'a crate::schema::Table> {
+        common::find_table_by_reference(schema, reference)
+    }
+
+    fn find_function_by_reference<'a>(schema: &'a Schema, reference: &str) -> Option<&'a Function> {
+        common::find_function_by_reference(schema, reference)
+    }
+
+    fn is_function_reference(node: tree_sitter::Node, sql: &str) -> bool {
+        common::is_function_reference(node, sql)
+    }
+
+    fn cursor_prefix(sql: &str, position: Position) -> String {
+        common::cursor_prefix(sql, position)
+    }
+
+    fn cursor_has_identifier_qualifier(sql: &str, position: Position) -> bool {
+        common::cursor_has_identifier_qualifier(sql, position)
+    }
+
+    fn referenced_table_names(
+        parser: &SqlParser,
+        tree: &tree_sitter::Tree,
+        sql: &str,
+    ) -> Vec<String> {
+        common::referenced_table_names(parser, tree, sql)
+    }
+
+    fn add_schema_columns(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: &Schema,
+        referenced_tables: &[String],
+        use_table_prefix: bool,
+        prefix: &str,
+        sort_prefix: &str,
+    ) {
+        common::add_schema_columns(
+            items,
+            schema,
+            referenced_tables,
+            use_table_prefix,
+            prefix,
+            sort_prefix,
+        );
     }
 }
 
@@ -158,43 +143,83 @@ impl Dialect for PostgresDialect {
         match context {
             crate::parser::CompletionContext::FromClause
             | crate::parser::CompletionContext::JoinClause => {
-                let join_keywords = vec!["JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON"];
-                for keyword in join_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
+                let prefix = Self::cursor_prefix(sql, position);
 
                 if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        items.push(self.create_table_item(table, &schema.database));
-                    }
+                    common::add_schema_tables(&mut items, schema, &prefix, true);
                 }
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
-                for keyword in select_keywords {
-                    items.push(self.create_keyword_item(keyword));
+                let prefix = Self::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| Self::referenced_table_names(&parser, tree, sql))
+                        .unwrap_or_default();
+                    let use_table_prefix = referenced_tables.len() > 1;
+
+                    self.add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        use_table_prefix,
+                        &prefix,
+                        "0",
+                    );
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
 
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
-                        }
+                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
+                for keyword in select_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
                     }
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("2{keyword}"));
+                    items.push(item);
                 }
             }
 
             crate::parser::CompletionContext::WhereClause => {
+                let prefix = Self::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
+                    }
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
+                }
+
                 let where_keywords = vec![
                     "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS", "NULL",
                     "TRUE", "FALSE",
                 ];
                 for keyword in where_keywords {
-                    items.push(self.create_keyword_item(keyword));
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("1{keyword}"));
+                    items.push(item);
                 }
 
                 let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
@@ -220,60 +245,72 @@ impl Dialect for PostgresDialect {
                         label_details: None,
                     });
                 }
-
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
-                        }
-                    }
-                }
             }
 
             crate::parser::CompletionContext::OrderByClause
             | crate::parser::CompletionContext::GroupByClause => {
-                let keywords = vec!["ASC", "DESC", "BY"];
-                for keyword in keywords {
-                    items.push(self.create_keyword_item(keyword));
+                if let Some(schema) = schema {
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
+                    }
                 }
 
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
-                        }
-                    }
+                let keywords = vec!["ASC", "DESC", "BY"];
+                for keyword in keywords {
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("1{keyword}"));
+                    items.push(item);
                 }
             }
 
             crate::parser::CompletionContext::HavingClause => {
-                let having_keywords = vec![
-                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
-                ];
-                for keyword in having_keywords {
-                    items.push(self.create_keyword_item(keyword));
+                let prefix = Self::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
+                    }
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
 
                 let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
                 for func in aggregate_functions {
-                    items.push(self.create_keyword_item(func));
+                    let mut item = self.create_keyword_item(func);
+                    item.kind = Some(CompletionItemKind::FUNCTION);
+                    item.sort_text = Some(format!("1{func}"));
+                    items.push(item);
                 }
 
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
-                        }
-                    }
+                let having_keywords = vec![
+                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
+                ];
+                for keyword in having_keywords {
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("2{keyword}"));
+                    items.push(item);
                 }
             }
 
@@ -282,10 +319,12 @@ impl Dialect for PostgresDialect {
                     if let Some(node) = parser.get_node_at_position(tree, position) {
                         if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
                             if let Some(schema) = schema {
-                                if let Some(table) = schema.tables.iter().find(|t| {
-                                    t.name == table_name
-                                        || format!("{}.{}", schema.database, t.name) == table_name
-                                }) {
+                                let aliases = parser.extract_aliases(tree, sql);
+                                let real_table_name =
+                                    aliases.get(&table_name).unwrap_or(&table_name);
+                                if let Some(table) =
+                                    Self::find_table_by_reference(schema, real_table_name)
+                                {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));
                                     }
@@ -355,9 +394,14 @@ impl Dialect for PostgresDialect {
                 }
 
                 if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        items.push(self.create_table_item(table, &schema.database));
-                    }
+                    common::add_schema_tables(&mut items, schema, "", true);
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        "",
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
             }
         }
@@ -365,29 +409,100 @@ impl Dialect for PostgresDialect {
         items
     }
 
-    async fn hover(
-        &self,
-        sql: &str,
-        _position: Position,
-        schema: Option<&Schema>,
-    ) -> Option<Hover> {
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if sql.contains(&table.name) {
-                    return Some(Hover {
-                        contents: tower_lsp::lsp_types::HoverContents::Scalar(
-                            MarkedString::String(format!(
-                                "PostgreSQL Table: {}.{}\n{}",
-                                schema.database,
-                                table.name,
-                                table.comment.as_deref().unwrap_or("No description")
-                            )),
-                        ),
-                        range: None,
-                    });
+    async fn hover(&self, sql: &str, position: Position, schema: Option<&Schema>) -> Option<Hover> {
+        let mut parser = self.parser.lock().unwrap();
+        let parse_result = parser.parse(sql);
+
+        if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+            if let Some(node) = parser.get_node_at_position(tree, position) {
+                let node_text = parser.node_text(node, sql);
+                let node_kind = node.kind();
+
+                if crate::token::Keywords::is_keyword(&node_text)
+                    || crate::token::Operators::is_operator(&node_text)
+                    || crate::token::Delimiters::is_delimiter(&node_text)
+                {
+                    return None;
+                }
+
+                let is_table = node_kind == "table_name"
+                    || node_kind == "table_reference"
+                    || node_kind == "table_identifier"
+                    || (node_kind == "identifier" && parser.is_in_from_context(node, sql));
+
+                if is_table {
+                    let table_ref = SqlParser::normalize_identifier(&node_text);
+                    if let Some(table) = Self::find_table_by_reference(schema, &table_ref) {
+                        return Some(Hover {
+                            contents: tower_lsp::lsp_types::HoverContents::Scalar(
+                                MarkedString::String(format!(
+                                    "PostgreSQL Table: {}.{}\n{}",
+                                    schema.database,
+                                    table.name,
+                                    table
+                                        .documentation()
+                                        .unwrap_or_else(|| "No description".to_string())
+                                )),
+                            ),
+                            range: Some(parser.node_range(node)),
+                        });
+                    }
+                }
+
+                let is_column = node_kind == "column_name"
+                    || node_kind == "column_reference"
+                    || node_kind == "column_identifier"
+                    || (node_kind == "identifier" && parser.is_in_column_context(node, sql));
+
+                if is_column {
+                    let table_name = parser.get_table_name_for_column(node, sql);
+                    let column_name = SqlParser::identifier_last_part(&node_text);
+
+                    for table in &schema.tables {
+                        if let Some(ref table_ref) = table_name {
+                            if !Self::table_matches(schema, table, table_ref) {
+                                continue;
+                            }
+                        }
+
+                        if let Some(column) = table
+                            .columns
+                            .iter()
+                            .find(|column| column.name == column_name)
+                        {
+                            return Some(Hover {
+                                contents: tower_lsp::lsp_types::HoverContents::Scalar(
+                                    MarkedString::String(format!(
+                                        "PostgreSQL Column: {}.{}\n{}",
+                                        table.name,
+                                        column.name,
+                                        column
+                                            .documentation()
+                                            .unwrap_or_else(|| "No description".to_string())
+                                    )),
+                                ),
+                                range: Some(parser.node_range(node)),
+                            });
+                        }
+                    }
+                }
+
+                if Self::is_function_reference(node, sql) {
+                    if let Some(function) = Self::find_function_by_reference(schema, &node_text) {
+                        return Some(Hover {
+                            contents: tower_lsp::lsp_types::HoverContents::Markup(
+                                tower_lsp::lsp_types::MarkupContent {
+                                    kind: tower_lsp::lsp_types::MarkupKind::Markdown,
+                                    value: function.markdown_documentation(),
+                                },
+                            ),
+                            range: Some(parser.node_range(node)),
+                        });
+                    }
                 }
             }
         }
+
         None
     }
 
@@ -424,17 +539,8 @@ impl Dialect for PostgresDialect {
 
                 if is_table {
                     if let Some(schema) = schema {
-                        // 处理 database.table 格式
-                        let table_name = if node_text.contains('.') {
-                            node_text.split('.').next_back().unwrap_or(&node_text)
-                        } else {
-                            &node_text
-                        };
-
-                        if schema.tables.iter().any(|t| {
-                            t.name == table_name
-                                || format!("{}.{}", schema.database, t.name) == node_text
-                        }) {
+                        let table_ref = SqlParser::normalize_identifier(&node_text);
+                        if Self::find_table_by_reference(schema, &table_ref).is_some() {
                             return Some(Location {
                                 uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
                                     .unwrap_or_else(|_| {
@@ -450,16 +556,21 @@ impl Dialect for PostgresDialect {
                     if let Some(schema) = schema {
                         let (table_name, column_name) =
                             if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
-                                (Some(table_name), node_text.clone())
+                                (
+                                    Some(table_name),
+                                    SqlParser::identifier_last_part(&node_text),
+                                )
                             } else {
                                 let tables = parser.extract_tables(tree, sql);
-                                (tables.first().cloned(), node_text.clone())
+                                (
+                                    tables.first().cloned(),
+                                    SqlParser::identifier_last_part(&node_text),
+                                )
                             };
 
                         for table in &schema.tables {
-                            let full_table_name = format!("{}.{}", schema.database, table.name);
                             if let Some(ref tname) = table_name {
-                                if (table.name == *tname || full_table_name == *tname)
+                                if Self::table_matches(schema, table, tname)
                                     && table.columns.iter().any(|c| c.name == column_name)
                                 {
                                     return Some(Location {

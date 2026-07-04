@@ -1,4 +1,5 @@
 pub mod clickhouse;
+pub(crate) mod common;
 pub mod elasticsearch_dsl;
 pub mod elasticsearch_eql;
 pub mod hive;

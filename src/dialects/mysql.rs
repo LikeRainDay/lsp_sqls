@@ -1,6 +1,7 @@
 use crate::dialect::Dialect;
+use crate::dialects::common;
 use crate::parser::SqlParser;
-use crate::schema::Schema;
+use crate::schema::{Function, Schema};
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, Hover, Location, Position,
@@ -25,53 +26,7 @@ impl MysqlDialect {
 
     /// 创建关键字补全项
     fn create_keyword_item(&self, keyword: &str) -> CompletionItem {
-        CompletionItem {
-            label: keyword.to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            detail: Some(format!("MySQL keyword: {}", keyword)),
-            documentation: None,
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("0{}", keyword)),
-            filter_text: None,
-            insert_text: Some(keyword.to_string()),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
-    }
-
-    /// 创建表补全项
-    fn create_table_item(&self, table: &crate::schema::Table) -> CompletionItem {
-        CompletionItem {
-            label: table.name.clone(),
-            kind: Some(CompletionItemKind::CLASS),
-            detail: Some(format!("Table: {}", table.name)),
-            documentation: table
-                .comment
-                .clone()
-                .map(tower_lsp::lsp_types::Documentation::String),
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("1{}", table.name)),
-            filter_text: None,
-            insert_text: Some(table.name.clone()),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
+        common::create_keyword_item("MySQL", keyword)
     }
 
     /// 创建列补全项
@@ -80,41 +35,72 @@ impl MysqlDialect {
         column: &crate::schema::Column,
         table_name: Option<&str>,
     ) -> CompletionItem {
-        let label = if let Some(table) = table_name {
-            format!("{}.{}", table, column.name)
-        } else {
-            column.name.clone()
-        };
+        common::create_column_item(column, table_name)
+    }
 
-        let detail = if let Some(table) = table_name {
-            format!("Column: {}.{} ({})", table, column.name, column.data_type)
-        } else {
-            format!("Column: {} ({})", column.name, column.data_type)
-        };
+    fn add_schema_functions(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: &Schema,
+        prefix: &str,
+        sort_prefix: &str,
+        qualify_with_database: bool,
+    ) {
+        common::add_schema_functions(items, schema, prefix, sort_prefix, qualify_with_database);
+    }
 
-        CompletionItem {
-            label,
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(detail),
-            documentation: column
-                .comment
-                .clone()
-                .map(tower_lsp::lsp_types::Documentation::String),
-            deprecated: None,
-            preselect: None,
-            sort_text: Some(format!("2{}", column.name)),
-            filter_text: None,
-            insert_text: Some(column.name.clone()),
-            insert_text_format: None,
-            insert_text_mode: None,
-            text_edit: None,
-            additional_text_edits: None,
-            commit_characters: None,
-            command: None,
-            data: None,
-            tags: None,
-            label_details: None,
-        }
+    fn table_matches(schema: &Schema, table: &crate::schema::Table, reference: &str) -> bool {
+        common::table_matches(schema, table, reference)
+    }
+
+    fn find_table_by_reference<'a>(
+        schema: &'a Schema,
+        reference: &str,
+    ) -> Option<&'a crate::schema::Table> {
+        common::find_table_by_reference(schema, reference)
+    }
+
+    fn referenced_table_names(
+        parser: &SqlParser,
+        tree: &tree_sitter::Tree,
+        sql: &str,
+    ) -> Vec<String> {
+        common::referenced_table_names(parser, tree, sql)
+    }
+
+    fn find_function_by_reference<'a>(schema: &'a Schema, reference: &str) -> Option<&'a Function> {
+        common::find_function_by_reference(schema, reference)
+    }
+
+    fn is_function_reference(node: tree_sitter::Node, sql: &str) -> bool {
+        common::is_function_reference(node, sql)
+    }
+
+    fn cursor_prefix(sql: &str, position: Position) -> String {
+        common::cursor_prefix(sql, position)
+    }
+
+    fn cursor_has_identifier_qualifier(sql: &str, position: Position) -> bool {
+        common::cursor_has_identifier_qualifier(sql, position)
+    }
+
+    fn add_schema_columns(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: &Schema,
+        referenced_tables: &[String],
+        use_table_prefix: bool,
+        prefix: &str,
+        sort_prefix: &str,
+    ) {
+        common::add_schema_columns(
+            items,
+            schema,
+            referenced_tables,
+            use_table_prefix,
+            prefix,
+            sort_prefix,
+        );
     }
 }
 
@@ -157,92 +143,42 @@ impl Dialect for MysqlDialect {
         match context {
             crate::parser::CompletionContext::FromClause
             | crate::parser::CompletionContext::JoinClause => {
-                // FROM/JOIN 子句：只补全表名，不要关键字
-                // Extract prefix for filtering
-                let prefix = {
-                    let lines: Vec<&str> = sql.lines().collect();
-                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
-                    let text_before =
-                        &line_text[..position.character.min(line_text.len() as u32) as usize];
-
-                    // Extract last word before cursor
-                    text_before
-                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
-                        .next_back()
-                        .unwrap_or("")
-                        .to_lowercase()
-                };
-
-                // 添加表名补全（应用前缀过滤）
+                let prefix = Self::cursor_prefix(sql, position);
                 if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        // Filter by prefix
-                        if !prefix.is_empty() && !table.name.to_lowercase().starts_with(&prefix) {
-                            continue;
-                        }
-                        items.push(self.create_table_item(table));
-                    }
+                    common::add_schema_tables(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                // SELECT 子句：优先补全列名，然后是聚合函数，最后是 SELECT 相关关键字
-                // Extract prefix from cursor position
-                let prefix = {
-                    let lines: Vec<&str> = sql.lines().collect();
-                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
-                    let text_before =
-                        &line_text[..position.character.min(line_text.len() as u32) as usize];
-
-                    // Extract last word/identifier before cursor
-                    text_before
-                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
-                        .next_back()
-                        .unwrap_or("")
-                        .to_lowercase()
-                };
-
-                // 先添加列名补全（优先级更高）
+                let prefix = Self::cursor_prefix(sql, position);
                 if let Some(schema) = schema {
-                    // Check if query has multiple tables (to decide whether to use table prefix)
-                    let use_table_prefix = if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
-                        referenced_tables.len() > 1
-                    } else {
-                        false
-                    };
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| Self::referenced_table_names(&parser, tree, sql))
+                        .unwrap_or_default();
+                    let use_table_prefix = referenced_tables.len() > 1;
 
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            // 单表查询时不使用表名前缀，多表查询时使用前缀避免歧义
-                            let table_name = if use_table_prefix {
-                                Some(table.name.as_str())
-                            } else {
-                                None
-                            };
-
-                            // Apply prefix filter
-                            if !prefix.is_empty()
-                                && !column.name.to_lowercase().starts_with(&prefix)
-                            {
-                                continue;
-                            }
-
-                            let mut item = self.create_column_item(column, table_name);
-
-                            // Smart sorting based on prefix match
-                            if !prefix.is_empty() && column.name.to_lowercase().starts_with(&prefix)
-                            {
-                                // Prefix match: highest priority
-                                item.sort_text = Some(format!("00{}", column.name));
-                            } else {
-                                // No match: normal column priority
-                                item.sort_text = Some(format!("01{}", column.name));
-                            }
-
-                            items.push(item);
-                        }
-                    }
+                    self.add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        use_table_prefix,
+                        &prefix,
+                        "0",
+                    );
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
 
                 // 添加聚合函数和常用函数（优先级中等）
@@ -302,38 +238,27 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::WhereClause => {
-                // WHERE 子句:优先补全列名,然后是操作符,不要关键字
-                // 先添加列名 (优先级更高)
+                let prefix = Self::cursor_prefix(sql, position);
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
-                        let aliases = parser.extract_aliases(tree, sql);
-
-                        // Resolve aliases to real table names
-                        let mut real_table_names: Vec<String> = referenced_tables
-                            .iter()
-                            .map(|t| aliases.get(t).unwrap_or(t).clone())
-                            .collect();
-                        real_table_names.dedup();
-
-                        // 单表查询时不使用表名前缀，多表查询时使用前缀避免歧义
-                        let use_table_prefix = real_table_names.len() > 1;
-
-                        for table in &schema.tables {
-                            if real_table_names.contains(&table.name) {
-                                for column in &table.columns {
-                                    let table_name = if use_table_prefix {
-                                        Some(table.name.as_str())
-                                    } else {
-                                        None
-                                    };
-                                    let mut item = self.create_column_item(column, table_name);
-                                    item.sort_text = Some(format!("0{}", column.name)); // Columns first
-                                    items.push(item);
-                                }
-                            }
-                        }
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
                     }
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
 
                 // 然后添加操作符 (优先级较低)
@@ -369,44 +294,19 @@ impl Dialect for MysqlDialect {
                 if let Some(schema) = schema {
                     // Check if query has multiple tables (to decide whether to use table prefix)
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
-                        let aliases = parser.extract_aliases(tree, sql);
-
-                        // Resolve aliases to real table names
-                        let mut real_table_names: Vec<String> = referenced_tables
-                            .iter()
-                            .map(|t| aliases.get(t).unwrap_or(t).clone())
-                            .collect();
-                        real_table_names.dedup();
-
-                        // 单表查询时不使用表名前缀，多表查询时使用前缀避免歧义
-                        let use_table_prefix = real_table_names.len() > 1;
-
-                        for table in &schema.tables {
-                            // 只添加查询中引用的表的列
-                            if real_table_names.is_empty() || real_table_names.contains(&table.name)
-                            {
-                                for column in &table.columns {
-                                    let table_name = if use_table_prefix {
-                                        Some(table.name.as_str())
-                                    } else {
-                                        None
-                                    };
-                                    let mut item = self.create_column_item(column, table_name);
-                                    item.sort_text = Some(format!("0{}", column.name)); // Columns first
-                                    items.push(item);
-                                }
-                            }
-                        }
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
                     } else {
                         // 如果没有解析树，默认返回所有列，不带前缀
-                        for table in &schema.tables {
-                            for column in &table.columns {
-                                let mut item = self.create_column_item(column, None);
-                                item.sort_text = Some(format!("0{}", column.name)); // Columns first
-                                items.push(item);
-                            }
-                        }
+                        self.add_schema_columns(&mut items, schema, &[], false, "", "0");
                     }
                 }
 
@@ -425,44 +325,19 @@ impl Dialect for MysqlDialect {
                 if let Some(schema) = schema {
                     // Check if query has multiple tables (to decide whether to use table prefix)
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
-                        let aliases = parser.extract_aliases(tree, sql);
-
-                        // Resolve aliases to real table names
-                        let mut real_table_names: Vec<String> = referenced_tables
-                            .iter()
-                            .map(|t| aliases.get(t).unwrap_or(t).clone())
-                            .collect();
-                        real_table_names.dedup();
-
-                        // 单表查询时不使用表名前缀，多表查询时使用前缀避免歧义
-                        let use_table_prefix = real_table_names.len() > 1;
-
-                        for table in &schema.tables {
-                            // 只添加查询中引用的表的列
-                            if real_table_names.is_empty() || real_table_names.contains(&table.name)
-                            {
-                                for column in &table.columns {
-                                    let table_name = if use_table_prefix {
-                                        Some(table.name.as_str())
-                                    } else {
-                                        None
-                                    };
-                                    let mut item = self.create_column_item(column, table_name);
-                                    item.sort_text = Some(format!("0{}", column.name)); // Columns first
-                                    items.push(item);
-                                }
-                            }
-                        }
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
                     } else {
                         // 如果没有解析树，默认返回所有列，不带前缀
-                        for table in &schema.tables {
-                            for column in &table.columns {
-                                let mut item = self.create_column_item(column, None);
-                                item.sort_text = Some(format!("0{}", column.name)); // Columns first
-                                items.push(item);
-                            }
-                        }
+                        self.add_schema_columns(&mut items, schema, &[], false, "", "0");
                     }
                 }
                 // GROUP BY 不添加任何关键字
@@ -476,31 +351,24 @@ impl Dialect for MysqlDialect {
                     // Check if query has multiple tables (to decide whether to use table prefix)
                     // Same logic as WHERE/ORDER BY
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = parser.extract_referenced_tables(tree, sql);
-                        let aliases = parser.extract_aliases(tree, sql);
-                        let mut real_table_names: Vec<String> = referenced_tables
-                            .iter()
-                            .map(|t| aliases.get(t).unwrap_or(t).clone())
-                            .collect();
-                        real_table_names.dedup();
-                        let use_table_prefix = real_table_names.len() > 1;
-
-                        for table in &schema.tables {
-                            if real_table_names.is_empty() || real_table_names.contains(&table.name)
-                            {
-                                for column in &table.columns {
-                                    let table_name = if use_table_prefix {
-                                        Some(table.name.as_str())
-                                    } else {
-                                        None
-                                    };
-                                    let mut item = self.create_column_item(column, table_name);
-                                    item.sort_text = Some(format!("0{}", column.name));
-                                    items.push(item);
-                                }
-                            }
-                        }
+                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            "",
+                            "0",
+                        );
                     }
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        "",
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
 
                 // 2. 添加聚合函数 (优先级中 "1")
@@ -536,7 +404,7 @@ impl Dialect for MysqlDialect {
                                     aliases.get(&table_name).unwrap_or(&table_name);
 
                                 if let Some(table) =
-                                    schema.tables.iter().find(|t| t.name == *real_table_name)
+                                    Self::find_table_by_reference(schema, real_table_name)
                                 {
                                     for column in &table.columns {
                                         items.push(self.create_column_item(column, None));
@@ -549,21 +417,7 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::Default => {
-                // 默认：返回所有关键字和表名
-                // Extract prefix to filter suggestions
-                let prefix = {
-                    let lines: Vec<&str> = sql.lines().collect();
-                    let line_text = lines.get(position.line as usize).unwrap_or(&"");
-                    let text_before =
-                        &line_text[..position.character.min(line_text.len() as u32) as usize];
-
-                    // Extract last word before cursor
-                    text_before
-                        .split(|c: char| c.is_whitespace() || c == ',' || c == '(')
-                        .next_back()
-                        .unwrap_or("")
-                        .to_uppercase()
-                };
+                let prefix = Self::cursor_prefix(sql, position);
 
                 let keywords = vec![
                     "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
@@ -574,22 +428,26 @@ impl Dialect for MysqlDialect {
                 ];
 
                 for keyword in keywords {
-                    // Filter by prefix if prefix is not empty
-                    if !prefix.is_empty() && !keyword.starts_with(&prefix) {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;
                     }
                     items.push(self.create_keyword_item(keyword));
                 }
 
-                // 如果提供了 schema，添加表补全（也应用前缀过滤）
                 if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        // Filter tables by prefix as well
-                        if !prefix.is_empty() && !table.name.to_uppercase().starts_with(&prefix) {
-                            continue;
-                        }
-                        items.push(self.create_table_item(table));
-                    }
+                    common::add_schema_tables(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
                 }
             }
         }
@@ -624,7 +482,8 @@ impl Dialect for MysqlDialect {
                         || (node_kind == "identifier" && parser.is_in_from_context(node, sql));
 
                     if is_table {
-                        if let Some(table) = schema.tables.iter().find(|t| t.name == node_text) {
+                        let table_ref = SqlParser::normalize_identifier(&node_text);
+                        if let Some(table) = Self::find_table_by_reference(schema, &table_ref) {
                             let mut info = format!("**Table**: `{}`\n\n", table.name);
                             if let Some(comment) = &table.comment {
                                 info.push_str(&format!("{}\n\n", comment));
@@ -671,12 +530,14 @@ impl Dialect for MysqlDialect {
                         for table in &schema.tables {
                             // 如果有明确的表名，只在该表中查找
                             if let Some(ref tname) = table_name {
-                                if table.name != *tname {
+                                if !Self::table_matches(schema, table, tname) {
                                     continue;
                                 }
                             }
 
-                            if let Some(column) = table.columns.iter().find(|c| c.name == node_text)
+                            let column_name = SqlParser::identifier_last_part(&node_text);
+                            if let Some(column) =
+                                table.columns.iter().find(|c| c.name == column_name)
                             {
                                 let mut info =
                                     format!("**Column**: `{}.{}`\n\n", table.name, column.name);
@@ -703,30 +564,13 @@ impl Dialect for MysqlDialect {
                     }
 
                     // 检查是否是函数名
-                    if node_kind == "function_name" || node_kind.contains("function") {
-                        if let Some(func) = schema.functions.iter().find(|f| f.name == node_text) {
-                            let mut info = format!("**Function**: `{}`\n\n", func.name);
-                            if let Some(desc) = &func.description {
-                                info.push_str(&format!("{}\n\n", desc));
-                            }
-                            info.push_str(&format!("**Returns**: `{}`\n", func.return_type));
-                            if !func.parameters.is_empty() {
-                                info.push_str("\n**Parameters**:\n");
-                                for param in &func.parameters {
-                                    info.push_str(&format!(
-                                        "- `{}`: `{}`{}\n",
-                                        param.name,
-                                        param.data_type,
-                                        if param.optional { " (optional)" } else { "" }
-                                    ));
-                                }
-                            }
-
+                    if Self::is_function_reference(node, sql) {
+                        if let Some(func) = Self::find_function_by_reference(schema, &node_text) {
                             return Some(Hover {
                                 contents: tower_lsp::lsp_types::HoverContents::Markup(
                                     tower_lsp::lsp_types::MarkupContent {
                                         kind: tower_lsp::lsp_types::MarkupKind::Markdown,
-                                        value: info,
+                                        value: func.markdown_documentation(),
                                     },
                                 ),
                                 range: Some(node_range),
@@ -777,7 +621,8 @@ impl Dialect for MysqlDialect {
                 // 如果是表名，查找表定义
                 if is_table {
                     if let Some(schema) = schema {
-                        if let Some(table) = schema.tables.iter().find(|t| t.name == node_text) {
+                        let table_ref = SqlParser::normalize_identifier(&node_text);
+                        if let Some(table) = Self::find_table_by_reference(schema, &table_ref) {
                             // 使用表的源位置（如果有）
                             let (uri, line) = if let Some((ref source_uri, source_line)) =
                                 table.source_location
@@ -830,18 +675,21 @@ impl Dialect for MysqlDialect {
                         // 检查是否是 table.column 格式
                         let (table_name, column_name) =
                             if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
-                                (Some(table_name), node_text.clone())
+                                (
+                                    Some(table_name),
+                                    SqlParser::identifier_last_part(&node_text),
+                                )
                             } else {
                                 // 查找列所属的表
                                 let tables = parser.extract_tables(tree, sql);
                                 let table_name = tables.first().cloned();
-                                (table_name, node_text.clone())
+                                (table_name, SqlParser::identifier_last_part(&node_text))
                             };
 
                         // 在 Schema 中查找列
                         for table in &schema.tables {
                             if let Some(ref tname) = table_name {
-                                if table.name == *tname
+                                if Self::table_matches(schema, table, tname)
                                     && table.columns.iter().any(|c| c.name == column_name)
                                 {
                                     // 返回当前文档中列名第一次出现的位置

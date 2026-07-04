@@ -1,6 +1,6 @@
 use sql_lsp::dialect::Dialect;
 use sql_lsp::dialects::*;
-use sql_lsp::schema::{Column, Schema, SchemaId, Table};
+use sql_lsp::schema::{Column, Function, FunctionParameter, Schema, SchemaId, Table};
 
 #[tokio::test]
 async fn test_mysql_dialect() {
@@ -85,6 +85,246 @@ async fn test_postgres_dialect() {
         )
         .await;
     assert!(items_default.iter().any(|item| item.label == "ILIKE"));
+}
+
+#[tokio::test]
+async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
+    let dialect = PostgresDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "public".to_string(),
+        tables: vec![
+            Table {
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+            Table {
+                name: "orders".to_string(),
+                columns: vec![
+                    Column {
+                        name: "order_id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "user_id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let single_table_sql = "SELECT * FROM users WHERE ";
+    let single_table_items = dialect
+        .completion(
+            single_table_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: single_table_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(single_table_items.iter().any(|item| item.label == "id"));
+    assert!(single_table_items.iter().any(|item| item.label == "name"));
+    assert!(
+        !single_table_items
+            .iter()
+            .any(|item| item.label.contains("order_id")),
+        "single-table WHERE should not suggest columns from unrelated tables"
+    );
+
+    let join_sql = "SELECT * FROM users u JOIN orders o ON u.id = o.user_id WHERE ";
+    let join_items = dialect
+        .completion(
+            join_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: join_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        join_items
+            .iter()
+            .any(|item| item.label == "users.id" || item.label == "orders.order_id"),
+        "multi-table WHERE should qualify column labels"
+    );
+
+    let alias_sql = "SELECT u. FROM users u";
+    let alias_items = dialect
+        .completion(
+            alias_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 9,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(alias_items.iter().any(|item| item.label == "id"));
+    assert!(alias_items.iter().any(|item| item.label == "name"));
+    assert!(
+        !alias_items.iter().any(|item| item.label == "order_id"),
+        "alias column completion should stay scoped to the aliased table"
+    );
+}
+
+#[tokio::test]
+async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
+    let dialect = MysqlDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "shop".to_string(),
+        tables: vec![
+            Table {
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "VARCHAR".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+            Table {
+                name: "orders".to_string(),
+                columns: vec![
+                    Column {
+                        name: "order_id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "user_id".to_string(),
+                        data_type: "INT".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let single_table_sql = "SELECT ord FROM users";
+    let single_table_items = dialect
+        .completion(
+            single_table_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 10,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        !single_table_items
+            .iter()
+            .any(|item| item.label.contains("order_id")),
+        "single-table SELECT should not suggest columns from unrelated tables"
+    );
+
+    let join_sql = "SELECT user FROM users u JOIN orders o ON u.id = o.user_id";
+    let join_items = dialect
+        .completion(
+            join_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 11,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        join_items.iter().any(|item| item.label == "orders.user_id"),
+        "multi-table SELECT should qualify and include referenced table columns"
+    );
+
+    let unqualified_table_items = dialect
+        .completion(
+            "SELECT * FROM us",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 16,
+            },
+            Some(&schema),
+        )
+        .await;
+    let unqualified_table_item = unqualified_table_items
+        .iter()
+        .find(|item| item.label == "users")
+        .expect("MySQL should suggest unqualified table names by default");
+    assert_eq!(unqualified_table_item.insert_text.as_deref(), Some("users"));
+
+    let qualified_table_items = dialect
+        .completion(
+            "SELECT * FROM shop.us",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 21,
+            },
+            Some(&schema),
+        )
+        .await;
+    let qualified_table_item = qualified_table_items
+        .iter()
+        .find(|item| item.label == "shop.users")
+        .expect("MySQL should preserve database-qualified table completion");
+    assert_eq!(
+        qualified_table_item.insert_text.as_deref(),
+        Some("shop.users")
+    );
 }
 
 #[tokio::test]
@@ -235,6 +475,7 @@ async fn test_dialect_with_schema() {
                     nullable: false,
                     comment: Some("User ID".to_string()),
                     source_location: None,
+                    ..Default::default()
                 },
                 Column {
                     name: "name".to_string(),
@@ -242,10 +483,12 @@ async fn test_dialect_with_schema() {
                     nullable: true,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             comment: Some("Users table".to_string()),
             source_location: None,
+            ..Default::default()
         }],
         functions: vec![],
         source_uri: None,
@@ -267,6 +510,162 @@ async fn test_dialect_with_schema() {
     // 检查是否有列名补全（单表查询，不带表前缀）
     assert!(items.iter().any(|item| item.label == "id"));
     assert!(items.iter().any(|item| item.label == "name"));
+}
+
+#[tokio::test]
+async fn test_schema_function_completion() {
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "test_db".to_string(),
+        tables: vec![],
+        functions: vec![Function {
+            name: "calculate_score".to_string(),
+            routine_type: Some("function".to_string()),
+            parameters: vec![FunctionParameter {
+                name: "user_id".to_string(),
+                data_type: "integer".to_string(),
+                optional: false,
+            }],
+            return_type: "integer".to_string(),
+            description: Some("Calculate a user score".to_string()),
+        }],
+        source_uri: None,
+    };
+
+    let mysql = MysqlDialect::new();
+    let mysql_items = mysql
+        .completion(
+            "SELECT calc",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 11,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(mysql_items.iter().any(|item| {
+        item.label == "calculate_score"
+            && item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FUNCTION)
+    }));
+    let mysql_qualified_items = mysql
+        .completion(
+            "SELECT test_db.calc",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 19,
+            },
+            Some(&schema),
+        )
+        .await;
+    let mysql_qualified_item = mysql_qualified_items
+        .iter()
+        .find(|item| item.label == "test_db.calculate_score")
+        .expect("MySQL should preserve database-qualified function completion");
+    assert_eq!(
+        mysql_qualified_item.insert_text.as_deref(),
+        Some("test_db.calculate_score()")
+    );
+
+    let postgres = PostgresDialect::new();
+    let postgres_items = postgres
+        .completion(
+            "SELECT calc",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 11,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(postgres_items.iter().any(|item| {
+        item.label == "calculate_score"
+            && item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FUNCTION)
+    }));
+    let postgres_qualified_items = postgres
+        .completion(
+            "SELECT test_db.calc",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 19,
+            },
+            Some(&schema),
+        )
+        .await;
+    let postgres_qualified_item = postgres_qualified_items
+        .iter()
+        .find(|item| item.label == "test_db.calculate_score")
+        .expect("Postgres should preserve schema-qualified function completion");
+    assert_eq!(
+        postgres_qualified_item.insert_text.as_deref(),
+        Some("test_db.calculate_score()")
+    );
+}
+
+fn hover_contents_to_string(contents: &tower_lsp::lsp_types::HoverContents) -> String {
+    match contents {
+        tower_lsp::lsp_types::HoverContents::Scalar(marked) => match marked {
+            tower_lsp::lsp_types::MarkedString::String(value) => value.clone(),
+            tower_lsp::lsp_types::MarkedString::LanguageString(value) => value.value.clone(),
+        },
+        tower_lsp::lsp_types::HoverContents::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                tower_lsp::lsp_types::MarkedString::String(text) => text.clone(),
+                tower_lsp::lsp_types::MarkedString::LanguageString(text) => text.value.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        tower_lsp::lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
+    }
+}
+
+#[tokio::test]
+async fn test_schema_function_hover() {
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "test_db".to_string(),
+        tables: vec![],
+        functions: vec![Function {
+            name: "calculate_score".to_string(),
+            routine_type: Some("function".to_string()),
+            parameters: vec![FunctionParameter {
+                name: "user_id".to_string(),
+                data_type: "integer".to_string(),
+                optional: false,
+            }],
+            return_type: "integer".to_string(),
+            description: Some("Calculate a user score".to_string()),
+        }],
+        source_uri: None,
+    };
+
+    let sql = "SELECT calculate_score(42)";
+    let position = tower_lsp::lsp_types::Position {
+        line: 0,
+        character: 10,
+    };
+
+    let mysql = MysqlDialect::new();
+    let mysql_hover = mysql
+        .hover(sql, position, Some(&schema))
+        .await
+        .expect("MySQL should show schema function hover");
+    let mysql_hover_text = hover_contents_to_string(&mysql_hover.contents);
+    assert!(mysql_hover_text.contains("**Function**: `calculate_score(user_id integer)`"));
+    assert!(mysql_hover_text.contains("Calculate a user score"));
+    assert!(mysql_hover_text.contains("**Returns**: `integer`"));
+    assert!(mysql_hover_text.contains("- `user_id`: `integer`"));
+
+    let postgres = PostgresDialect::new();
+    let postgres_hover = postgres
+        .hover(sql, position, Some(&schema))
+        .await
+        .expect("Postgres should show schema function hover");
+    let postgres_hover_text = hover_contents_to_string(&postgres_hover.contents);
+    assert!(postgres_hover_text.contains("**Function**: `calculate_score(user_id integer)`"));
+    assert!(postgres_hover_text.contains("Calculate a user score"));
+    assert!(postgres_hover_text.contains("**Returns**: `integer`"));
+    assert!(postgres_hover_text.contains("- `user_id`: `integer`"));
 }
 
 /// 辅助函数：测试补全并打印详细日志
@@ -344,6 +743,7 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "name".to_string(),
@@ -351,6 +751,7 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "created_at".to_string(),
@@ -358,10 +759,12 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                 ],
                 comment: Some("Users table".to_string()),
                 source_location: None,
+                ..Default::default()
             },
             Table {
                 name: "orders".to_string(),
@@ -372,6 +775,7 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "user_id".to_string(),
@@ -379,6 +783,7 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                     Column {
                         name: "total_amount".to_string(),
@@ -386,10 +791,12 @@ async fn test_intelligent_completion_logging() {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     },
                 ],
                 comment: Some("Orders table".to_string()),
                 source_location: None,
+                ..Default::default()
             },
         ],
         functions: vec![],

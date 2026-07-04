@@ -361,14 +361,16 @@ impl SqlParser {
         {
             if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 let text = text.trim();
+                let table_name = Self::normalize_identifier(text);
                 // 过滤关键字和操作符
                 if !text.is_empty()
                     && !Keywords::is_keyword(text)
                     && !Operators::is_operator(text)
                     && !Delimiters::is_delimiter(text)
-                    && !tables.contains(&text.to_string())
+                    && !table_name.is_empty()
+                    && !tables.contains(&table_name)
                 {
-                    tables.push(text.to_string());
+                    tables.push(table_name);
                 }
             }
         }
@@ -425,15 +427,17 @@ impl SqlParser {
         {
             if let Ok(text) = node.utf8_text(source.as_bytes()) {
                 let text = text.trim();
+                let column_name = Self::normalize_identifier(text);
                 // 过滤关键字和操作符
                 if !text.is_empty()
                     && !Keywords::is_keyword(text)
                     && !Operators::is_operator(text)
                     && !Delimiters::is_delimiter(text)
                     && text != "*"  // 排除通配符
-                    && !columns.contains(&text.to_string())
+                    && !column_name.is_empty()
+                    && !columns.contains(&column_name)
                 {
-                    columns.push(text.to_string());
+                    columns.push(column_name);
                 }
             }
         }
@@ -593,7 +597,8 @@ impl SqlParser {
         } else {
             source
         };
-        let text_upper = text_before.to_uppercase();
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
 
         // Priority 1: Check for table/alias column access (ends with .)
         if text_before.trim_end().ends_with('.') {
@@ -603,20 +608,21 @@ impl SqlParser {
         // Priority 2: Find the last complete keyword to determine context
 
         // Check for WHERE clause
-        if let Some(where_pos) = text_upper.rfind("WHERE") {
-            let has_later_keyword = text_upper[where_pos..]
-                .find("ORDER BY")
-                .or_else(|| text_upper[where_pos..].find("GROUP BY"))
-                .or_else(|| text_upper[where_pos..].find("LIMIT"))
-                .or_else(|| text_upper[where_pos..].find("HAVING"));
+        if let Some(where_pos) = Self::previous_keyword_position(&text_upper, "WHERE") {
+            let has_later_keyword = Self::statement_has_any_keyword(
+                &text_upper,
+                where_pos + "WHERE".len(),
+                text_upper.len(),
+                &["ORDER BY", "GROUP BY", "LIMIT", "HAVING"],
+            );
 
-            if has_later_keyword.is_none() {
+            if !has_later_keyword {
                 return CompletionContext::WhereClause;
             }
         }
 
         // Check for JOIN clause (basic check)
-        if let Some(join_pos) = text_upper.rfind("JOIN") {
+        if let Some(join_pos) = Self::previous_keyword_position(&text_upper, "JOIN") {
             let after_join = &text_upper[join_pos + 4..].trim_start();
             if !after_join.starts_with("ON") && !after_join.contains(" ON ") {
                 return CompletionContext::JoinClause;
@@ -626,37 +632,42 @@ impl SqlParser {
         // IMPORTANT: Check for HAVING before GROUP BY and ORDER BY
         // because HAVING comes after GROUP BY in SQL syntax
         // When both exist, we want to detect the later one
-        if text_upper.rfind("HAVING").is_some() {
+        if Self::previous_keyword_position(&text_upper, "HAVING").is_some() {
             return CompletionContext::HavingClause;
         }
 
         // Check for ORDER BY clause
-        if text_upper.rfind("ORDER BY").is_some() {
+        if Self::previous_keyword_position(&text_upper, "ORDER BY").is_some() {
             return CompletionContext::OrderByClause;
         }
 
         // Check for GROUP BY clause
-        if text_upper.rfind("GROUP BY").is_some() {
+        if Self::previous_keyword_position(&text_upper, "GROUP BY").is_some() {
             return CompletionContext::GroupByClause;
         }
 
         // Check for FROM clause
-        if let Some(from_pos) = text_upper.rfind("FROM") {
-            let after_from = &text_upper[from_pos + 4..].trim_start();
-            if !after_from.contains("WHERE")
-                && !after_from.contains("JOIN")
-                && !after_from.contains("ORDER")
-                && !after_from.contains("GROUP")
-                && !after_from.contains("LIMIT")
-            {
+        if let Some(from_pos) = Self::previous_keyword_position(&text_upper, "FROM") {
+            let has_later_keyword = Self::statement_has_any_keyword(
+                &text_upper,
+                from_pos + "FROM".len(),
+                text_upper.len(),
+                &["WHERE", "JOIN", "ORDER BY", "GROUP BY", "LIMIT"],
+            );
+
+            if !has_later_keyword {
                 return CompletionContext::FromClause;
             }
         }
 
         // Check for SELECT clause
-        if let Some(select_pos) = text_upper.rfind("SELECT") {
-            let after_select = &text_upper[select_pos + 6..].trim_start();
-            if !after_select.contains("FROM") {
+        if let Some(select_pos) = Self::previous_keyword_position(&text_upper, "SELECT") {
+            if !Self::contains_keyword_between(
+                &text_upper,
+                "FROM",
+                select_pos + "SELECT".len(),
+                text_upper.len(),
+            ) {
                 return CompletionContext::SelectClause;
             }
         }
@@ -674,10 +685,10 @@ impl SqlParser {
 
             // Try to extract from text directly first, if it looks like "table." or "table.col"
             if let Ok(text) = n.utf8_text(source.as_bytes()) {
-                if let Some(dot_pos) = text.find('.') {
+                if let Some(dot_pos) = text.rfind('.') {
                     let table_name = text[..dot_pos].trim();
                     if !table_name.is_empty() && !Keywords::is_keyword(table_name) {
-                        return Some(table_name.to_string());
+                        return Some(Self::normalize_identifier(table_name));
                     }
                 }
             }
@@ -685,10 +696,10 @@ impl SqlParser {
             // 查找 member_expression 或 dotted_name
             if kind == "member_expression" || kind == "dotted_name" {
                 if let Ok(text) = n.utf8_text(source.as_bytes()) {
-                    if let Some(dot_pos) = text.find('.') {
+                    if let Some(dot_pos) = text.rfind('.') {
                         let table_name = text[..dot_pos].trim();
                         if !table_name.is_empty() && !Keywords::is_keyword(table_name) {
-                            return Some(table_name.to_string());
+                            return Some(Self::normalize_identifier(table_name));
                         }
                     }
                 }
@@ -697,10 +708,10 @@ impl SqlParser {
             // 检查父节点
             if let Some(parent) = n.parent() {
                 if let Ok(text) = parent.utf8_text(source.as_bytes()) {
-                    if let Some(dot_pos) = text.find('.') {
+                    if let Some(dot_pos) = text.rfind('.') {
                         let table_name = text[..dot_pos].trim();
                         if !table_name.is_empty() && !Keywords::is_keyword(table_name) {
-                            return Some(table_name.to_string());
+                            return Some(Self::normalize_identifier(table_name));
                         }
                     }
                 }
@@ -710,6 +721,91 @@ impl SqlParser {
         }
 
         None
+    }
+
+    /// Normalize an identifier path for cross-dialect matching.
+    pub fn normalize_identifier(identifier: &str) -> String {
+        Self::identifier_parts(identifier).join(".")
+    }
+
+    /// Return the last segment of a possibly schema-qualified identifier.
+    pub fn identifier_last_part(identifier: &str) -> String {
+        Self::identifier_parts(identifier)
+            .pop()
+            .unwrap_or_else(|| identifier.trim().to_string())
+    }
+
+    /// Return the qualifier before the last segment of a possibly schema-qualified identifier.
+    pub fn identifier_qualifier(identifier: &str) -> Option<String> {
+        let mut parts = Self::identifier_parts(identifier);
+        if parts.len() < 2 {
+            return None;
+        }
+
+        parts.pop();
+        let qualifier = parts.join(".");
+        if qualifier.is_empty() {
+            None
+        } else {
+            Some(qualifier)
+        }
+    }
+
+    /// Compare a referenced table name with a schema table.
+    pub fn table_name_matches(reference: &str, database: &str, table_name: &str) -> bool {
+        let reference_parts = Self::identifier_parts(reference);
+        let table = Self::normalize_identifier(table_name);
+        let database = Self::normalize_identifier(database);
+
+        match reference_parts.as_slice() {
+            [name] => Self::identifier_eq(name, &table),
+            parts if parts.len() >= 2 => {
+                let referenced_table = parts.last().unwrap();
+                let referenced_database = &parts[parts.len() - 2];
+                Self::identifier_eq(referenced_table, &table)
+                    && (database.is_empty() || Self::identifier_eq(referenced_database, &database))
+            }
+            _ => false,
+        }
+    }
+
+    fn identifier_parts(identifier: &str) -> Vec<String> {
+        identifier
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, ',' | ';' | '(' | ')'))
+            .split('.')
+            .map(Self::unquote_identifier_part)
+            .filter(|part| !part.is_empty())
+            .collect()
+    }
+
+    fn unquote_identifier_part(part: &str) -> String {
+        let trimmed = part
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, ',' | ';' | '(' | ')'));
+
+        if trimmed.len() >= 2 {
+            let bytes = trimmed.as_bytes();
+            let first = bytes[0] as char;
+            let last = bytes[bytes.len() - 1] as char;
+
+            if (first == '"' && last == '"')
+                || (first == '`' && last == '`')
+                || (first == '\'' && last == '\'')
+                || (first == '[' && last == ']')
+            {
+                return trimmed[1..trimmed.len() - 1]
+                    .replace("\"\"", "\"")
+                    .replace("``", "`")
+                    .replace("''", "'");
+            }
+        }
+
+        trimmed.to_string()
+    }
+
+    fn identifier_eq(left: &str, right: &str) -> bool {
+        left == right || left.eq_ignore_ascii_case(right)
     }
 }
 
@@ -728,6 +824,475 @@ pub struct AstNode {
 }
 
 impl SqlParser {
+    fn is_identifier_char(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+    }
+
+    fn push_masked_char(output: &mut String, ch: char) {
+        if matches!(ch, '\n' | '\r') {
+            output.push(ch);
+        } else {
+            for _ in 0..ch.len_utf8() {
+                output.push(' ');
+            }
+        }
+    }
+
+    fn push_masked_range(source: &str, output: &mut String, mut index: usize, end: usize) -> usize {
+        while index < end {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            Self::push_masked_char(output, ch);
+            index += ch.len_utf8();
+        }
+        index
+    }
+
+    fn starts_hash_comment(source: &str, index: usize) -> bool {
+        if !source[index..].starts_with('#') {
+            return false;
+        }
+
+        index == 0
+            || source[..index]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| ch.is_whitespace())
+    }
+
+    fn mask_quoted_region(source: &str, output: &mut String, index: usize, quote: char) -> usize {
+        let mut index = Self::push_masked_range(source, output, index, index + quote.len_utf8());
+
+        while index < source.len() {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            index = Self::push_masked_range(source, output, index, index + ch.len_utf8());
+
+            if ch == '\\' && quote == '\'' && index < source.len() {
+                let Some(escaped) = source[index..].chars().next() else {
+                    break;
+                };
+                index = Self::push_masked_range(source, output, index, index + escaped.len_utf8());
+                continue;
+            }
+
+            if ch == quote {
+                if source[index..].starts_with(quote) {
+                    index =
+                        Self::push_masked_range(source, output, index, index + quote.len_utf8());
+                    continue;
+                }
+                break;
+            }
+        }
+
+        index
+    }
+
+    fn mask_bracketed_identifier(source: &str, output: &mut String, index: usize) -> usize {
+        let mut index = Self::push_masked_range(source, output, index, index + 1);
+
+        while index < source.len() {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            index = Self::push_masked_range(source, output, index, index + ch.len_utf8());
+
+            if ch == ']' {
+                if source[index..].starts_with(']') {
+                    index = Self::push_masked_range(source, output, index, index + 1);
+                    continue;
+                }
+                break;
+            }
+        }
+
+        index
+    }
+
+    fn dollar_quote_tag_at(source: &str, index: usize) -> Option<&str> {
+        let rest = source.get(index..)?;
+        let bytes = rest.as_bytes();
+        if bytes.first() != Some(&b'$') {
+            return None;
+        }
+
+        let mut end = 1;
+        while end < bytes.len() {
+            let byte = bytes[end];
+            if byte == b'$' {
+                return Some(&rest[..=end]);
+            }
+            if end == 1 && !(byte == b'_' || byte.is_ascii_alphabetic()) {
+                return None;
+            }
+            if end > 1 && !(byte == b'_' || byte.is_ascii_alphanumeric()) {
+                return None;
+            }
+            end += 1;
+        }
+
+        None
+    }
+
+    fn mask_dollar_quoted_region(source: &str, output: &mut String, index: usize) -> Option<usize> {
+        let tag = Self::dollar_quote_tag_at(source, index)?;
+        let body_start = index + tag.len();
+        let end = source[body_start..]
+            .find(tag)
+            .map(|body_end| body_start + body_end + tag.len())
+            .unwrap_or(source.len());
+
+        Some(Self::push_masked_range(source, output, index, end))
+    }
+
+    fn mask_sql_noise(source: &str) -> String {
+        let mut output = String::with_capacity(source.len());
+        let mut index = 0;
+
+        while index < source.len() {
+            if source[index..].starts_with("--") {
+                while index < source.len() {
+                    let Some(ch) = source[index..].chars().next() else {
+                        break;
+                    };
+                    index =
+                        Self::push_masked_range(source, &mut output, index, index + ch.len_utf8());
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if Self::starts_hash_comment(source, index) {
+                while index < source.len() {
+                    let Some(ch) = source[index..].chars().next() else {
+                        break;
+                    };
+                    index =
+                        Self::push_masked_range(source, &mut output, index, index + ch.len_utf8());
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if source[index..].starts_with("/*") {
+                index = Self::push_masked_range(source, &mut output, index, index + 2);
+                while index < source.len() {
+                    if source[index..].starts_with("*/") {
+                        index = Self::push_masked_range(source, &mut output, index, index + 2);
+                        break;
+                    }
+                    let Some(ch) = source[index..].chars().next() else {
+                        break;
+                    };
+                    index =
+                        Self::push_masked_range(source, &mut output, index, index + ch.len_utf8());
+                }
+                continue;
+            }
+
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+
+            if ch == '$' {
+                if let Some(next_index) =
+                    Self::mask_dollar_quoted_region(source, &mut output, index)
+                {
+                    index = next_index;
+                    continue;
+                }
+            }
+
+            if matches!(ch, '\'' | '"' | '`') {
+                index = Self::mask_quoted_region(source, &mut output, index, ch);
+                continue;
+            }
+
+            if ch == '[' {
+                index = Self::mask_bracketed_identifier(source, &mut output, index);
+                continue;
+            }
+
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+
+        output
+    }
+
+    fn is_keyword_at(source_upper: &str, start: usize, keyword: &str) -> bool {
+        let end = start + keyword.len();
+        if end > source_upper.len() {
+            return false;
+        }
+
+        let before_is_boundary = if start == 0 {
+            true
+        } else {
+            source_upper[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !Self::is_identifier_char(ch))
+        };
+        let after_is_boundary = if end >= source_upper.len() {
+            true
+        } else {
+            source_upper[end..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !Self::is_identifier_char(ch))
+        };
+
+        before_is_boundary && after_is_boundary
+    }
+
+    fn next_keyword_position(source_upper: &str, keyword: &str, from: usize) -> Option<usize> {
+        let mut search_pos = from;
+        while let Some(relative_pos) = source_upper[search_pos..].find(keyword) {
+            let absolute_pos = search_pos + relative_pos;
+            if Self::is_keyword_at(source_upper, absolute_pos, keyword) {
+                return Some(absolute_pos);
+            }
+            search_pos = absolute_pos + keyword.len();
+        }
+        None
+    }
+
+    fn previous_keyword_position(source_upper: &str, keyword: &str) -> Option<usize> {
+        let mut search_pos = 0;
+        let mut previous = None;
+
+        while let Some(position) = Self::next_keyword_position(source_upper, keyword, search_pos) {
+            previous = Some(position);
+            search_pos = position + keyword.len();
+        }
+
+        previous
+    }
+
+    fn previous_statement_start(source_upper: &str, index: usize) -> usize {
+        source_upper[..index]
+            .rfind(';')
+            .map(|position| position + 1)
+            .unwrap_or(0)
+    }
+
+    fn contains_keyword_between(
+        source_upper: &str,
+        keyword: &str,
+        start: usize,
+        end: usize,
+    ) -> bool {
+        Self::next_keyword_position(source_upper, keyword, start)
+            .is_some_and(|keyword_pos| keyword_pos < end)
+    }
+
+    fn statement_has_any_keyword(
+        source_upper: &str,
+        start: usize,
+        end: usize,
+        keywords: &[&str],
+    ) -> bool {
+        keywords
+            .iter()
+            .any(|keyword| Self::contains_keyword_between(source_upper, keyword, start, end))
+    }
+
+    fn should_read_on_relation(source_upper: &str, on_position: usize) -> bool {
+        let statement_start = Self::previous_statement_start(source_upper, on_position);
+        let has_ddl_action = Self::statement_has_any_keyword(
+            source_upper,
+            statement_start,
+            on_position,
+            &["CREATE", "DROP"],
+        );
+        let has_on_relation_object = Self::statement_has_any_keyword(
+            source_upper,
+            statement_start,
+            on_position,
+            &["INDEX", "TRIGGER", "POLICY"],
+        );
+
+        has_ddl_action && has_on_relation_object
+    }
+
+    fn push_table_reference(tables: &mut Vec<String>, table_name: &str) {
+        let table_name = Self::normalize_identifier(table_name);
+        if !table_name.is_empty() && !tables.contains(&table_name) {
+            tables.push(table_name);
+        }
+    }
+
+    fn extract_on_relation_references(source: &str, source_upper: &str, tables: &mut Vec<String>) {
+        let mut search_pos = 0;
+        while let Some(on_position) = Self::next_keyword_position(source_upper, "ON", search_pos) {
+            let after_on = on_position + "ON".len();
+            if Self::should_read_on_relation(source_upper, on_position) {
+                if let Some((table_name, _)) = Self::read_relation_reference_after(source, after_on)
+                {
+                    Self::push_table_reference(tables, &table_name);
+                }
+            }
+            search_pos = after_on;
+        }
+    }
+
+    fn skip_whitespace(source: &str, mut index: usize) -> usize {
+        while index < source.len() {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            if !ch.is_whitespace() {
+                break;
+            }
+            index += ch.len_utf8();
+        }
+        index
+    }
+
+    fn consume_word(source: &str, index: usize, word: &str) -> Option<usize> {
+        let index = Self::skip_whitespace(source, index);
+        let end = index + word.len();
+        if end > source.len() || !source[index..end].eq_ignore_ascii_case(word) {
+            return None;
+        }
+
+        let after_is_boundary = if end >= source.len() {
+            true
+        } else {
+            source[end..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !Self::is_identifier_char(ch))
+        };
+
+        after_is_boundary.then_some(end)
+    }
+
+    fn skip_relation_modifiers(source: &str, mut index: usize) -> usize {
+        if let Some(next_index) = Self::consume_word(source, index, "ONLY") {
+            index = next_index;
+        }
+
+        let after_if = Self::consume_word(source, index, "IF");
+        if let Some(after_if) = after_if {
+            let after_not = Self::consume_word(source, after_if, "NOT").unwrap_or(after_if);
+            if let Some(after_exists) = Self::consume_word(source, after_not, "EXISTS") {
+                index = after_exists;
+            }
+        }
+
+        Self::skip_whitespace(source, index)
+    }
+
+    fn read_identifier_part(source: &str, index: usize) -> Option<(String, usize)> {
+        let index = Self::skip_whitespace(source, index);
+        let first = source[index..].chars().next()?;
+
+        if matches!(first, '"' | '`' | '\'') {
+            let quote = first;
+            let mut end = index + quote.len_utf8();
+            let mut part = String::new();
+            while end < source.len() {
+                let ch = source[end..].chars().next()?;
+                end += ch.len_utf8();
+                if ch == quote {
+                    if source[end..].starts_with(quote) {
+                        part.push(quote);
+                        end += quote.len_utf8();
+                        continue;
+                    }
+                    return Some((part, end));
+                }
+                part.push(ch);
+            }
+            return None;
+        }
+
+        if first == '[' {
+            let mut end = index + 1;
+            let mut part = String::new();
+            while end < source.len() {
+                let ch = source[end..].chars().next()?;
+                end += ch.len_utf8();
+                if ch == ']' {
+                    return Some((part, end));
+                }
+                part.push(ch);
+            }
+            return None;
+        }
+
+        if !Self::is_identifier_char(first) {
+            return None;
+        }
+
+        let mut end = index;
+        while end < source.len() {
+            let Some(ch) = source[end..].chars().next() else {
+                break;
+            };
+            if !Self::is_identifier_char(ch) {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+
+        Some((source[index..end].to_string(), end))
+    }
+
+    fn read_identifier_path(source: &str, index: usize) -> Option<(String, usize)> {
+        let mut parts = Vec::new();
+        let (first_part, mut index) = Self::read_identifier_part(source, index)?;
+        parts.push(first_part);
+
+        loop {
+            index = Self::skip_whitespace(source, index);
+            if !source[index..].starts_with('.') {
+                break;
+            }
+            index += 1;
+            let Some((part, next_index)) = Self::read_identifier_part(source, index) else {
+                break;
+            };
+            parts.push(part);
+            index = next_index;
+        }
+
+        Some((parts.join("."), index))
+    }
+
+    fn read_relation_reference_after(source: &str, index: usize) -> Option<(String, usize)> {
+        let index = Self::skip_relation_modifiers(source, index);
+        Self::read_identifier_path(source, index)
+    }
+
+    fn read_relation_alias_after(source: &str, index: usize) -> Option<(String, usize)> {
+        let mut index = Self::skip_whitespace(source, index);
+        if let Some(after_as) = Self::consume_word(source, index, "AS") {
+            index = after_as;
+        }
+
+        let (alias, next_index) = Self::read_identifier_part(source, index)?;
+        if Keywords::is_keyword(&alias)
+            || matches!(
+                alias.to_ascii_uppercase().as_str(),
+                "ON" | "USING" | "WHERE" | "SET" | "VALUES" | "RETURNING" | "GROUP" | "ORDER"
+            )
+        {
+            return None;
+        }
+
+        Some((alias, next_index))
+    }
+
     /// 提取表别名映射 (Alias -> Table Name)
     /// Uses text-based extraction for reliability
     pub fn extract_aliases(
@@ -736,50 +1301,31 @@ impl SqlParser {
         source: &str,
     ) -> std::collections::HashMap<String, String> {
         let mut aliases = std::collections::HashMap::new();
-        let source_upper = source.to_uppercase();
+        let searchable_source = Self::mask_sql_noise(source);
+        let source_upper = searchable_source.to_ascii_uppercase();
 
-        // Pattern: FROM/JOIN table_name alias
-        // Look for FROM/JOIN keywords followed by identifiers
-        let keywords = ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN"];
+        // Pattern: FROM/JOIN/UPDATE table_name alias
+        let keywords = ["FROM", "JOIN", "UPDATE"];
 
         for keyword in keywords {
             let mut search_pos = 0;
-            while let Some(keyword_pos) = source_upper[search_pos..].find(keyword) {
-                let abs_pos = search_pos + keyword_pos + keyword.len();
+            while let Some(abs_pos) =
+                Self::next_keyword_position(&source_upper, keyword, search_pos)
+            {
+                let after_keyword = abs_pos + keyword.len();
 
-                // Extract text after keyword
-                let after_keyword = &source[abs_pos..].trim_start();
-
-                // Try to extract "table_name alias" pattern
-                // Split by whitespace and take first two tokens
-                let tokens: Vec<&str> = after_keyword
-                    .split_whitespace()
-                    .take(3) // table, optional AS, alias
-                    .collect();
-
-                if tokens.len() >= 2 {
-                    let table_name = tokens[0];
-                    let alias_candidate =
-                        if tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("AS") {
-                            tokens[2]
-                        } else if !tokens[1].eq_ignore_ascii_case("WHERE")
-                            && !tokens[1].eq_ignore_ascii_case("ON")
-                            && !tokens[1].eq_ignore_ascii_case("JOIN")
-                            && !tokens[1].eq_ignore_ascii_case("INNER")
-                            && !tokens[1].eq_ignore_ascii_case("LEFT")
-                            && !tokens[1].eq_ignore_ascii_case("RIGHT")
-                        {
-                            tokens[1]
-                        } else {
-                            ""
-                        };
-
-                    if !alias_candidate.is_empty() && !Keywords::is_keyword(alias_candidate) {
-                        aliases.insert(alias_candidate.to_string(), table_name.to_string());
+                if let Some((table_name, after_table)) =
+                    Self::read_relation_reference_after(source, after_keyword)
+                {
+                    if let Some((alias, _)) = Self::read_relation_alias_after(source, after_table) {
+                        aliases.insert(
+                            Self::normalize_identifier(&alias),
+                            Self::normalize_identifier(&table_name),
+                        );
                     }
                 }
 
-                search_pos = abs_pos + 1;
+                search_pos = after_keyword;
             }
         }
 
@@ -789,28 +1335,29 @@ impl SqlParser {
     /// 提取SQL中引用的表名（从FROM和JOIN子句）
     pub fn extract_referenced_tables(&self, _tree: &Tree, source: &str) -> Vec<String> {
         let mut tables = Vec::new();
-        let source_upper = source.to_uppercase();
+        let searchable_source = Self::mask_sql_noise(source);
+        let source_upper = searchable_source.to_ascii_uppercase();
 
-        let keywords = ["FROM", "JOIN", "INNER JOIN", "LEFT JOIN", "RIGHT JOIN"];
+        let keywords = ["FROM", "JOIN", "UPDATE", "INTO", "TABLE", "VIEW"];
 
         for keyword in keywords {
             let mut search_pos = 0;
-            while let Some(keyword_pos) = source_upper[search_pos..].find(keyword) {
-                let abs_pos = search_pos + keyword_pos + keyword.len();
-                let after_keyword = &source[abs_pos..].trim_start();
+            while let Some(abs_pos) =
+                Self::next_keyword_position(&source_upper, keyword, search_pos)
+            {
+                let after_keyword = abs_pos + keyword.len();
 
-                // Extract first token (table name)
-                if let Some(first_token) = after_keyword.split_whitespace().next() {
-                    if !Keywords::is_keyword(first_token)
-                        && !tables.contains(&first_token.to_string())
-                    {
-                        tables.push(first_token.to_string());
-                    }
+                if let Some((table_name, _)) =
+                    Self::read_relation_reference_after(source, after_keyword)
+                {
+                    Self::push_table_reference(&mut tables, &table_name);
                 }
 
-                search_pos = abs_pos + 1;
+                search_pos = after_keyword;
             }
         }
+
+        Self::extract_on_relation_references(source, &source_upper, &mut tables);
 
         tables
     }
@@ -822,5 +1369,241 @@ impl SqlParser {
             position: self.node_range(node),
             text: self.node_text(node, source),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CompletionContext, SqlParser};
+    use tower_lsp::lsp_types::Position;
+
+    fn position_at_end(source: &str) -> Position {
+        let mut line = 0;
+        let mut character = 0;
+
+        for ch in source.chars() {
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += ch.len_utf8() as u32;
+            }
+        }
+
+        Position { line, character }
+    }
+
+    #[test]
+    fn normalizes_quoted_identifier_paths() {
+        assert_eq!(
+            SqlParser::normalize_identifier(r#""public"."users""#),
+            "public.users"
+        );
+        assert_eq!(
+            SqlParser::normalize_identifier("`app`.`orders`"),
+            "app.orders"
+        );
+        assert_eq!(
+            SqlParser::normalize_identifier("[dbo].[customers];"),
+            "dbo.customers"
+        );
+        assert_eq!(
+            SqlParser::identifier_qualifier(r#""public"."calculate_score""#).as_deref(),
+            Some("public")
+        );
+        assert_eq!(
+            SqlParser::identifier_qualifier("catalog.public.calculate_score").as_deref(),
+            Some("catalog.public")
+        );
+        assert_eq!(SqlParser::identifier_qualifier("calculate_score"), None);
+    }
+
+    #[test]
+    fn matches_schema_qualified_table_names() {
+        assert!(SqlParser::table_name_matches("users", "public", "users"));
+        assert!(SqlParser::table_name_matches(
+            r#""public"."users""#,
+            "public",
+            "users"
+        ));
+        assert!(SqlParser::table_name_matches(
+            "`app`.`orders`",
+            "app",
+            "orders"
+        ));
+        assert!(!SqlParser::table_name_matches(
+            "archive.users",
+            "public",
+            "users"
+        ));
+    }
+
+    #[test]
+    fn completion_context_ignores_keywords_inside_comments_and_literals() {
+        let parser = SqlParser::new();
+
+        let from_sql = "SELECT * -- WHERE hidden\nFROM ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(from_sql, position_at_end(from_sql)),
+            CompletionContext::FromClause
+        );
+
+        let where_sql =
+            "SELECT '-- FROM hidden' AS note FROM users WHERE name = 'ORDER BY hidden' AND ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(where_sql, position_at_end(where_sql)),
+            CompletionContext::WhereClause
+        );
+    }
+
+    #[test]
+    fn completion_context_ignores_keywords_inside_dollar_quotes() {
+        let parser = SqlParser::new();
+
+        let sql = r#"
+            CREATE FUNCTION app.hidden_lookup()
+            RETURNS integer
+            LANGUAGE SQL
+            AS $$ SELECT id FROM hidden.internal WHERE active = true; $$;
+            SELECT
+        "#;
+
+        assert_eq!(
+            parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
+            CompletionContext::SelectClause
+        );
+    }
+
+    #[test]
+    fn completion_context_respects_keyword_boundaries() {
+        let parser = SqlParser::new();
+        let sql = "SELECT * FROM order_items ";
+
+        assert_eq!(
+            parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
+            CompletionContext::FromClause
+        );
+    }
+
+    #[test]
+    fn extracts_aliases_and_references_from_qualified_selects() {
+        let sql = r#"
+            SELECT u.id, o.total
+            FROM "public"."users" u
+            JOIN `shop`.`orders` AS o ON o.user_id = u.id
+            WHERE EXISTS (
+                SELECT 1 FROM audit.events e WHERE e.user_id = u.id
+            )
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let aliases = parser.extract_aliases(tree, sql);
+        assert_eq!(aliases.get("u"), Some(&"public.users".to_string()));
+        assert_eq!(aliases.get("o"), Some(&"shop.orders".to_string()));
+        assert_eq!(aliases.get("e"), Some(&"audit.events".to_string()));
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert!(references.contains(&"public.users".to_string()));
+        assert!(references.contains(&"shop.orders".to_string()));
+        assert!(references.contains(&"audit.events".to_string()));
+    }
+
+    #[test]
+    fn extracts_references_from_dml_and_ddl_statements() {
+        let sql = r#"
+            UPDATE app.users u SET name = 'x' WHERE u.id = 1;
+            INSERT INTO app.orders (user_id) VALUES (1);
+            DELETE FROM app.sessions s WHERE s.user_id = 1;
+            CREATE TABLE IF NOT EXISTS app.invoices (id int);
+            DROP VIEW IF EXISTS app.active_users;
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let aliases = parser.extract_aliases(tree, sql);
+        assert_eq!(aliases.get("u"), Some(&"app.users".to_string()));
+        assert_eq!(aliases.get("s"), Some(&"app.sessions".to_string()));
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert!(references.contains(&"app.users".to_string()));
+        assert!(references.contains(&"app.orders".to_string()));
+        assert!(references.contains(&"app.sessions".to_string()));
+        assert!(references.contains(&"app.invoices".to_string()));
+        assert!(references.contains(&"app.active_users".to_string()));
+    }
+
+    #[test]
+    fn respects_keyword_boundaries_when_extracting_references() {
+        let sql = "SELECT * FROM information_schema.tables";
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert_eq!(references, vec!["information_schema.tables".to_string()]);
+    }
+
+    #[test]
+    fn ignores_keywords_inside_comments_literals_and_quoted_identifiers() {
+        let sql = r#"
+            -- FROM hidden.comment_table c
+            SELECT 'JOIN hidden.literal_table l', "FROM", `JOIN`
+            FROM public.users u
+            /* UPDATE hidden.block_table b */
+            WHERE u.note = 'FROM hidden.note_table n'
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let aliases = parser.extract_aliases(tree, sql);
+        assert_eq!(aliases.get("u"), Some(&"public.users".to_string()));
+        assert!(!aliases.contains_key("c"));
+        assert!(!aliases.contains_key("l"));
+        assert!(!aliases.contains_key("b"));
+        assert!(!aliases.contains_key("n"));
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert_eq!(references, vec!["public.users".to_string()]);
+    }
+
+    #[test]
+    fn ignores_references_inside_dollar_quoted_bodies() {
+        let sql = r#"
+            CREATE FUNCTION app.hidden_lookup()
+            RETURNS integer
+            LANGUAGE SQL
+            AS $body$ SELECT id FROM hidden.internal WHERE active = true; $body$;
+            SELECT * FROM public.users;
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert_eq!(references, vec!["public.users".to_string()]);
+    }
+
+    #[test]
+    fn extracts_on_relation_for_index_trigger_and_policy_ddl() {
+        let sql = r#"
+            CREATE INDEX users_email_idx ON app.users (email);
+            DROP INDEX old_users_idx ON app.users;
+            CREATE TRIGGER audit_users AFTER INSERT ON app.users
+                FOR EACH ROW EXECUTE FUNCTION audit_user_change();
+            CREATE POLICY users_tenant_policy ON app.users USING (tenant_id = current_setting('app.tenant_id')::int);
+            SELECT * FROM app.users u JOIN app.orders o ON o.user_id = u.id;
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert!(references.contains(&"app.users".to_string()));
+        assert!(references.contains(&"app.orders".to_string()));
+        assert!(!references.contains(&"o.user_id".to_string()));
     }
 }

@@ -22,9 +22,11 @@ mod schema_inference_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -41,9 +43,11 @@ mod schema_inference_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -93,6 +97,7 @@ mod schema_inference_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -106,6 +111,7 @@ mod schema_inference_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -148,6 +154,7 @@ mod schema_inference_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -161,6 +168,7 @@ mod schema_inference_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -212,9 +220,11 @@ mod schema_priority_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: Some("Explicit schema".to_string()),
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -231,9 +241,11 @@ mod schema_priority_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: Some("Inferred schema".to_string()),
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -264,6 +276,7 @@ mod schema_priority_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -277,6 +290,7 @@ mod schema_priority_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -305,12 +319,14 @@ mod schema_priority_tests {
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             functions: vec![],
@@ -325,6 +341,7 @@ mod schema_priority_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -364,9 +381,11 @@ mod schema_isolation_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -383,9 +402,11 @@ mod schema_isolation_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -432,6 +453,7 @@ mod schema_isolation_tests {
                         columns: vec![],
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     }],
                     functions: vec![],
                     source_uri: None,
@@ -477,9 +499,11 @@ mod schema_isolation_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: Some("Production users".to_string()),
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -496,9 +520,11 @@ mod schema_isolation_tests {
                     nullable: false,
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 }],
                 comment: Some("Test users".to_string()),
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -535,12 +561,14 @@ mod schema_matching_tests {
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             functions: vec![],
@@ -584,12 +612,14 @@ mod schema_matching_tests {
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             functions: vec![],
@@ -632,12 +662,14 @@ mod schema_matching_tests {
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
                 Table {
                     name: "orders".to_string(),
                     columns: vec![],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             functions: vec![],
@@ -683,6 +715,7 @@ mod schema_matching_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
@@ -735,9 +768,11 @@ mod schema_inference_integration_tests {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     }],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
                 Table {
                     name: "orders".to_string(),
@@ -747,9 +782,11 @@ mod schema_inference_integration_tests {
                         nullable: false,
                         comment: None,
                         source_location: None,
+                        ..Default::default()
                     }],
                     comment: None,
                     source_location: None,
+                    ..Default::default()
                 },
             ],
             functions: vec![],
@@ -764,6 +801,7 @@ mod schema_inference_integration_tests {
                 columns: vec![],
                 comment: None,
                 source_location: None,
+                ..Default::default()
             }],
             functions: vec![],
             source_uri: None,
