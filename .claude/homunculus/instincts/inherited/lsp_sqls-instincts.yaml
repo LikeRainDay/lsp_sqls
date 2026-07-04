@@ -1,0 +1,318 @@
+# Instincts generated from https://github.com/RainLib/lsp_sqls
+# Generated: 2026-07-04T15:42:37.232Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: lsp_sqls-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Commit Length
+
+## Action
+
+Keep commit messages concise (~36 characters)
+
+## Evidence
+
+- Average commit message length: 36 chars
+- Based on 1 commits
+
+---
+id: lsp_sqls-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: lsp_sqls-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: lsp_sqls-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: lsp_sqls-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: lsp_sqls-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/RainLib/lsp_sqls
+---
+
+# Lsp_sqls Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: lsp_sqls-instinct-file-naming
+trigger: "When creating a new source file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct File Naming
+
+## Action
+
+Name the file using snake_case
+
+## Evidence
+
+- Pattern in files: src/dialects, src/parser
+
+---
+id: lsp_sqls-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Naming convention: functions = camelCase
+
+---
+id: lsp_sqls-instinct-class-naming
+trigger: "When defining a new class or struct"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase
+
+## Evidence
+
+- Naming convention: classes = PascalCase
+
+---
+id: lsp_sqls-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Naming convention: constants = SCREAMING_SNAKE_CASE
+
+---
+id: lsp_sqls-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- importStyle: relative
+
+---
+id: lsp_sqls-instinct-export-style
+trigger: "When exporting modules or functions"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- exportStyle: named
+
+---
+id: lsp_sqls-instinct-test-file-pattern
+trigger: "When creating a new test file"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Test File Pattern
+
+## Action
+
+Name the file with the pattern *.test.ts
+
+## Evidence
+
+- test filePattern: *.test.ts
+
+---
+id: lsp_sqls-instinct-test-type
+trigger: "When writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Test Type
+
+## Action
+
+Write unit tests
+
+## Evidence
+
+- testTypes: unit
+
+---
+id: lsp_sqls-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Test Location
+
+## Action
+
+Place test files in the separate tests folder
+
+## Evidence
+
+- testLocation: separate
+- commonFolders: tests
+
+---
+id: lsp_sqls-instinct-commit-format
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: RainLib/lsp_sqls
+---
+
+# Lsp_sqls Instinct Commit Format
+
+## Action
+
+Write a short, freeform message describing the change (no enforced prefix)
+
+## Evidence
+
+- commits: type = freeform, no prefixes
+- Example: improve schema-aware sql completions
+
