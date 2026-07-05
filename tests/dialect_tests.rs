@@ -219,6 +219,27 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
         !alias_items.iter().any(|item| item.label == "order_id"),
         "alias column completion should stay scoped to the aliased table"
     );
+
+    let where_alias_sql = "SELECT * FROM users u JOIN orders o ON u.id = o.user_id WHERE o.";
+    let where_alias_items = dialect
+        .completion(
+            where_alias_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_alias_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(where_alias_items
+        .iter()
+        .any(|item| item.label == "order_id"));
+    assert!(where_alias_items.iter().any(|item| item.label == "user_id"));
+    assert!(
+        !where_alias_items.iter().any(|item| item.label == "name"),
+        "WHERE alias member completion should stay scoped to the aliased table"
+    );
 }
 
 #[tokio::test]
@@ -424,6 +445,25 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     assert_eq!(
         qualified_table_item.insert_text.as_deref(),
         Some("shop.users")
+    );
+
+    let on_alias_sql = "SELECT * FROM users u JOIN orders o ON u.";
+    let on_alias_items = dialect
+        .completion(
+            on_alias_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: on_alias_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(on_alias_items.iter().any(|item| item.label == "id"));
+    assert!(on_alias_items.iter().any(|item| item.label == "name"));
+    assert!(
+        !on_alias_items.iter().any(|item| item.label == "order_id"),
+        "JOIN ON alias member completion should stay scoped to the aliased table"
     );
 }
 

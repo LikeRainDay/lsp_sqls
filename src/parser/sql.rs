@@ -906,6 +906,23 @@ impl SqlParser {
         None
     }
 
+    /// Return the table/schema qualifier immediately before the cursor.
+    ///
+    /// This is more reliable than AST lookup while a user is typing an incomplete
+    /// member access such as `alias.` or `alias.col`.
+    pub fn column_qualifier_before_position(source: &str, position: Position) -> Option<String> {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset.min(source.len()))?;
+        let token = Self::identifier_path_token_before_cursor(text_before)?;
+
+        if token.ends_with('.') {
+            let qualifier = Self::normalize_identifier(token.trim_end_matches('.'));
+            return (!qualifier.is_empty()).then_some(qualifier);
+        }
+
+        Self::identifier_qualifier(token).map(|qualifier| Self::normalize_identifier(&qualifier))
+    }
+
     /// Normalize an identifier path for cross-dialect matching.
     pub fn normalize_identifier(identifier: &str) -> String {
         Self::identifier_parts(identifier).join(".")
@@ -989,6 +1006,45 @@ impl SqlParser {
 
     fn identifier_eq(left: &str, right: &str) -> bool {
         left == right || left.eq_ignore_ascii_case(right)
+    }
+
+    fn identifier_path_token_before_cursor(text_before: &str) -> Option<&str> {
+        let mut token_start = 0;
+        let mut quote_end: Option<char> = None;
+        let mut chars = text_before.char_indices().peekable();
+
+        while let Some((index, ch)) = chars.next() {
+            if let Some(end_quote) = quote_end {
+                if ch == end_quote {
+                    if chars.peek().is_some_and(|(_, next)| *next == end_quote) {
+                        chars.next();
+                        continue;
+                    }
+                    quote_end = None;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' | '\'' | '`' => quote_end = Some(ch),
+                '[' => quote_end = Some(']'),
+                _ if Self::is_identifier_token_boundary(ch) => {
+                    token_start = index + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        let token = text_before[token_start..].trim();
+        (!token.is_empty()).then_some(token)
+    }
+
+    fn is_identifier_token_boundary(ch: char) -> bool {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | '(' | ')' | ';' | '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%'
+            )
     }
 }
 
@@ -1707,6 +1763,45 @@ mod tests {
             Some("catalog.public")
         );
         assert_eq!(SqlParser::identifier_qualifier("calculate_score"), None);
+    }
+
+    #[test]
+    fn extracts_column_qualifier_before_cursor() {
+        let alias_dot = "SELECT * FROM users u WHERE u.";
+        assert_eq!(
+            SqlParser::column_qualifier_before_position(alias_dot, position_at_end(alias_dot))
+                .as_deref(),
+            Some("u")
+        );
+
+        let alias_prefix = "SELECT * FROM users u WHERE u.na";
+        assert_eq!(
+            SqlParser::column_qualifier_before_position(
+                alias_prefix,
+                position_at_end(alias_prefix)
+            )
+            .as_deref(),
+            Some("u")
+        );
+
+        let qualified_dot = "SELECT * FROM public.users.";
+        assert_eq!(
+            SqlParser::column_qualifier_before_position(
+                qualified_dot,
+                position_at_end(qualified_dot)
+            )
+            .as_deref(),
+            Some("public.users")
+        );
+
+        let no_qualifier = "SELECT name FROM users";
+        assert_eq!(
+            SqlParser::column_qualifier_before_position(
+                no_qualifier,
+                position_at_end(no_qualifier)
+            ),
+            None
+        );
     }
 
     #[test]

@@ -301,6 +301,18 @@ pub(crate) fn find_table_by_reference<'a>(
         .find(|table| table_matches(schema, table, reference))
 }
 
+pub(crate) fn table_column_reference_at_position(
+    parser: &SqlParser,
+    tree: &tree_sitter::Tree,
+    sql: &str,
+    position: Position,
+) -> Option<String> {
+    SqlParser::column_qualifier_before_position(sql, position).or_else(|| {
+        let node = parser.get_node_at_position(tree, position)?;
+        parser.get_table_name_for_column(node, sql)
+    })
+}
+
 pub(crate) fn referenced_table_names(
     parser: &SqlParser,
     tree: &tree_sitter::Tree,

@@ -434,21 +434,20 @@ impl Dialect for MysqlDialect {
             crate::parser::CompletionContext::TableColumn => {
                 // 表名.列名：只补全特定表的列名
                 if let Some(tree) = &parse_result.tree {
-                    if let Some(node) = parser.get_node_at_position(tree, position) {
-                        if let Some(table_name) = parser.get_table_name_for_column(node, sql) {
-                            if let Some(schema) = schema {
-                                let aliases = parser.extract_aliases(tree, sql);
+                    if let Some(table_name) =
+                        common::table_column_reference_at_position(&parser, tree, sql, position)
+                    {
+                        if let Some(schema) = schema {
+                            let aliases = parser.extract_aliases(tree, sql);
 
-                                // Resolve alias to real table name
-                                let real_table_name =
-                                    aliases.get(&table_name).unwrap_or(&table_name);
+                            // Resolve alias to real table name
+                            let real_table_name = aliases.get(&table_name).unwrap_or(&table_name);
 
-                                if let Some(table) =
-                                    Self::find_table_by_reference(schema, real_table_name)
-                                {
-                                    for column in &table.columns {
-                                        items.push(self.create_column_item(column, None));
-                                    }
+                            if let Some(table) =
+                                Self::find_table_by_reference(schema, real_table_name)
+                            {
+                                for column in &table.columns {
+                                    items.push(self.create_column_item(column, None));
                                 }
                             }
                         }

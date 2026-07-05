@@ -1,5 +1,5 @@
 use crate::dialect::Dialect;
-use crate::dialects::{common, DialectRegistry};
+use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
 use crate::schema::{Schema, SchemaId, SchemaManager};
 use dashmap::DashMap;
@@ -746,12 +746,8 @@ impl LanguageServer for SqlLspServer {
 }
 
 fn schema_qualifier_at_position(text: &str, position: Position) -> Option<String> {
-    let line = text.lines().nth(position.line as usize).unwrap_or("");
-    let end = position.character.min(line.len() as u32) as usize;
-    let text_before = &line[..end];
-    let token = common::cursor_identifier_token(text_before);
-
-    SqlParser::identifier_qualifier(token)
+    let byte_position = SqlParser::lsp_position_to_byte_position(text, position);
+    SqlParser::column_qualifier_before_position(text, byte_position)
 }
 
 fn find_schema_by_qualifier(schema_manager: &SchemaManager, qualifier: &str) -> Option<Schema> {
@@ -807,10 +803,14 @@ fn schema_for_table_column_at_position(
     position: Position,
 ) -> Option<Schema> {
     let mut parser = SqlParser::new();
+    let byte_position = SqlParser::lsp_position_to_byte_position(text, position);
     let parse_result = parser.parse(text);
     let tree = parse_result.tree.as_ref()?;
-    let node = parser.get_node_at_position(tree, position)?;
-    let table_name = parser.get_table_name_for_column(node, text)?;
+    let table_name =
+        SqlParser::column_qualifier_before_position(text, byte_position).or_else(|| {
+            let node = parser.get_node_at_position(tree, byte_position)?;
+            parser.get_table_name_for_column(node, text)
+        })?;
     let aliases = parser.extract_aliases(tree, text);
     let table_reference = aliases
         .get(&table_name)
@@ -1308,7 +1308,8 @@ mod tests {
         let manager = SchemaManager::new();
         manager.register(test_schema("app", &["users"]));
         let audit_id = manager.register(test_schema("audit", &["users"]));
-        let sql = "SELECT u. FROM audit.users u";
+        let sql = "SELECT '😀', u. FROM audit.users u";
+        let before_cursor = "SELECT '😀', u.";
 
         assert_eq!(
             schema_for_table_column_at_position(
@@ -1316,7 +1317,28 @@ mod tests {
                 sql,
                 tower_lsp::lsp_types::Position {
                     line: 0,
-                    character: 9,
+                    character: before_cursor.encode_utf16().count() as u32,
+                },
+            )
+            .map(|schema| schema.id),
+            Some(audit_id)
+        );
+    }
+
+    #[test]
+    fn uses_trailing_alias_member_to_select_schema_at_column_completion() {
+        let manager = SchemaManager::new();
+        manager.register(test_schema("app", &["users"]));
+        let audit_id = manager.register(test_schema("audit", &["events"]));
+        let sql = "SELECT * FROM audit.events e WHERE e.";
+
+        assert_eq!(
+            schema_for_table_column_at_position(
+                &manager,
+                sql,
+                tower_lsp::lsp_types::Position {
+                    line: 0,
+                    character: sql.encode_utf16().count() as u32,
                 },
             )
             .map(|schema| schema.id),
