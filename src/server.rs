@@ -228,6 +228,67 @@ fn utf16_position_to_line_byte_offset(line: &str, character: u32) -> usize {
     line.len()
 }
 
+const COMPLETED_SQL_CONTEXT_KEYWORDS: &[&str] = &[
+    "select", "from", "join", "where", "on", "by", "having", "limit", "offset", "values", "set",
+    "into",
+];
+
+fn completed_sql_context_keyword_at_position(text: &str, position: Position) -> Option<String> {
+    let offset = position_to_byte_offset(text, position);
+    let text_before = text.get(..offset)?;
+
+    if text_before
+        .chars()
+        .last()
+        .is_none_or(|ch| ch.is_whitespace())
+    {
+        return None;
+    }
+
+    let token_start = text_before
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                None
+            } else {
+                Some(index + ch.len_utf8())
+            }
+        })
+        .unwrap_or(0);
+    let token = text_before[token_start..].to_ascii_lowercase();
+
+    COMPLETED_SQL_CONTEXT_KEYWORDS
+        .contains(&token.as_str())
+        .then_some(token)
+}
+
+fn apply_completed_sql_context_completion_edits(
+    text: &str,
+    position: Position,
+    items: &mut [CompletionItem],
+) {
+    let Some(keyword) = completed_sql_context_keyword_at_position(text, position) else {
+        return;
+    };
+    let range = Range {
+        start: position,
+        end: position,
+    };
+
+    for item in items {
+        let insert_text = item
+            .insert_text
+            .clone()
+            .unwrap_or_else(|| item.label.clone());
+        item.filter_text = Some(keyword.clone());
+        item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: format!(" {insert_text}"),
+        }));
+    }
+}
+
 fn calculate_schema_match_score(tables: &[String], schema: &Schema) -> i32 {
     use crate::parser::SqlParser;
 
@@ -579,9 +640,10 @@ impl LanguageServer for SqlLspServer {
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_position(&uri, &text, position);
-            let items = dialect
+            let mut items = dialect
                 .completion_with_context(&text, position, schema.as_ref(), params.context.as_ref())
                 .await;
+            apply_completed_sql_context_completion_edits(&text, position, &mut items);
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
@@ -826,12 +888,15 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        calculate_schema_match_score, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        apply_completed_sql_context_completion_edits, calculate_schema_match_score,
+        completed_sql_context_keyword_at_position, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, position_to_byte_offset, schema_for_table_column_at_position,
+        schema_id_for_file, schema_qualifier_at_position,
     };
     use crate::schema::{Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
+    use tower_lsp::lsp_types::{CompletionItem, CompletionTextEdit, Position};
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
         Schema {
@@ -1111,6 +1176,79 @@ mod tests {
             ),
             text.len()
         );
+    }
+
+    #[test]
+    fn detects_completed_sql_context_keyword_without_consuming_trailing_space() {
+        let from_sql = "SELECT * from";
+        assert_eq!(
+            completed_sql_context_keyword_at_position(
+                from_sql,
+                Position {
+                    line: 0,
+                    character: from_sql.len() as u32,
+                },
+            )
+            .as_deref(),
+            Some("from")
+        );
+
+        let where_space_sql = "SELECT * FROM users where ";
+        assert_eq!(
+            completed_sql_context_keyword_at_position(
+                where_space_sql,
+                Position {
+                    line: 0,
+                    character: where_space_sql.len() as u32,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn completion_after_completed_keyword_uses_zero_width_text_edit() {
+        let sql = "SELECT * from";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![CompletionItem {
+            label: "public.users".to_string(),
+            insert_text: Some("public.users".to_string()),
+            ..Default::default()
+        }];
+
+        apply_completed_sql_context_completion_edits(sql, position, &mut items);
+
+        assert_eq!(items[0].filter_text.as_deref(), Some("from"));
+        let Some(CompletionTextEdit::Edit(text_edit)) = &items[0].text_edit else {
+            panic!("completion should use a plain text edit");
+        };
+        assert_eq!(text_edit.range.start, position);
+        assert_eq!(text_edit.range.end, position);
+        assert_eq!(text_edit.new_text, " public.users");
+    }
+
+    #[test]
+    fn completion_after_keyword_with_existing_space_keeps_original_insert_text() {
+        let sql = "SELECT * FROM users where ";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![CompletionItem {
+            label: "id".to_string(),
+            filter_text: Some("id".to_string()),
+            insert_text: Some("id".to_string()),
+            ..Default::default()
+        }];
+
+        apply_completed_sql_context_completion_edits(sql, position, &mut items);
+
+        assert_eq!(items[0].filter_text.as_deref(), Some("id"));
+        assert!(items[0].text_edit.is_none());
+        assert_eq!(items[0].insert_text.as_deref(), Some("id"));
     }
 
     #[test]
