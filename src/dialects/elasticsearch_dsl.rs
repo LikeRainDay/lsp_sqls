@@ -97,6 +97,21 @@ impl ElasticsearchDslDialect {
         }
     }
 
+    fn add_schema_field_items(&self, items: &mut Vec<CompletionItem>, schema: Option<&Schema>) {
+        let Some(schema) = schema else {
+            return;
+        };
+
+        for table in &schema.tables {
+            for column in &table.columns {
+                items.push(self.create_field_item(
+                    &column.name,
+                    &format!("Elasticsearch field in {}", table.name),
+                ));
+            }
+        }
+    }
+
     /// 递归查找字段引用
     #[allow(clippy::only_used_in_recursion)]
     fn find_field_references_recursive(
@@ -227,6 +242,7 @@ impl Dialect for ElasticsearchDslDialect {
                 for query_type in query_types {
                     items.push(self.create_query_type_item(query_type));
                 }
+                self.add_schema_field_items(&mut items, schema);
             }
 
             crate::parser::DslCompletionContext::AggsObject => {
@@ -274,6 +290,7 @@ impl Dialect for ElasticsearchDslDialect {
                 for agg_type in agg_types {
                     items.push(self.create_agg_type_item(agg_type));
                 }
+                self.add_schema_field_items(&mut items, schema);
             }
 
             crate::parser::DslCompletionContext::BoolQuery => {
@@ -283,17 +300,12 @@ impl Dialect for ElasticsearchDslDialect {
                 for field in bool_fields {
                     items.push(self.create_field_item(field, "Bool query field"));
                 }
+                self.add_schema_field_items(&mut items, schema);
             }
 
             crate::parser::DslCompletionContext::SortObject => {
                 // sort 字段（可以是字段名或特殊值）
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_field_item(&column.name, "Sort field"));
-                        }
-                    }
-                }
+                self.add_schema_field_items(&mut items, schema);
 
                 // 排序方向
                 items.push(self.create_field_item("_score", "Sort by score"));
@@ -352,6 +364,7 @@ impl Dialect for ElasticsearchDslDialect {
                 for field in top_level_fields {
                     items.push(self.create_field_item(field, "Elasticsearch DSL field"));
                 }
+                self.add_schema_field_items(&mut items, schema);
             }
         }
 
@@ -387,28 +400,37 @@ impl Dialect for ElasticsearchDslDialect {
         items
     }
 
-    async fn hover(
-        &self,
-        sql: &str,
-        _position: Position,
-        schema: Option<&Schema>,
-    ) -> Option<Hover> {
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if sql.contains(&table.name) {
-                    return Some(Hover {
-                        contents: tower_lsp::lsp_types::HoverContents::Scalar(
-                            MarkedString::String(format!(
-                                "Elasticsearch DSL Index: {}\n{}",
-                                table.name,
-                                table.comment.as_deref().unwrap_or("No description")
-                            )),
+    async fn hover(&self, dsl: &str, position: Position, schema: Option<&Schema>) -> Option<Hover> {
+        let token = token_at_position(dsl, position);
+        let schema = schema?;
+
+        for table in &schema.tables {
+            if table.name == token {
+                return Some(Hover {
+                    contents: tower_lsp::lsp_types::HoverContents::Scalar(MarkedString::String(
+                        format!(
+                            "Elasticsearch DSL Index: {}\n{}",
+                            table.name,
+                            table.comment.as_deref().unwrap_or("No description")
                         ),
-                        range: None,
-                    });
-                }
+                    )),
+                    range: None,
+                });
+            }
+
+            if let Some(column) = table.columns.iter().find(|column| column.name == token) {
+                return Some(Hover {
+                    contents: tower_lsp::lsp_types::HoverContents::Scalar(MarkedString::String(
+                        format!(
+                            "Elasticsearch field: {}.{}\nType: {}",
+                            table.name, column.name, column.data_type
+                        ),
+                    )),
+                    range: None,
+                });
             }
         }
+
         None
     }
 
@@ -424,10 +446,16 @@ impl Dialect for ElasticsearchDslDialect {
         if let Some(ref tree) = tree {
             if let Some(node) = parser.get_node_at_position(tree, position) {
                 // 提取字段名
-                if let Some(field_name) = parser.extract_field_name(node, dsl) {
-                    // 如果是索引名，在 schema 中查找
+                let field_name = parser
+                    .extract_field_name(node, dsl)
+                    .unwrap_or_else(|| token_at_position(dsl, position));
+                if !field_name.is_empty() {
+                    // 如果是索引名或字段名，在 schema 中查找
                     if let Some(schema) = schema {
-                        if schema.tables.iter().any(|t| t.name == field_name) {
+                        if schema.tables.iter().any(|table| {
+                            table.name == field_name
+                                || table.columns.iter().any(|column| column.name == field_name)
+                        }) {
                             return Some(Location {
                                 uri: tower_lsp::lsp_types::Url::parse("file:///schema.json")
                                     .unwrap_or_else(|_| {
@@ -491,4 +519,27 @@ impl Dialect for ElasticsearchDslDialect {
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
         self.parse(sql, schema).await
     }
+}
+
+fn token_at_position(text: &str, position: Position) -> String {
+    let line = text.lines().nth(position.line as usize).unwrap_or("");
+    let byte_index = position.character.min(line.len() as u32) as usize;
+    let bytes = line.as_bytes();
+    let mut start = byte_index.min(bytes.len());
+    while start > 0 && is_token_char(bytes[start - 1] as char) {
+        start -= 1;
+    }
+    let mut end = byte_index.min(bytes.len());
+    while end < bytes.len() && is_token_char(bytes[end] as char) {
+        end += 1;
+    }
+
+    line[start..end]
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
+fn is_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')
 }

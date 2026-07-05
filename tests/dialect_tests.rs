@@ -405,6 +405,92 @@ async fn test_elasticsearch_dsl_dialect() {
 }
 
 #[tokio::test]
+async fn test_elasticsearch_dsl_schema_aware_fields() {
+    let dialect = ElasticsearchDslDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "default".to_string(),
+        tables: vec![Table {
+            name: "users".to_string(),
+            columns: vec![
+                Column {
+                    name: "email".to_string(),
+                    data_type: "keyword".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                },
+                Column {
+                    name: "profile.age".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                },
+            ],
+            comment: Some("User search index".to_string()),
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let dsl = r#"{"query":{"term":{"#;
+    let items = dialect
+        .completion(
+            dsl,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: dsl.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(items.iter().any(|item| item.label == "users"));
+    assert!(items.iter().any(|item| item.label == "email"));
+    assert!(items.iter().any(|item| item.label == "profile.age"));
+
+    let query = r#"{"index":"users","query":{"term":{"email":"ada@example.com"}}}"#;
+    let index_position = query.find("users").unwrap() + 1;
+    let field_position = query.find("email").unwrap() + 1;
+
+    assert!(dialect
+        .hover(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: index_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .hover(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .goto_definition(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+}
+
+#[tokio::test]
 async fn test_clickhouse_dialect() {
     let dialect = ClickHouseDialect::new();
     assert_eq!(dialect.name(), "clickhouse");
@@ -457,6 +543,53 @@ async fn test_redis_dialect() {
         .await;
     assert!(!items.is_empty());
     assert!(items.iter().any(|item| item.label == "FT.SEARCH"));
+}
+
+#[tokio::test]
+async fn test_redis_schema_aware_key_completion_and_hover() {
+    let dialect = RedisDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "0".to_string(),
+        tables: vec![Table {
+            name: "user:1".to_string(),
+            object_type: Some("hash".to_string()),
+            columns: vec![],
+            comment: Some("2 value item(s)".to_string()),
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let items = dialect
+        .completion(
+            "HGETALL ",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 8,
+            },
+            Some(&schema),
+        )
+        .await;
+    let key = items
+        .iter()
+        .find(|item| item.label == "user:1")
+        .expect("Redis completion should include schema keys");
+    assert_eq!(key.insert_text.as_deref(), Some("user:1"));
+
+    assert!(dialect
+        .hover(
+            "HGETALL user:1",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 10,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
 }
 
 #[tokio::test]
@@ -513,6 +646,43 @@ async fn test_mongodb_dialect() {
     assert!(items.iter().any(|item| item.label == "find"));
     assert!(items.iter().any(|item| item.label == "users"));
     assert!(items.iter().any(|item| item.label == "email"));
+
+    let query = r#"{"collection":"users","find":{"email":"ada@example.com"}}"#;
+    let collection_position = query.find("users").unwrap() + 1;
+    let field_position = query.find("email").unwrap() + 1;
+    assert!(dialect
+        .hover(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: collection_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .hover(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .goto_definition(
+            query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
 
     let formatted = dialect
         .format(r#"{"collection":"users","find":{"active":true}}"#)
