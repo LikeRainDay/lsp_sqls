@@ -523,6 +523,45 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
     assert!(items.iter().any(|item| item.label == "email"));
     assert!(items.iter().any(|item| item.label == "profile.age"));
 
+    let field_prefix_dsl = r#"{"query":{"term":{"em"#;
+    let field_prefix_items = dialect
+        .completion(
+            field_prefix_dsl,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_prefix_dsl.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(field_prefix_items.iter().any(|item| item.label == "email"));
+    assert!(
+        !field_prefix_items
+            .iter()
+            .any(|item| item.label == "profile.age"),
+        "Elasticsearch field completion should respect the current prefix"
+    );
+    assert_eq!(
+        field_prefix_items
+            .iter()
+            .find(|item| item.label == "email")
+            .and_then(|item| item.filter_text.as_deref()),
+        Some("email")
+    );
+
+    let index_prefix_dsl = r#"{"index":"us"#;
+    let index_prefix_items = dialect
+        .completion(
+            index_prefix_dsl,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: index_prefix_dsl.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(index_prefix_items.iter().any(|item| item.label == "users"));
+
     let query = r#"{"index":"users","query":{"term":{"email":"ada@example.com"}}}"#;
     let index_position = query.find("users").unwrap() + 1;
     let field_position = query.find("email").unwrap() + 1;
@@ -698,6 +737,22 @@ async fn test_redis_dialect() {
         .await;
     assert!(!items.is_empty());
     assert!(items.iter().any(|item| item.label == "FT.SEARCH"));
+
+    let filtered_items = dialect
+        .completion(
+            "FT.S",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 4,
+            },
+            None,
+        )
+        .await;
+    assert!(filtered_items.iter().any(|item| item.label == "FT.SEARCH"));
+    assert!(
+        !filtered_items.iter().any(|item| item.label == "GET"),
+        "Redis command completion should respect the current prefix"
+    );
 }
 
 #[tokio::test]
@@ -733,6 +788,23 @@ async fn test_redis_schema_aware_key_completion_and_hover() {
         .find(|item| item.label == "user:1")
         .expect("Redis completion should include schema keys");
     assert_eq!(key.insert_text.as_deref(), Some("user:1"));
+    assert_eq!(key.filter_text.as_deref(), Some("user:1"));
+
+    let filtered_items = dialect
+        .completion(
+            "HGETALL user",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 12,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(filtered_items.iter().any(|item| item.label == "user:1"));
+    assert!(
+        !filtered_items.iter().any(|item| item.label == "GET"),
+        "Redis key completion should filter command noise after a key prefix"
+    );
 
     assert!(dialect
         .hover(
@@ -820,6 +892,51 @@ async fn test_mongodb_dialect() {
     assert!(items.iter().any(|item| item.label == "dropDatabase"));
     assert!(items.iter().any(|item| item.label == "users"));
     assert!(items.iter().any(|item| item.label == "email"));
+
+    let collection_prefix_json = r#"{"collection":"us"#;
+    let collection_prefix_items = dialect
+        .completion(
+            collection_prefix_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: collection_prefix_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(collection_prefix_items
+        .iter()
+        .any(|item| item.label == "users"));
+    assert!(
+        !collection_prefix_items
+            .iter()
+            .any(|item| item.label == "email"),
+        "MongoDB collection completion should respect the current prefix"
+    );
+
+    let field_prefix_json = r#"{"find":{"em"#;
+    let field_prefix_items = dialect
+        .completion(
+            field_prefix_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: field_prefix_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(field_prefix_items.iter().any(|item| item.label == "email"));
+    assert!(
+        !field_prefix_items.iter().any(|item| item.label == "users"),
+        "MongoDB field completion should filter collection noise after a field prefix"
+    );
+    assert_eq!(
+        field_prefix_items
+            .iter()
+            .find(|item| item.label == "email")
+            .and_then(|item| item.filter_text.as_deref()),
+        Some("email")
+    );
 
     let query = r#"{"collection":"users","find":{"email":"ada@example.com"}}"#;
     let collection_position = query.find("users").unwrap() + 1;

@@ -64,11 +64,12 @@ impl Dialect for RedisDialect {
 
     async fn completion(
         &self,
-        _sql: &str,
-        _position: Position,
+        sql: &str,
+        position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
+        let prefix = crate::position::cursor_token_prefix(sql, position, is_token_char);
 
         // Redis 基础命令
         let basic_commands = vec![
@@ -156,6 +157,10 @@ impl Dialect for RedisDialect {
             .collect();
 
         for cmd in commands {
+            if !prefix.is_empty() && !cmd.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+
             let (kind, detail_prefix) = if cmd.starts_with("FT.") {
                 (CompletionItemKind::FUNCTION, "RediSearch command")
             } else if cmd.starts_with("GRAPH.") {
@@ -174,7 +179,7 @@ impl Dialect for RedisDialect {
                 deprecated: None,
                 preselect: None,
                 sort_text: Some(format!("0{}", cmd)),
-                filter_text: None,
+                filter_text: Some(cmd.to_string()),
                 insert_text: Some(cmd.to_string()),
                 insert_text_format: None,
                 text_edit: None,
@@ -208,6 +213,10 @@ impl Dialect for RedisDialect {
         ];
 
         for keyword in keywords {
+            if !prefix.is_empty() && !keyword.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+
             let detail = match keyword {
                 "@" => "Field prefix for RediSearch queries (e.g., @field:value)",
                 "AND" => "Logical AND operator",
@@ -231,7 +240,7 @@ impl Dialect for RedisDialect {
                 deprecated: None,
                 preselect: None,
                 sort_text: Some(format!("1{}", keyword)),
-                filter_text: None,
+                filter_text: Some(keyword.to_string()),
                 insert_text: Some(keyword.to_string()),
                 insert_text_format: None,
                 insert_text_mode: None,
@@ -247,6 +256,10 @@ impl Dialect for RedisDialect {
 
         if let Some(schema) = schema {
             for table in &schema.tables {
+                if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(&prefix) {
+                    continue;
+                }
+
                 items.push(CompletionItem {
                     label: table.name.clone(),
                     kind: Some(CompletionItemKind::CLASS),
@@ -258,7 +271,7 @@ impl Dialect for RedisDialect {
                     deprecated: None,
                     preselect: None,
                     sort_text: Some(format!("2{}", table.name)),
-                    filter_text: None,
+                    filter_text: Some(table.name.clone()),
                     insert_text: Some(table.name.clone()),
                     insert_text_format: None,
                     insert_text_mode: None,
@@ -326,4 +339,8 @@ impl Dialect for RedisDialect {
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
         self.parse(sql, schema).await
     }
+}
+
+fn is_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '@')
 }

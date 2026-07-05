@@ -36,7 +36,7 @@ impl ElasticsearchDslDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("1{}", field)),
-            filter_text: None,
+            filter_text: Some(field.to_string()),
             insert_text: Some(format!("\"{}\"", field)),
             insert_text_format: None,
             insert_text_mode: None,
@@ -60,7 +60,7 @@ impl ElasticsearchDslDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("0{}", query_type)),
-            filter_text: None,
+            filter_text: Some(query_type.to_string()),
             insert_text: Some(format!("\"{}\"", query_type)),
             insert_text_format: None,
             insert_text_mode: None,
@@ -84,7 +84,7 @@ impl ElasticsearchDslDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", agg_type)),
-            filter_text: None,
+            filter_text: Some(agg_type.to_string()),
             insert_text: Some(format!("\"{}\"", agg_type)),
             insert_text_format: None,
             insert_text_mode: None,
@@ -98,13 +98,22 @@ impl ElasticsearchDslDialect {
         }
     }
 
-    fn add_schema_field_items(&self, items: &mut Vec<CompletionItem>, schema: Option<&Schema>) {
+    fn add_schema_field_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+    ) {
         let Some(schema) = schema else {
             return;
         };
 
         for table in &schema.tables {
             for column in &table.columns {
+                if !prefix.is_empty() && !column.name.to_ascii_lowercase().starts_with(prefix) {
+                    continue;
+                }
+
                 items.push(self.create_field_item(
                     &column.name,
                     &format!("Elasticsearch field in {}", table.name),
@@ -177,13 +186,14 @@ impl Dialect for ElasticsearchDslDialect {
         position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
-        let position = crate::position::lsp_position_to_byte_position(dsl, position);
+        let prefix = crate::position::cursor_token_prefix(dsl, position, is_token_char);
+        let byte_position = crate::position::lsp_position_to_byte_position(dsl, position);
         let mut parser = self.dsl_parser.lock().unwrap();
         let (tree, _) = parser.parse_with_tree(dsl);
 
         // 分析补全上下文
         let context = if let Some(ref tree) = tree {
-            if let Some(node) = parser.get_node_at_position(tree, position) {
+            if let Some(node) = parser.get_node_at_position(tree, byte_position) {
                 parser.analyze_completion_context(node, dsl)
             } else {
                 crate::parser::DslCompletionContext::Default
@@ -220,6 +230,10 @@ impl Dialect for ElasticsearchDslDialect {
                 ];
 
                 for field in top_level_fields {
+                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_field_item(field, "Elasticsearch DSL field"));
                 }
             }
@@ -256,9 +270,13 @@ impl Dialect for ElasticsearchDslDialect {
                 ];
 
                 for query_type in query_types {
+                    if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_query_type_item(query_type));
                 }
-                self.add_schema_field_items(&mut items, schema);
+                self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
             crate::parser::DslCompletionContext::AggsObject => {
@@ -304,9 +322,13 @@ impl Dialect for ElasticsearchDslDialect {
                 ];
 
                 for agg_type in agg_types {
+                    if !prefix.is_empty() && !agg_type.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_agg_type_item(agg_type));
                 }
-                self.add_schema_field_items(&mut items, schema);
+                self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
             crate::parser::DslCompletionContext::BoolQuery => {
@@ -314,18 +336,26 @@ impl Dialect for ElasticsearchDslDialect {
                 let bool_fields = vec!["must", "must_not", "should", "filter"];
 
                 for field in bool_fields {
+                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_field_item(field, "Bool query field"));
                 }
-                self.add_schema_field_items(&mut items, schema);
+                self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
             crate::parser::DslCompletionContext::SortObject => {
                 // sort 字段（可以是字段名或特殊值）
-                self.add_schema_field_items(&mut items, schema);
+                self.add_schema_field_items(&mut items, schema, &prefix);
 
                 // 排序方向
-                items.push(self.create_field_item("_score", "Sort by score"));
-                items.push(self.create_field_item("_doc", "Sort by document order"));
+                if prefix.is_empty() || "_score".starts_with(&prefix) {
+                    items.push(self.create_field_item("_score", "Sort by score"));
+                }
+                if prefix.is_empty() || "_doc".starts_with(&prefix) {
+                    items.push(self.create_field_item("_doc", "Sort by document order"));
+                }
             }
 
             crate::parser::DslCompletionContext::Default => {
@@ -360,6 +390,10 @@ impl Dialect for ElasticsearchDslDialect {
                 ];
 
                 for query_type in query_types {
+                    if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_query_type_item(query_type));
                 }
 
@@ -378,15 +412,23 @@ impl Dialect for ElasticsearchDslDialect {
                 ];
 
                 for field in top_level_fields {
+                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
                     items.push(self.create_field_item(field, "Elasticsearch DSL field"));
                 }
-                self.add_schema_field_items(&mut items, schema);
+                self.add_schema_field_items(&mut items, schema, &prefix);
             }
         }
 
         // 如果提供了 schema，添加索引名补全
         if let Some(schema) = schema {
             for table in &schema.tables {
+                if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(&prefix) {
+                    continue;
+                }
+
                 items.push(CompletionItem {
                     label: table.name.clone(),
                     kind: Some(CompletionItemKind::CLASS),
@@ -398,7 +440,7 @@ impl Dialect for ElasticsearchDslDialect {
                     deprecated: None,
                     preselect: None,
                     sort_text: Some(format!("3{}", table.name)),
-                    filter_text: None,
+                    filter_text: Some(table.name.clone()),
                     insert_text: Some(format!("\"{}\"", table.name)),
                     insert_text_format: None,
                     insert_text_mode: None,

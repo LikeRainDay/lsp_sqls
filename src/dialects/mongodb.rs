@@ -34,7 +34,7 @@ impl MongoDbDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("{}{}", sort_prefix, label)),
-            filter_text: None,
+            filter_text: Some(label.to_string()),
             insert_text: Some(format!("\"{}\"", label)),
             insert_text_format: None,
             text_edit: None,
@@ -60,7 +60,7 @@ impl MongoDbDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("2{}", table.name)),
-            filter_text: None,
+            filter_text: Some(table.name.clone()),
             insert_text: Some(format!("\"{}\"", table.name)),
             insert_text_format: None,
             text_edit: None,
@@ -89,7 +89,7 @@ impl MongoDbDialect {
             deprecated: None,
             preselect: None,
             sort_text: Some(format!("3{}.{}", collection.name, column.name)),
-            filter_text: None,
+            filter_text: Some(column.name.clone()),
             insert_text: Some(format!("\"{}\"", column.name)),
             insert_text_format: None,
             text_edit: None,
@@ -125,13 +125,18 @@ impl Dialect for MongoDbDialect {
 
     async fn completion(
         &self,
-        _json: &str,
-        _position: Position,
+        json: &str,
+        position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
+        let prefix = crate::position::cursor_token_prefix(json, position, is_token_char);
 
         for field in MONGODB_TOP_LEVEL_FIELDS {
+            if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+
             items.push(Self::completion_item(
                 field,
                 CompletionItemKind::FIELD,
@@ -141,6 +146,10 @@ impl Dialect for MongoDbDialect {
         }
 
         for command in MONGODB_COMMANDS {
+            if !prefix.is_empty() && !command.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+
             items.push(Self::completion_item(
                 command,
                 CompletionItemKind::FUNCTION,
@@ -151,9 +160,13 @@ impl Dialect for MongoDbDialect {
 
         if let Some(schema) = schema {
             for table in &schema.tables {
-                items.push(Self::collection_item(table));
+                if prefix.is_empty() || table.name.to_ascii_lowercase().starts_with(&prefix) {
+                    items.push(Self::collection_item(table));
+                }
                 for column in &table.columns {
-                    items.push(Self::field_item(table, column));
+                    if prefix.is_empty() || column.name.to_ascii_lowercase().starts_with(&prefix) {
+                        items.push(Self::field_item(table, column));
+                    }
                 }
             }
         }

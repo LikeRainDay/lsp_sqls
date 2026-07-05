@@ -65,3 +65,24 @@ pub fn diagnostic_reaches_position(diagnostic: &Diagnostic, position: Position) 
         || (diagnostic.range.start.line == position.line
             && diagnostic.range.start.character >= position.character.saturating_sub(1))
 }
+
+pub fn cursor_token_prefix(
+    source: &str,
+    position: Position,
+    is_token_char: impl Fn(char) -> bool,
+) -> String {
+    let position = lsp_position_to_byte_position(source, position);
+    let line = source.split('\n').nth(position.line as usize).unwrap_or("");
+    let byte_index = position.character.min(line.len() as u32) as usize;
+    let bytes = line.as_bytes();
+    let mut start = byte_index.min(bytes.len());
+
+    while start > 0 && is_token_char(bytes[start - 1] as char) {
+        start -= 1;
+    }
+
+    line[start..byte_index.min(bytes.len())]
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase()
+}
