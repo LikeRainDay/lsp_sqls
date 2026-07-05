@@ -217,6 +217,58 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
 }
 
 #[tokio::test]
+async fn test_postgres_completion_uses_utf16_lsp_positions() {
+    let dialect = PostgresDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "public".to_string(),
+        tables: vec![Table {
+            name: "users".to_string(),
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: false,
+                    source_location: None,
+                    ..Default::default()
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: false,
+                    source_location: None,
+                    ..Default::default()
+                },
+            ],
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let sql = "SELECT '😀', u. FROM users u";
+    let before_cursor = "SELECT '😀', u.";
+    let items = dialect
+        .completion(
+            sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: before_cursor.encode_utf16().count() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(items.iter().any(|item| item.label == "id"));
+    assert!(items.iter().any(|item| item.label == "name"));
+    assert!(
+        !items.iter().any(|item| item.label == "SELECT"),
+        "table-column completion should not fall back to default keywords after non-ASCII text"
+    );
+}
+
+#[tokio::test]
 async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     let dialect = MysqlDialect::new();
     let schema = Schema {

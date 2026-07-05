@@ -194,6 +194,48 @@ impl SqlParser {
         }
     }
 
+    /// Convert an LSP UTF-16 position to the byte-based column expected by tree-sitter.
+    pub fn lsp_position_to_byte_position(source: &str, position: Position) -> Position {
+        let mut last_line = "";
+        let mut last_line_index = 0u32;
+
+        for (line_index, line) in source.split('\n').enumerate() {
+            last_line = line;
+            last_line_index = line_index as u32;
+            if line_index == position.line as usize {
+                return Position {
+                    line: position.line,
+                    character: Self::utf16_column_to_byte_offset(line, position.character) as u32,
+                };
+            }
+        }
+
+        Position {
+            line: last_line_index,
+            character: last_line.len() as u32,
+        }
+    }
+
+    fn utf16_column_to_byte_offset(line: &str, character: u32) -> usize {
+        let target_units = character as usize;
+        let mut current_units = 0usize;
+
+        for (byte_index, ch) in line.char_indices() {
+            if current_units >= target_units {
+                return byte_index;
+            }
+
+            let next_units = current_units + ch.len_utf16();
+            if next_units > target_units {
+                return byte_index;
+            }
+
+            current_units = next_units;
+        }
+
+        line.len()
+    }
+
     fn filter_trailing_incomplete_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
         if !Self::is_trailing_incomplete_statement(source) {
             return;
@@ -1694,6 +1736,30 @@ mod tests {
             parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
             CompletionContext::FromClause
         );
+    }
+
+    #[test]
+    fn converts_lsp_utf16_position_to_tree_sitter_byte_position() {
+        let sql = "SELECT '😀' FROM users WHERE ";
+        let lsp_position = Position {
+            line: 0,
+            character: sql.encode_utf16().count() as u32,
+        };
+
+        assert_eq!(
+            SqlParser::lsp_position_to_byte_position(sql, lsp_position),
+            Position {
+                line: 0,
+                character: sql.len() as u32,
+            }
+        );
+
+        let inside_surrogate_pair = Position {
+            line: 0,
+            character: "SELECT '😀".encode_utf16().count() as u32 - 1,
+        };
+        let byte_position = SqlParser::lsp_position_to_byte_position(sql, inside_surrogate_pair);
+        assert_eq!(byte_position.character as usize, "SELECT '".len());
     }
 
     #[test]

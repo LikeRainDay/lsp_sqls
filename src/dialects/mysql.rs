@@ -133,6 +133,7 @@ impl Dialect for MysqlDialect {
         position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
+        let position = SqlParser::lsp_position_to_byte_position(sql, position);
         let mut parser = self.parser.lock().unwrap();
         let parse_result = parser.parse(sql);
 
