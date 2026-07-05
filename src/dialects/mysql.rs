@@ -80,6 +80,16 @@ impl MysqlDialect {
         common::cursor_prefix(sql, position)
     }
 
+    fn relation_reference_prefix(sql: &str, position: Position) -> String {
+        common::cursor_prefix_excluding_keywords(
+            sql,
+            position,
+            &[
+                "from", "join", "inner", "left", "right", "full", "outer", "cross",
+            ],
+        )
+    }
+
     fn cursor_has_identifier_qualifier(sql: &str, position: Position) -> bool {
         common::cursor_has_identifier_qualifier(sql, position)
     }
@@ -143,7 +153,7 @@ impl Dialect for MysqlDialect {
         match context {
             crate::parser::CompletionContext::FromClause
             | crate::parser::CompletionContext::JoinClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = Self::relation_reference_prefix(sql, position);
                 if let Some(schema) = schema {
                     common::add_schema_tables(
                         &mut items,

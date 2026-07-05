@@ -13,6 +13,22 @@ pub(crate) fn cursor_prefix(sql: &str, position: Position) -> String {
     SqlParser::identifier_last_part(token).to_lowercase()
 }
 
+pub(crate) fn cursor_prefix_excluding_keywords(
+    sql: &str,
+    position: Position,
+    keywords: &[&str],
+) -> String {
+    let prefix = cursor_prefix(sql, position);
+    if keywords
+        .iter()
+        .any(|keyword| prefix.eq_ignore_ascii_case(keyword))
+    {
+        String::new()
+    } else {
+        prefix
+    }
+}
+
 pub(crate) fn cursor_has_identifier_qualifier(sql: &str, position: Position) -> bool {
     let lines: Vec<&str> = sql.lines().collect();
     let line_text = lines.get(position.line as usize).unwrap_or(&"");

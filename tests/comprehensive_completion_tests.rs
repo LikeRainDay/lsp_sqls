@@ -181,6 +181,27 @@ async fn test_comprehensive_completion_scenarios() {
         );
     }
 
+    println!("\n=== Test 1b: WHERE clause without trailing space ===");
+    let sql1b = "SELECT * FROM users WHERE";
+    let items1b = test_completion_with_log(
+        &dialect,
+        "Single-table WHERE without trailing space",
+        sql1b,
+        0,
+        sql1b.len() as u32,
+        Some(&schema),
+    )
+    .await;
+
+    assert!(
+        items1b.iter().any(|item| item.label == "id"),
+        "Should suggest column 'id' immediately after WHERE"
+    );
+    assert!(
+        items1b.iter().any(|item| item.label == "name"),
+        "Should suggest column 'name' immediately after WHERE"
+    );
+
     // ==================== 场景2: 单表 ORDER BY 子句 ====================
     println!("\n=== Test 2: Single-table ORDER BY ===");
     let sql2 = "SELECT * FROM users ORDER BY ";
@@ -395,6 +416,33 @@ async fn test_comprehensive_completion_scenarios() {
             .iter()
             .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FIELD)),
         "FROM clause should NOT suggest columns"
+    );
+
+    println!("\n=== Test 9b: FROM clause table completion without trailing space ===");
+    let sql9b = "SELECT * FROM";
+    let items9b = test_completion_with_log(
+        &dialect,
+        "FROM clause without trailing space",
+        sql9b,
+        0,
+        sql9b.len() as u32,
+        Some(&schema),
+    )
+    .await;
+
+    assert!(
+        items9b.iter().any(|item| item.label == "users"),
+        "Should suggest table 'users' immediately after FROM"
+    );
+    assert!(
+        items9b.iter().any(|item| item.label == "orders"),
+        "Should suggest table 'orders' immediately after FROM"
+    );
+    assert!(
+        !items9b
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FIELD)),
+        "FROM keyword position should prefer table suggestions, not columns"
     );
 
     // ==================== 场景10: 多表 SELECT 子句 ====================
