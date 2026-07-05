@@ -579,7 +579,9 @@ impl LanguageServer for SqlLspServer {
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_position(&uri, &text, position);
-            let items = dialect.completion(&text, position, schema.as_ref()).await;
+            let items = dialect
+                .completion_with_context(&text, position, schema.as_ref(), params.context.as_ref())
+                .await;
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
