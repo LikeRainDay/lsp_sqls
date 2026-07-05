@@ -776,6 +776,102 @@ async fn test_dialect_with_schema() {
 }
 
 #[tokio::test]
+async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
+    let dialect = PostgresDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "public".to_string(),
+        tables: vec![
+            Table {
+                name: "casbin_api_rule".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "ptype".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+            Table {
+                name: "form".to_string(),
+                columns: vec![Column {
+                    name: "form_background_url".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                }],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let from_sql = "SELECT * from";
+    let from_items = dialect
+        .completion(
+            from_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: from_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        from_items
+            .iter()
+            .any(|item| item.label == "public.casbin_api_rule"),
+        "FROM completion should suggest relation names: {from_items:?}"
+    );
+    assert!(
+        !from_items
+            .iter()
+            .any(|item| item.label == "form_background_url"),
+        "FROM completion should not leak column suggestions: {from_items:?}"
+    );
+
+    let where_sql = "SELECT * from public.casbin_api_rule where";
+    let mut where_items = dialect
+        .completion(
+            where_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    where_items.sort_by(|a, b| {
+        let a_sort = a.sort_text.as_ref().unwrap_or(&a.label);
+        let b_sort = b.sort_text.as_ref().unwrap_or(&b.label);
+        a_sort.cmp(b_sort)
+    });
+
+    assert_eq!(
+        where_items.first().map(|item| item.label.as_str()),
+        Some("id")
+    );
+    assert!(
+        where_items.iter().any(|item| item.label == "ptype"),
+        "WHERE completion should suggest columns from the referenced table"
+    );
+}
+
+#[tokio::test]
 async fn test_schema_function_completion() {
     let schema = Schema {
         id: SchemaId::new(),
