@@ -166,7 +166,11 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["select", "distinct"],
+                );
                 if let Some(schema) = schema {
                     let referenced_tables = parse_result
                         .tree
@@ -235,7 +239,7 @@ impl Dialect for MysqlDialect {
                 }
 
                 // 然后添加 SELECT 相关关键字（优先级最低）
-                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
+                let select_keywords = vec!["DISTINCT", "AS", "FROM"];
                 for keyword in select_keywords {
                     // Apply prefix filter to keywords
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {

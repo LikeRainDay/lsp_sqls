@@ -162,7 +162,11 @@ impl Dialect for PostgresDialect {
             }
 
             crate::parser::CompletionContext::SelectClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["select", "distinct"],
+                );
                 if let Some(schema) = schema {
                     let referenced_tables = parse_result
                         .tree
@@ -188,7 +192,7 @@ impl Dialect for PostgresDialect {
                     );
                 }
 
-                let select_keywords = vec!["SELECT", "DISTINCT", "AS", "FROM"];
+                let select_keywords = vec!["DISTINCT", "AS", "FROM"];
                 for keyword in select_keywords {
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;

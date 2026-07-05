@@ -1114,6 +1114,26 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
         source_uri: None,
     };
 
+    let select_sql = "SELECT";
+    let select_items = dialect
+        .completion(
+            select_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: select_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        select_items.iter().any(|item| item.label == "id"),
+        "SELECT completion should move to expression candidates: {select_items:?}"
+    );
+    assert!(
+        !select_items.iter().any(|item| item.label == "SELECT"),
+        "SELECT completion should not suggest the completed SELECT keyword again: {select_items:?}"
+    );
+
     let from_sql = "SELECT * from";
     let from_items = dialect
         .completion(
@@ -1162,6 +1182,23 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
     assert!(
         where_items.iter().any(|item| item.label == "ptype"),
         "WHERE completion should suggest columns from the referenced table"
+    );
+
+    let where_space_sql = "SELECT * from public.casbin_api_rule where ";
+    let where_space_items = dialect
+        .completion(
+            where_space_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_space_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert_eq!(
+        where_space_items.first().map(|item| item.label.as_str()),
+        Some("id"),
+        "WHERE completion should return columns before operators without relying on client-side sorting: {where_space_items:?}"
     );
 }
 
