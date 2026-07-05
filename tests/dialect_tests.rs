@@ -363,6 +363,34 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
         "multi-table SELECT should qualify and include referenced table columns"
     );
 
+    let where_prefix_sql = "SELECT * FROM orders WHERE us";
+    let where_prefix_items = dialect
+        .completion(
+            where_prefix_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_prefix_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_prefix_items
+            .iter()
+            .any(|item| item.label == "user_id"),
+        "WHERE prefix should include matching MySQL columns: {where_prefix_items:?}"
+    );
+    assert!(
+        !where_prefix_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "WHERE prefix should filter unrelated MySQL columns: {where_prefix_items:?}"
+    );
+    assert!(
+        !where_prefix_items.iter().any(|item| item.label == "LIKE"),
+        "WHERE prefix should filter unrelated MySQL operators: {where_prefix_items:?}"
+    );
+
     let unqualified_table_items = dialect
         .completion(
             "SELECT * FROM us",
@@ -1199,6 +1227,30 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
         where_space_items.first().map(|item| item.label.as_str()),
         Some("id"),
         "WHERE completion should return columns before operators without relying on client-side sorting: {where_space_items:?}"
+    );
+
+    let where_prefix_sql = "SELECT * from public.casbin_api_rule where pt";
+    let where_prefix_items = dialect
+        .completion(
+            where_prefix_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_prefix_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_prefix_items.iter().any(|item| item.label == "ptype"),
+        "WHERE prefix should include matching columns: {where_prefix_items:?}"
+    );
+    assert!(
+        !where_prefix_items.iter().any(|item| item.label == "id"),
+        "WHERE prefix should filter unrelated columns: {where_prefix_items:?}"
+    );
+    assert!(
+        !where_prefix_items.iter().any(|item| item.label == "!="),
+        "WHERE prefix should filter unrelated operators: {where_prefix_items:?}"
     );
 }
 

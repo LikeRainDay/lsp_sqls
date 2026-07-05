@@ -253,7 +253,11 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::WhereClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["where", "and", "or", "not"],
+                );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
@@ -263,7 +267,7 @@ impl Dialect for MysqlDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     }
@@ -280,6 +284,9 @@ impl Dialect for MysqlDialect {
                 // 只添加关键字形式的运算符，不添加符号运算符
                 let operators = vec!["LIKE", "IN", "BETWEEN", "IS NULL", "IS NOT NULL"];
                 for op in operators {
+                    if !prefix.is_empty() && !op.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     items.push(CompletionItem {
                         label: op.to_string(),
                         kind: Some(CompletionItemKind::OPERATOR),
@@ -304,6 +311,8 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::OrderByClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["order", "by"]);
                 // ORDER BY：补全列名和排序关键字
                 // 添加列名补全 (优先级高)
                 if let Some(schema) = schema {
@@ -316,18 +325,21 @@ impl Dialect for MysqlDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     } else {
                         // 如果没有解析树，默认返回所有列，不带前缀
-                        self.add_schema_columns(&mut items, schema, &[], false, "", "0");
+                        self.add_schema_columns(&mut items, schema, &[], false, &prefix, "0");
                     }
                 }
 
                 // 添加 ORDER BY 排序关键字 (优先级低)
                 let keywords = vec!["ASC", "DESC"];
                 for keyword in keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "1", keyword); // Keywords after columns
                     items.push(item);
@@ -335,6 +347,8 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::GroupByClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["group", "by"]);
                 // GROUP BY：只补全列名，不需要排序关键字
                 // 添加列名补全
                 if let Some(schema) = schema {
@@ -347,18 +361,23 @@ impl Dialect for MysqlDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     } else {
                         // 如果没有解析树，默认返回所有列，不带前缀
-                        self.add_schema_columns(&mut items, schema, &[], false, "", "0");
+                        self.add_schema_columns(&mut items, schema, &[], false, &prefix, "0");
                     }
                 }
                 // GROUP BY 不添加任何关键字
             }
 
             crate::parser::CompletionContext::HavingClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["having", "and", "or", "not"],
+                );
                 // HAVING 子句：列名(优先) > 聚合函数 > 操作符 > 关键字
 
                 // 1. 添加列名补全 (优先级最高 "0")
@@ -373,14 +392,14 @@ impl Dialect for MysqlDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     }
                     self.add_schema_functions(
                         &mut items,
                         schema,
-                        "",
+                        &prefix,
                         "1",
                         Self::cursor_has_identifier_qualifier(sql, position),
                     );
@@ -389,6 +408,9 @@ impl Dialect for MysqlDialect {
                 // 2. 添加聚合函数 (优先级中 "1")
                 let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
                 for func in aggregate_functions {
+                    if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(func);
                     item.kind = Some(CompletionItemKind::FUNCTION);
                     common::set_completion_sort_text(&mut item, "1", func);
@@ -400,6 +422,9 @@ impl Dialect for MysqlDialect {
                 let having_keywords =
                     vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL"];
                 for keyword in having_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "2", keyword); // Keywords after aggregate functions
                     items.push(item);

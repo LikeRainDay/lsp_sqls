@@ -68,10 +68,6 @@ impl PostgresDialect {
         common::is_function_reference(node, sql)
     }
 
-    fn cursor_prefix(sql: &str, position: Position) -> String {
-        common::cursor_prefix(sql, position)
-    }
-
     fn relation_reference_prefix(sql: &str, position: Position) -> String {
         common::cursor_prefix_excluding_keywords(
             sql,
@@ -204,7 +200,11 @@ impl Dialect for PostgresDialect {
             }
 
             crate::parser::CompletionContext::WhereClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["where", "and", "or", "not"],
+                );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
@@ -214,7 +214,7 @@ impl Dialect for PostgresDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     }
@@ -232,6 +232,9 @@ impl Dialect for PostgresDialect {
                     "TRUE", "FALSE",
                 ];
                 for keyword in where_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "1", keyword);
                     items.push(item);
@@ -239,6 +242,9 @@ impl Dialect for PostgresDialect {
 
                 let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
                 for op in operators {
+                    if !prefix.is_empty() && !op.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     items.push(CompletionItem {
                         label: op.to_string(),
                         kind: Some(CompletionItemKind::OPERATOR),
@@ -264,6 +270,11 @@ impl Dialect for PostgresDialect {
 
             crate::parser::CompletionContext::OrderByClause
             | crate::parser::CompletionContext::GroupByClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["order", "group", "by"],
+                );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
@@ -273,7 +284,7 @@ impl Dialect for PostgresDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     }
@@ -281,6 +292,9 @@ impl Dialect for PostgresDialect {
 
                 let keywords = vec!["ASC", "DESC", "BY"];
                 for keyword in keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "1", keyword);
                     items.push(item);
@@ -288,7 +302,11 @@ impl Dialect for PostgresDialect {
             }
 
             crate::parser::CompletionContext::HavingClause => {
-                let prefix = Self::cursor_prefix(sql, position);
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["having", "and", "or", "not"],
+                );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
@@ -298,7 +316,7 @@ impl Dialect for PostgresDialect {
                             schema,
                             &referenced_tables,
                             use_table_prefix,
-                            "",
+                            &prefix,
                             "0",
                         );
                     }
@@ -313,6 +331,9 @@ impl Dialect for PostgresDialect {
 
                 let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
                 for func in aggregate_functions {
+                    if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(func);
                     item.kind = Some(CompletionItemKind::FUNCTION);
                     common::set_completion_sort_text(&mut item, "1", func);
@@ -323,6 +344,9 @@ impl Dialect for PostgresDialect {
                     "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
                 ];
                 for keyword in having_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "2", keyword);
                     items.push(item);
