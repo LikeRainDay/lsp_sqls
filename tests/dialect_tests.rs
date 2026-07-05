@@ -491,6 +491,35 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
 }
 
 #[tokio::test]
+async fn test_elasticsearch_dsl_http_style_requests() {
+    let dialect = ElasticsearchDslDialect::new();
+    let request = r#"GET /users/_search
+{"query":{"match_all":{}}}
+
+DELETE /users"#;
+
+    let diagnostics = dialect.parse(request, None).await;
+    assert!(
+        diagnostics.iter().all(|diagnostic| diagnostic.severity
+            != Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)),
+        "HTTP-style Elasticsearch requests should parse their JSON bodies without request-line errors"
+    );
+
+    let invalid_body = r#"GET /users/_search
+{"query":}"#;
+    let invalid_body_diagnostics = dialect.parse(invalid_body, None).await;
+    assert!(invalid_body_diagnostics.iter().any(|diagnostic| {
+        diagnostic.range.start.line == 1 && diagnostic.message.contains("JSON")
+    }));
+
+    let invalid_path = dialect.parse("GET _search", None).await;
+    assert!(invalid_path.iter().any(|diagnostic| {
+        diagnostic.severity == Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+            && diagnostic.message.contains("must start with '/'")
+    }));
+}
+
+#[tokio::test]
 async fn test_clickhouse_dialect() {
     let dialect = ClickHouseDialect::new();
     assert_eq!(dialect.name(), "clickhouse");
@@ -644,6 +673,9 @@ async fn test_mongodb_dialect() {
         .await;
     assert!(items.iter().any(|item| item.label == "collection"));
     assert!(items.iter().any(|item| item.label == "find"));
+    assert!(items.iter().any(|item| item.label == "create"));
+    assert!(items.iter().any(|item| item.label == "drop"));
+    assert!(items.iter().any(|item| item.label == "dropDatabase"));
     assert!(items.iter().any(|item| item.label == "users"));
     assert!(items.iter().any(|item| item.label == "email"));
 

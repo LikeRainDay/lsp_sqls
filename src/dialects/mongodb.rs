@@ -263,6 +263,12 @@ const MONGODB_TOP_LEVEL_FIELDS: &[&str] = &[
     "many",
     "upsert",
     "command",
+    "create",
+    "drop",
+    "dropDatabase",
+    "dropIndexes",
+    "renameCollection",
+    "collMod",
 ];
 
 const MONGODB_COMMANDS: &[&str] = &[
@@ -276,7 +282,14 @@ const MONGODB_COMMANDS: &[&str] = &[
     "updateMany",
     "deleteOne",
     "deleteMany",
+    "create",
+    "drop",
+    "dropDatabase",
+    "dropIndexes",
+    "renameCollection",
+    "collMod",
     "listCollections",
+    "listDatabases",
     "listIndexes",
     "collStats",
     "dbStats",
