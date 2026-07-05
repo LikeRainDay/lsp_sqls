@@ -177,6 +177,7 @@ impl Dialect for ElasticsearchDslDialect {
         position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
+        let position = crate::position::lsp_position_to_byte_position(dsl, position);
         let mut parser = self.dsl_parser.lock().unwrap();
         let (tree, _) = parser.parse_with_tree(dsl);
 
@@ -455,11 +456,12 @@ impl Dialect for ElasticsearchDslDialect {
         position: Position,
         schema: Option<&Schema>,
     ) -> Option<Location> {
+        let byte_position = crate::position::lsp_position_to_byte_position(dsl, position);
         let mut parser = self.dsl_parser.lock().unwrap();
         let (tree, _) = parser.parse_with_tree(dsl);
 
         if let Some(ref tree) = tree {
-            if let Some(node) = parser.get_node_at_position(tree, position) {
+            if let Some(node) = parser.get_node_at_position(tree, byte_position) {
                 // 提取字段名
                 let field_name = parser
                     .extract_field_name(node, dsl)
@@ -493,6 +495,7 @@ impl Dialect for ElasticsearchDslDialect {
         position: Position,
         _schema: Option<&Schema>,
     ) -> Vec<Location> {
+        let position = crate::position::lsp_position_to_byte_position(dsl, position);
         let mut parser = self.dsl_parser.lock().unwrap();
         let (tree, _) = parser.parse_with_tree(dsl);
         let mut locations = Vec::new();
@@ -537,7 +540,8 @@ impl Dialect for ElasticsearchDslDialect {
 }
 
 fn token_at_position(text: &str, position: Position) -> String {
-    let line = text.lines().nth(position.line as usize).unwrap_or("");
+    let position = crate::position::lsp_position_to_byte_position(text, position);
+    let line = text.split('\n').nth(position.line as usize).unwrap_or("");
     let byte_index = position.character.min(line.len() as u32) as usize;
     let bytes = line.as_bytes();
     let mut start = byte_index.min(bytes.len());

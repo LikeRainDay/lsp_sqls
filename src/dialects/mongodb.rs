@@ -380,7 +380,8 @@ fn hint_diagnostic(source: &str, message: &str) -> Diagnostic {
 }
 
 fn token_at_position(text: &str, position: Position) -> String {
-    let line = text.lines().nth(position.line as usize).unwrap_or("");
+    let position = crate::position::lsp_position_to_byte_position(text, position);
+    let line = text.split('\n').nth(position.line as usize).unwrap_or("");
     let byte_index = position.character.min(line.len() as u32) as usize;
     let bytes = line.as_bytes();
     let mut start = byte_index.min(bytes.len());

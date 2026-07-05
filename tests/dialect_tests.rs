@@ -2,6 +2,11 @@ use sql_lsp::dialect::Dialect;
 use sql_lsp::dialects::*;
 use sql_lsp::schema::{Column, Function, FunctionParameter, Schema, SchemaId, Table};
 
+fn utf16_position_inside(source: &str, needle: &str) -> u32 {
+    let byte_index = source.find(needle).expect("needle should exist") + 1;
+    source[..byte_index].encode_utf16().count() as u32
+}
+
 #[tokio::test]
 async fn test_mysql_dialect() {
     let dialect = MysqlDialect::new();
@@ -555,6 +560,42 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
         )
         .await
         .is_some());
+
+    let unicode_query =
+        r#"{"note":"😀","index":"users","query":{"term":{"email":"ada@example.com"}}}"#;
+    assert!(dialect
+        .hover(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "users"),
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .hover(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "email"),
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .goto_definition(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "email"),
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
 }
 
 #[tokio::test]
@@ -777,6 +818,41 @@ async fn test_mongodb_dialect() {
             tower_lsp::lsp_types::Position {
                 line: 0,
                 character: field_position as u32,
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+
+    let unicode_query = r#"{"note":"😀","collection":"users","find":{"email":"ada@example.com"}}"#;
+    assert!(dialect
+        .hover(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "users"),
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .hover(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "email"),
+            },
+            Some(&schema),
+        )
+        .await
+        .is_some());
+    assert!(dialect
+        .goto_definition(
+            unicode_query,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: utf16_position_inside(unicode_query, "email"),
             },
             Some(&schema),
         )
