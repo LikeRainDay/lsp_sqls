@@ -193,7 +193,7 @@ impl Dialect for PostgresDialect {
                         continue;
                     }
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("2{keyword}"));
+                    common::set_completion_sort_text(&mut item, "2", keyword);
                     items.push(item);
                 }
             }
@@ -228,7 +228,7 @@ impl Dialect for PostgresDialect {
                 ];
                 for keyword in where_keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("1{keyword}"));
+                    common::set_completion_sort_text(&mut item, "1", keyword);
                     items.push(item);
                 }
 
@@ -241,7 +241,7 @@ impl Dialect for PostgresDialect {
                         documentation: None,
                         deprecated: None,
                         preselect: None,
-                        sort_text: Some(format!("1{}", op)),
+                        sort_text: Some(common::completion_sort_text("1", op)),
                         filter_text: None,
                         insert_text: Some(op.to_string()),
                         insert_text_format: None,
@@ -277,7 +277,7 @@ impl Dialect for PostgresDialect {
                 let keywords = vec!["ASC", "DESC", "BY"];
                 for keyword in keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("1{keyword}"));
+                    common::set_completion_sort_text(&mut item, "1", keyword);
                     items.push(item);
                 }
             }
@@ -310,7 +310,7 @@ impl Dialect for PostgresDialect {
                 for func in aggregate_functions {
                     let mut item = self.create_keyword_item(func);
                     item.kind = Some(CompletionItemKind::FUNCTION);
-                    item.sort_text = Some(format!("1{func}"));
+                    common::set_completion_sort_text(&mut item, "1", func);
                     items.push(item);
                 }
 
@@ -319,7 +319,7 @@ impl Dialect for PostgresDialect {
                 ];
                 for keyword in having_keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("2{keyword}"));
+                    common::set_completion_sort_text(&mut item, "2", keyword);
                     items.push(item);
                 }
             }

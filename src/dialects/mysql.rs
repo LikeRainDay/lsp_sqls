@@ -218,7 +218,7 @@ impl Dialect for MysqlDialect {
                         documentation: None,
                         deprecated: None,
                         preselect: None,
-                        sort_text: Some(format!("1{}", func)), // Functions after columns
+                        sort_text: Some(common::completion_sort_text("1", func)), // Functions after columns
                         filter_text: None,
                         insert_text: Some(format!("{}()", func)),
                         insert_text_format: None,
@@ -242,7 +242,7 @@ impl Dialect for MysqlDialect {
                     }
 
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("2{}", keyword)); // Keywords last
+                    common::set_completion_sort_text(&mut item, "2", keyword); // Keywords last
                     items.push(item);
                 }
             }
@@ -282,7 +282,7 @@ impl Dialect for MysqlDialect {
                         documentation: None,
                         deprecated: None,
                         preselect: None,
-                        sort_text: Some(format!("1{}", op)), // Operators after columns
+                        sort_text: Some(common::completion_sort_text("1", op)), // Operators after columns
                         filter_text: None,
                         insert_text: Some(op.to_string()),
                         insert_text_format: None,
@@ -324,7 +324,7 @@ impl Dialect for MysqlDialect {
                 let keywords = vec!["ASC", "DESC"];
                 for keyword in keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("1{}", keyword)); // Keywords after columns
+                    common::set_completion_sort_text(&mut item, "1", keyword); // Keywords after columns
                     items.push(item);
                 }
             }
@@ -386,7 +386,7 @@ impl Dialect for MysqlDialect {
                 for func in aggregate_functions {
                     let mut item = self.create_keyword_item(func);
                     item.kind = Some(CompletionItemKind::FUNCTION);
-                    item.sort_text = Some(format!("1{}", func));
+                    common::set_completion_sort_text(&mut item, "1", func);
                     items.push(item);
                 }
 
@@ -396,7 +396,7 @@ impl Dialect for MysqlDialect {
                     vec!["AND", "OR", "NOT", "IN", "LIKE", "BETWEEN", "IS", "NULL"];
                 for keyword in having_keywords {
                     let mut item = self.create_keyword_item(keyword);
-                    item.sort_text = Some(format!("2{}", keyword)); // Keywords after aggregate functions
+                    common::set_completion_sort_text(&mut item, "2", keyword); // Keywords after aggregate functions
                     items.push(item);
                 }
             }

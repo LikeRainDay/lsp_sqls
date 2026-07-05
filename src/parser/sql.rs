@@ -76,6 +76,7 @@ impl SqlParser {
             // Tree-sitter 即使有错误也能生成部分树
             // 检查是否有错误节点
             self.collect_errors(tree.root_node(), sql, &mut diagnostics);
+            Self::filter_trailing_incomplete_diagnostics(sql, &mut diagnostics);
         } else {
             // 完全无法解析
             diagnostics.push(Diagnostic {
@@ -191,6 +192,119 @@ impl SqlParser {
         for child in node.children(&mut cursor) {
             self.collect_errors(child, source, diagnostics);
         }
+    }
+
+    fn filter_trailing_incomplete_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
+        if !Self::is_trailing_incomplete_statement(source) {
+            return;
+        }
+
+        let eof = Self::position_at_end(source);
+        diagnostics.retain(|diagnostic| !Self::diagnostic_reaches_position(diagnostic, eof));
+    }
+
+    fn position_at_end(source: &str) -> Position {
+        let mut line = 0;
+        let mut character = 0;
+
+        for ch in source.chars() {
+            if ch == '\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += ch.len_utf8() as u32;
+            }
+        }
+
+        Position { line, character }
+    }
+
+    fn diagnostic_reaches_position(diagnostic: &Diagnostic, position: Position) -> bool {
+        diagnostic.range.end.line > position.line
+            || (diagnostic.range.end.line == position.line
+                && diagnostic.range.end.character >= position.character.saturating_sub(1))
+            || (diagnostic.range.start.line == position.line
+                && diagnostic.range.start.character >= position.character.saturating_sub(1))
+    }
+
+    fn is_trailing_incomplete_statement(source: &str) -> bool {
+        let searchable_source = Self::mask_sql_noise(source);
+        let trimmed = searchable_source.trim_end();
+        if trimmed.is_empty() || trimmed.ends_with(';') {
+            return false;
+        }
+
+        let source_upper = trimmed.to_ascii_uppercase();
+        let statement_start = source_upper
+            .rfind(';')
+            .map(|position| position + 1)
+            .unwrap_or(0);
+        let statement = source_upper[statement_start..].trim();
+        if statement.is_empty() {
+            return false;
+        }
+
+        let words = Self::statement_words(statement);
+        let incomplete_phrases: &[&[&str]] = &[
+            &["SELECT"],
+            &["SELECT", "DISTINCT"],
+            &["WITH"],
+            &["FROM"],
+            &["JOIN"],
+            &["INNER", "JOIN"],
+            &["LEFT", "JOIN"],
+            &["RIGHT", "JOIN"],
+            &["FULL", "JOIN"],
+            &["CROSS", "JOIN"],
+            &["ON"],
+            &["USING"],
+            &["WHERE"],
+            &["AND"],
+            &["OR"],
+            &["NOT"],
+            &["GROUP", "BY"],
+            &["ORDER", "BY"],
+            &["HAVING"],
+            &["LIMIT"],
+            &["OFFSET"],
+            &["INSERT"],
+            &["INSERT", "INTO"],
+            &["UPDATE"],
+            &["DELETE", "FROM"],
+            &["CREATE", "TABLE"],
+            &["ALTER", "TABLE"],
+            &["DROP", "TABLE"],
+            &["SET"],
+            &["VALUES"],
+        ];
+
+        if incomplete_phrases
+            .iter()
+            .any(|phrase| Self::words_end_with(&words, phrase))
+        {
+            return true;
+        }
+
+        let last_char = statement.chars().rev().find(|ch| !ch.is_whitespace());
+        matches!(
+            last_char,
+            Some(',' | '.' | '(' | '=' | '<' | '>' | '!' | '+' | '-' | '/' | '%')
+        )
+    }
+
+    fn statement_words(statement_upper: &str) -> Vec<&str> {
+        statement_upper
+            .split(|ch: char| !Self::is_identifier_char(ch))
+            .filter(|word| !word.is_empty())
+            .collect()
+    }
+
+    fn words_end_with(words: &[&str], phrase: &[&str]) -> bool {
+        words.len() >= phrase.len()
+            && words[words.len() - phrase.len()..]
+                .iter()
+                .zip(phrase.iter())
+                .all(|(word, expected)| word == expected)
     }
 
     /// 检查节点是否在 SELECT 上下文中
@@ -1472,7 +1586,7 @@ impl SqlParser {
 #[cfg(test)]
 mod tests {
     use super::{CompletionContext, SqlParser};
-    use tower_lsp::lsp_types::Position;
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position};
 
     fn position_at_end(source: &str) -> Position {
         let mut line = 0;
@@ -1579,6 +1693,43 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
             CompletionContext::FromClause
+        );
+    }
+
+    #[test]
+    fn suppresses_diagnostics_for_interactive_trailing_sql() {
+        let samples = [
+            "SELECT",
+            "SELECT * FROM",
+            "SELECT * FROM public.users WHERE",
+            "SELECT * FROM public.users WHERE id =",
+            "SELECT id,",
+            "SELECT * FROM public.",
+        ];
+
+        for sql in samples {
+            let mut parser = SqlParser::new();
+            let result = parser.parse(sql);
+            assert!(
+                result.diagnostics.is_empty(),
+                "interactive SQL should not report diagnostics for {sql:?}: {:?}",
+                result.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_diagnostics_for_closed_invalid_sql() {
+        let mut parser = SqlParser::new();
+        let result = parser.parse("SELECT * FROM users WHERE id = )");
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR)),
+            "closed invalid SQL should retain an error diagnostic: {:?}",
+            result.diagnostics
         );
     }
 

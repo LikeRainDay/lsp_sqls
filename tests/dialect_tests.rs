@@ -42,12 +42,27 @@ async fn test_mysql_dialect() {
 #[tokio::test]
 async fn test_mysql_diagnostics() {
     let dialect = MysqlDialect::new();
-    // 语法错误：SELECT * FROM 后面没有表名
-    let diagnostics = dialect.parse("SELECT * FROM", None).await;
-    // 应该返回语法错误诊断
+    let interactive_sql_samples = [
+        "SELECT",
+        "SELECT * FROM",
+        "SELECT * FROM users WHERE",
+        "SELECT * FROM users WHERE id =",
+    ];
+
+    for sql in interactive_sql_samples {
+        let diagnostics = dialect.parse(sql, None).await;
+        assert!(
+            diagnostics.is_empty(),
+            "interactive incomplete SQL should not publish diagnostics for {sql:?}: {diagnostics:?}"
+        );
+    }
+
+    let diagnostics = dialect
+        .parse("SELECT * FROM users WHERE id = )", None)
+        .await;
     assert!(
         !diagnostics.is_empty(),
-        "Should return diagnostics for incomplete SQL"
+        "closed invalid SQL should still return diagnostics"
     );
 }
 

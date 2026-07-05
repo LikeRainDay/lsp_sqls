@@ -67,6 +67,14 @@ pub(crate) fn cursor_identifier_token(text_before: &str) -> &str {
     &text_before[token_start..]
 }
 
+pub(crate) fn completion_sort_text(sort_prefix: &str, label: &str) -> String {
+    format!("{}:{}", sort_prefix, label.to_ascii_lowercase())
+}
+
+pub(crate) fn set_completion_sort_text(item: &mut CompletionItem, sort_prefix: &str, label: &str) {
+    item.sort_text = Some(completion_sort_text(sort_prefix, label));
+}
+
 pub(crate) fn create_keyword_item(dialect_label: &str, keyword: &str) -> CompletionItem {
     CompletionItem {
         label: keyword.to_string(),
@@ -75,7 +83,7 @@ pub(crate) fn create_keyword_item(dialect_label: &str, keyword: &str) -> Complet
         documentation: None,
         deprecated: None,
         preselect: None,
-        sort_text: Some(format!("0{keyword}")),
+        sort_text: Some(completion_sort_text("0", keyword)),
         filter_text: None,
         insert_text: Some(keyword.to_string()),
         insert_text_format: None,
@@ -118,7 +126,7 @@ pub(crate) fn create_table_item(
         documentation: table.documentation().map(Documentation::String),
         deprecated: None,
         preselect: None,
-        sort_text: Some(format!("1{}", table.name)),
+        sort_text: Some(completion_sort_text("1", &table.name)),
         filter_text: None,
         insert_text: Some(label),
         insert_text_format: None,
@@ -153,7 +161,7 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         documentation: column.documentation().map(Documentation::String),
         deprecated: None,
         preselect: None,
-        sort_text: Some(format!("2{}", column.name)),
+        sort_text: Some(completion_sort_text("2", &column.name)),
         filter_text: None,
         insert_text: Some(column.name.clone()),
         insert_text_format: None,
@@ -196,7 +204,7 @@ pub(crate) fn create_function_item(
         documentation: Some(Documentation::String(function.documentation())),
         deprecated: None,
         preselect: None,
-        sort_text: Some(format!("1{}", function.name)),
+        sort_text: Some(completion_sort_text("1", &function.name)),
         filter_text: None,
         insert_text: Some(format!("{label}()")),
         insert_text_format: None,
@@ -237,7 +245,7 @@ pub(crate) fn add_schema_functions(
             continue;
         }
         let mut item = create_function_item(function, schema, qualify_with_database);
-        item.sort_text = Some(format!("{sort_prefix}{}", function.name));
+        set_completion_sort_text(&mut item, sort_prefix, &function.name);
         items.push(item);
     }
 }
@@ -266,7 +274,7 @@ pub(crate) fn add_schema_columns(
                 None
             };
             let mut item = create_column_item(column, table_name);
-            item.sort_text = Some(format!("{sort_prefix}{}", column.name));
+            set_completion_sort_text(&mut item, sort_prefix, &column.name);
             items.push(item);
         }
     }
