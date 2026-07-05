@@ -796,6 +796,12 @@ fn infer_dialect_from_uri_and_language(
         return "clickhouse".to_string();
     } else if uri_lower.ends_with(".redis.sql") || uri_lower.ends_with(".redis") {
         return "redis".to_string();
+    } else if uri_lower.ends_with(".mongo.json")
+        || uri_lower.ends_with(".mongodb.json")
+        || uri_lower.ends_with(".mongo")
+        || uri_lower.ends_with(".mongodb")
+    {
+        return "mongodb".to_string();
     }
 
     // 如果 URI 无法推断，尝试从 languageId 推断
@@ -810,6 +816,7 @@ fn infer_dialect_from_uri_and_language(
         }
         "clickhouse" | "ch" => "clickhouse".to_string(),
         "redis" => "redis".to_string(),
+        "mongodb" | "mongo" | "mongodb-json" | "mongo-json" | "json" => "mongodb".to_string(),
         _ => default_dialect.to_string(),
     }
 }
@@ -850,6 +857,10 @@ mod tests {
             infer_dialect_from_uri_and_language("file:///query.psql", "mysql", "mysql"),
             "postgres"
         );
+        assert_eq!(
+            infer_dialect_from_uri_and_language("file:///query.mongo.json", "sql", "postgres"),
+            "mongodb"
+        );
     }
 
     #[test]
@@ -861,6 +872,10 @@ mod tests {
         assert_eq!(
             infer_dialect_from_uri_and_language("untitled://1", "mysql-sql", "postgres"),
             "mysql"
+        );
+        assert_eq!(
+            infer_dialect_from_uri_and_language("untitled://1", "json", "postgres"),
+            "mongodb"
         );
     }
 

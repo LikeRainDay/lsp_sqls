@@ -460,6 +460,67 @@ async fn test_redis_dialect() {
 }
 
 #[tokio::test]
+async fn test_mongodb_dialect() {
+    let dialect = MongoDbDialect::new();
+    assert_eq!(dialect.name(), "mongodb");
+
+    let diagnostics = dialect
+        .parse(r#"{"collection":"users","find":{},"limit":10}"#, None)
+        .await;
+    assert!(
+        diagnostics.iter().all(|diagnostic| diagnostic.severity
+            != Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)),
+        "valid MongoDB JSON should not produce syntax errors"
+    );
+
+    let invalid = dialect.parse(r#"{"collection":"users""#, None).await;
+    assert!(invalid
+        .iter()
+        .any(|diagnostic| diagnostic.severity
+            == Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)));
+
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "app".to_string(),
+        tables: vec![Table {
+            name: "users".to_string(),
+            columns: vec![Column {
+                name: "email".to_string(),
+                data_type: "string".to_string(),
+                nullable: true,
+                source_location: None,
+                ..Default::default()
+            }],
+            comment: Some("Application users".to_string()),
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let items = dialect
+        .completion(
+            "{",
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: 1,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(items.iter().any(|item| item.label == "collection"));
+    assert!(items.iter().any(|item| item.label == "find"));
+    assert!(items.iter().any(|item| item.label == "users"));
+    assert!(items.iter().any(|item| item.label == "email"));
+
+    let formatted = dialect
+        .format(r#"{"collection":"users","find":{"active":true}}"#)
+        .await;
+    assert!(formatted.contains("\n  \"collection\": \"users\""));
+}
+
+#[tokio::test]
 async fn test_dialect_with_schema() {
     let dialect = MysqlDialect::new();
 

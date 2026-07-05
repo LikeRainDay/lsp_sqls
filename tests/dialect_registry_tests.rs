@@ -12,6 +12,7 @@ fn test_dialect_registry() {
     assert!(names.contains(&"elasticsearch-dsl".to_string()));
     assert!(names.contains(&"clickhouse".to_string()));
     assert!(names.contains(&"redis".to_string()));
+    assert!(names.contains(&"mongodb".to_string()));
 }
 
 #[test]
@@ -25,6 +26,9 @@ fn test_dialect_registry_get_by_name() {
     assert!(registry.get_by_name("elasticsearch-dsl").is_some());
     assert!(registry.get_by_name("clickhouse").is_some());
     assert!(registry.get_by_name("redis").is_some());
+    assert!(registry.get_by_name("mongodb").is_some());
+    assert!(registry.get_by_name("mongo").is_some());
+    assert!(registry.get_by_name("json").is_some());
     assert!(registry.get_by_name("nonexistent").is_none());
 }
 
