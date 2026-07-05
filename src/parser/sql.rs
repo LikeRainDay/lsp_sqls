@@ -3,6 +3,7 @@
 //! https://github.com/sqls-server/sqls/tree/master/parser
 
 use crate::token::{Delimiters, Keywords, Operators, Token, TokenType};
+use std::collections::HashSet;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 use tree_sitter::{Node, Parser, Tree};
 
@@ -1269,6 +1270,33 @@ impl SqlParser {
         Some((parts.join("."), index))
     }
 
+    fn skip_parenthesized_region(source: &str, index: usize) -> usize {
+        let mut index = Self::skip_whitespace(source, index);
+        if !source[index..].starts_with('(') {
+            return index;
+        }
+
+        let mut depth = 0usize;
+        while index < source.len() {
+            let Some(ch) = source[index..].chars().next() else {
+                break;
+            };
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth = depth.saturating_sub(1);
+                index += ch.len_utf8();
+                if depth == 0 {
+                    break;
+                }
+                continue;
+            }
+            index += ch.len_utf8();
+        }
+
+        index
+    }
+
     fn read_relation_reference_after(source: &str, index: usize) -> Option<(String, usize)> {
         let index = Self::skip_relation_modifiers(source, index);
         Self::read_identifier_path(source, index)
@@ -1291,6 +1319,72 @@ impl SqlParser {
         }
 
         Some((alias, next_index))
+    }
+
+    fn skip_cte_materialization_hint(source: &str, index: usize) -> usize {
+        let index = Self::skip_whitespace(source, index);
+        if let Some(after_not) = Self::consume_word(source, index, "NOT") {
+            if let Some(after_materialized) = Self::consume_word(source, after_not, "MATERIALIZED")
+            {
+                return after_materialized;
+            }
+        }
+
+        Self::consume_word(source, index, "MATERIALIZED").unwrap_or(index)
+    }
+
+    fn extract_cte_names(
+        source: &str,
+        searchable_source: &str,
+        source_upper: &str,
+    ) -> HashSet<String> {
+        let mut names = HashSet::new();
+        let mut search_pos = 0;
+
+        while let Some(with_pos) = Self::next_keyword_position(source_upper, "WITH", search_pos) {
+            let mut index = with_pos + "WITH".len();
+            index = Self::consume_word(searchable_source, index, "RECURSIVE").unwrap_or(index);
+
+            loop {
+                index = Self::skip_whitespace(searchable_source, index);
+                let Some((cte_name, after_name)) = Self::read_identifier_part(source, index) else {
+                    break;
+                };
+                names.insert(Self::normalize_identifier(&cte_name));
+                index = Self::skip_whitespace(searchable_source, after_name);
+
+                if searchable_source[index..].starts_with('(') {
+                    index = Self::skip_parenthesized_region(searchable_source, index);
+                }
+
+                let Some(after_as) = Self::consume_word(searchable_source, index, "AS") else {
+                    break;
+                };
+                index = Self::skip_cte_materialization_hint(searchable_source, after_as);
+                index = Self::skip_whitespace(searchable_source, index);
+                if !searchable_source[index..].starts_with('(') {
+                    break;
+                }
+
+                index = Self::skip_parenthesized_region(searchable_source, index);
+                index = Self::skip_whitespace(searchable_source, index);
+                if searchable_source[index..].starts_with(',') {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+
+            search_pos = index.max(with_pos + "WITH".len());
+        }
+
+        names
+    }
+
+    fn is_cte_reference(table_name: &str, cte_names: &HashSet<String>) -> bool {
+        let normalized = Self::normalize_identifier(table_name);
+        let parts = Self::identifier_parts(&normalized);
+        parts.len() == 1 && cte_names.contains(&normalized)
     }
 
     /// 提取表别名映射 (Alias -> Table Name)
@@ -1337,6 +1431,7 @@ impl SqlParser {
         let mut tables = Vec::new();
         let searchable_source = Self::mask_sql_noise(source);
         let source_upper = searchable_source.to_ascii_uppercase();
+        let cte_names = Self::extract_cte_names(source, &searchable_source, &source_upper);
 
         let keywords = ["FROM", "JOIN", "UPDATE", "INTO", "TABLE", "VIEW"];
 
@@ -1350,7 +1445,9 @@ impl SqlParser {
                 if let Some((table_name, _)) =
                     Self::read_relation_reference_after(source, after_keyword)
                 {
-                    Self::push_table_reference(&mut tables, &table_name);
+                    if !Self::is_cte_reference(&table_name, &cte_names) {
+                        Self::push_table_reference(&mut tables, &table_name);
+                    }
                 }
 
                 search_pos = after_keyword;
@@ -1585,6 +1682,32 @@ mod tests {
 
         let references = parser.extract_referenced_tables(tree, sql);
         assert_eq!(references, vec!["public.users".to_string()]);
+    }
+
+    #[test]
+    fn ignores_cte_names_when_extracting_references() {
+        let sql = r#"
+            WITH RECURSIVE recent_orders AS MATERIALIZED (
+                SELECT * FROM app.orders WHERE created_at > now() - interval '7 days'
+            ),
+            user_rollup(user_id, total) AS NOT MATERIALIZED (
+                SELECT user_id, count(*) FROM recent_orders GROUP BY user_id
+            )
+            SELECT u.id, r.total
+            FROM user_rollup r
+            JOIN app.users u ON u.id = r.user_id
+            JOIN public.recent_orders archived ON archived.user_id = u.id;
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let references = parser.extract_referenced_tables(tree, sql);
+        assert!(references.contains(&"app.orders".to_string()));
+        assert!(references.contains(&"app.users".to_string()));
+        assert!(references.contains(&"public.recent_orders".to_string()));
+        assert!(!references.contains(&"recent_orders".to_string()));
+        assert!(!references.contains(&"user_rollup".to_string()));
     }
 
     #[test]
