@@ -629,8 +629,12 @@ impl SqlParser {
         &self,
         node: Node,
         source: &str,
-        _position: Position,
+        position: Position,
     ) -> CompletionContext {
+        if let Some(context) = Self::analyze_completed_keyword_context(source, position) {
+            return context;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -687,7 +691,80 @@ impl SqlParser {
 
         // Fallback: Use simple heuristics if AST traversal didn't find a specific clause
         // This handles cases where Syntax is broken (common during typing) and AST is incomplete
-        self.analyze_completion_context_fallback(source, _position)
+        self.analyze_completion_context_fallback(source, position)
+    }
+
+    fn byte_offset_for_position(source: &str, position: Position) -> usize {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut cursor_offset = 0;
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            if line_idx < position.line as usize {
+                cursor_offset += line.len() + 1;
+            } else if line_idx == position.line as usize {
+                cursor_offset += position.character.min(line.len() as u32) as usize;
+                break;
+            }
+        }
+
+        cursor_offset.min(source.len())
+    }
+
+    fn analyze_completed_keyword_context(
+        source: &str,
+        position: Position,
+    ) -> Option<CompletionContext> {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+
+        if text_before.trim_end().ends_with('.') {
+            return Some(CompletionContext::TableColumn);
+        }
+
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement = text_upper[statement_start..].trim_end();
+        if statement.is_empty() {
+            return None;
+        }
+
+        let words = Self::statement_words(statement);
+        if Self::words_end_with(&words, &["SELECT"])
+            || Self::words_end_with(&words, &["SELECT", "DISTINCT"])
+        {
+            return Some(CompletionContext::SelectClause);
+        }
+        if Self::words_end_with(&words, &["FROM"]) {
+            return Some(CompletionContext::FromClause);
+        }
+        if Self::words_end_with(&words, &["JOIN"])
+            || Self::words_end_with(&words, &["INNER", "JOIN"])
+            || Self::words_end_with(&words, &["LEFT", "JOIN"])
+            || Self::words_end_with(&words, &["RIGHT", "JOIN"])
+            || Self::words_end_with(&words, &["FULL", "JOIN"])
+            || Self::words_end_with(&words, &["CROSS", "JOIN"])
+        {
+            return Some(CompletionContext::JoinClause);
+        }
+        if Self::words_end_with(&words, &["WHERE"])
+            || Self::words_end_with(&words, &["AND"])
+            || Self::words_end_with(&words, &["OR"])
+            || Self::words_end_with(&words, &["NOT"])
+        {
+            return Some(CompletionContext::WhereClause);
+        }
+        if Self::words_end_with(&words, &["ORDER", "BY"]) {
+            return Some(CompletionContext::OrderByClause);
+        }
+        if Self::words_end_with(&words, &["GROUP", "BY"]) {
+            return Some(CompletionContext::GroupByClause);
+        }
+        if Self::words_end_with(&words, &["HAVING"]) {
+            return Some(CompletionContext::HavingClause);
+        }
+
+        None
     }
 
     /// Fallback heuristics for context analysis when AST is incomplete
@@ -696,21 +773,7 @@ impl SqlParser {
         source: &str,
         position: Position,
     ) -> CompletionContext {
-        // Convert LSP position (line, character) to byte offset
-        let lines: Vec<&str> = source.lines().collect();
-        let mut cursor_offset = 0;
-
-        // Add bytes for all complete lines before cursor
-        for (line_idx, line) in lines.iter().enumerate() {
-            if line_idx < position.line as usize {
-                cursor_offset += line.len() + 1; // +1 for newline
-            } else if line_idx == position.line as usize {
-                // Add characters up to cursor position in target line
-                cursor_offset += position.character.min(line.len() as u32) as usize;
-                break;
-            }
-        }
-
+        let cursor_offset = Self::byte_offset_for_position(source, position);
         // Extract text before cursor
         let text_before = if cursor_offset <= source.len() {
             &source[..cursor_offset]
@@ -1609,6 +1672,18 @@ mod tests {
         Position { line, character }
     }
 
+    fn analyzed_context_at_end(sql: &str) -> CompletionContext {
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should produce a tree");
+        let position = position_at_end(sql);
+        let node = parser
+            .get_node_at_position(tree, position)
+            .expect("cursor should map to an AST node");
+
+        parser.analyze_completion_context(node, sql, position)
+    }
+
     #[test]
     fn normalizes_quoted_identifier_paths() {
         assert_eq!(
@@ -1669,6 +1744,34 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(where_sql, position_at_end(where_sql)),
             CompletionContext::WhereClause
+        );
+    }
+
+    #[test]
+    fn completion_context_prefers_completed_clause_keywords_over_ast_noise() {
+        assert_eq!(
+            analyzed_context_at_end("SELECT"),
+            CompletionContext::SelectClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * from"),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where "),
+            CompletionContext::WhereClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users ORDER BY"),
+            CompletionContext::OrderByClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT name, count(*) FROM users GROUP BY"),
+            CompletionContext::GroupByClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT name, count(*) FROM users GROUP BY name HAVING"),
+            CompletionContext::HavingClause
         );
     }
 
