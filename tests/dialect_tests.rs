@@ -613,6 +613,24 @@ DELETE /users"#;
         "HTTP-style Elasticsearch requests should parse their JSON bodies without request-line errors"
     );
 
+    let incomplete_body = r#"GET /users/_search
+{"query":"#;
+    let incomplete_body_diagnostics = dialect.parse(incomplete_body, None).await;
+    assert!(
+        incomplete_body_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity
+                != Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)),
+        "interactive incomplete Elasticsearch JSON should not publish syntax errors"
+    );
+
+    let incomplete_dsl = dialect.parse(r#"{"query":{"term":{"#, None).await;
+    assert!(
+        incomplete_dsl.iter().all(|diagnostic| diagnostic.severity
+            != Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)),
+        "interactive incomplete Elasticsearch DSL should not publish syntax errors"
+    );
+
     let invalid_body = r#"GET /users/_search
 {"query":}"#;
     let invalid_body_diagnostics = dialect.parse(invalid_body, None).await;
@@ -743,7 +761,23 @@ async fn test_mongodb_dialect() {
         "valid MongoDB JSON should not produce syntax errors"
     );
 
-    let invalid = dialect.parse(r#"{"collection":"users""#, None).await;
+    let incomplete_samples = [
+        r#"{"collection":"users""#,
+        r#"{"collection":"#,
+        r#"{"find":{"email":"ada"#,
+    ];
+    for sample in incomplete_samples {
+        let diagnostics = dialect.parse(sample, None).await;
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity
+                    != Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)),
+            "interactive incomplete MongoDB JSON should not publish syntax errors for {sample:?}: {diagnostics:?}"
+        );
+    }
+
+    let invalid = dialect.parse(r#"{"collection":"users",}"#, None).await;
     assert!(invalid
         .iter()
         .any(|diagnostic| diagnostic.severity

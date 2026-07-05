@@ -1,4 +1,5 @@
 use crate::dialect::Dialect;
+use crate::parser::dsl::is_trailing_incomplete_json;
 use crate::schema::{Column, Schema, Table};
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
@@ -117,6 +118,7 @@ impl Dialect for MongoDbDialect {
 
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(value) => mongodb_command_hints(&value, json),
+            Err(error) if error.is_eof() && is_trailing_incomplete_json(trimmed) => Vec::new(),
             Err(error) => vec![json_error_diagnostic(error)],
         }
     }

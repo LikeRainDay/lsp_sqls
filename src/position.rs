@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::Position;
+use tower_lsp::lsp_types::{Diagnostic, Position};
 
 /// Convert an LSP UTF-16 position to the byte-based column expected by tree-sitter.
 pub fn lsp_position_to_byte_position(source: &str, position: Position) -> Position {
@@ -40,4 +40,28 @@ pub fn utf16_column_to_byte_offset(line: &str, character: u32) -> usize {
     }
 
     line.len()
+}
+
+pub fn byte_position_at_end(source: &str) -> Position {
+    let mut line = 0;
+    let mut character = 0;
+
+    for ch in source.chars() {
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf8() as u32;
+        }
+    }
+
+    Position { line, character }
+}
+
+pub fn diagnostic_reaches_position(diagnostic: &Diagnostic, position: Position) -> bool {
+    diagnostic.range.end.line > position.line
+        || (diagnostic.range.end.line == position.line
+            && diagnostic.range.end.character >= position.character.saturating_sub(1))
+        || (diagnostic.range.start.line == position.line
+            && diagnostic.range.start.character >= position.character.saturating_sub(1))
 }

@@ -74,6 +74,7 @@ impl DslParser {
             // Tree-sitter 即使有错误也能生成部分树
             // 检查是否有错误节点
             self.collect_errors(tree.root_node(), dsl, &mut diagnostics);
+            filter_trailing_incomplete_json_diagnostics(dsl, &mut diagnostics);
         } else {
             // 完全无法解析
             diagnostics.push(Diagnostic {
@@ -557,6 +558,74 @@ impl DslParser {
 
         None
     }
+}
+
+fn filter_trailing_incomplete_json_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
+    if !is_trailing_incomplete_json(source) {
+        return;
+    }
+
+    let eof = crate::position::byte_position_at_end(source);
+    diagnostics.retain(|diagnostic| !crate::position::diagnostic_reaches_position(diagnostic, eof));
+}
+
+pub(crate) fn is_trailing_incomplete_json(source: &str) -> bool {
+    let trimmed = source.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed
+        .chars()
+        .next_back()
+        .is_some_and(|ch| matches!(ch, '{' | '[' | ':' | ','))
+    {
+        return true;
+    }
+
+    let mut object_depth = 0usize;
+    let mut array_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut invalid_closer = false;
+
+    for ch in trimmed.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => object_depth += 1,
+            '[' => array_depth += 1,
+            '}' => {
+                if object_depth == 0 {
+                    invalid_closer = true;
+                    break;
+                }
+                object_depth -= 1;
+            }
+            ']' => {
+                if array_depth == 0 {
+                    invalid_closer = true;
+                    break;
+                }
+                array_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    !invalid_closer && (in_string || object_depth > 0 || array_depth > 0)
 }
 
 impl Default for DslParser {
