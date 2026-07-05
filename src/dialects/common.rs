@@ -127,7 +127,7 @@ pub(crate) fn create_table_item(
         deprecated: None,
         preselect: None,
         sort_text: Some(completion_sort_text("1", &table.name)),
-        filter_text: None,
+        filter_text: Some(table.name.clone()),
         insert_text: Some(label),
         insert_text_format: None,
         insert_text_mode: None,
@@ -162,7 +162,7 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         deprecated: None,
         preselect: None,
         sort_text: Some(completion_sort_text("2", &column.name)),
-        filter_text: None,
+        filter_text: Some(column.name.clone()),
         insert_text: Some(column.name.clone()),
         insert_text_format: None,
         insert_text_mode: None,
@@ -205,7 +205,7 @@ pub(crate) fn create_function_item(
         deprecated: None,
         preselect: None,
         sort_text: Some(completion_sort_text("1", &function.name)),
-        filter_text: None,
+        filter_text: Some(function.name.clone()),
         insert_text: Some(format!("{label}()")),
         insert_text_format: None,
         insert_text_mode: None,
@@ -403,8 +403,10 @@ mod tests {
 
         assert_eq!(unqualified.label, "users");
         assert_eq!(unqualified.insert_text.as_deref(), Some("users"));
+        assert_eq!(unqualified.filter_text.as_deref(), Some("users"));
         assert_eq!(qualified.label, "app.users");
         assert_eq!(qualified.insert_text.as_deref(), Some("app.users"));
+        assert_eq!(qualified.filter_text.as_deref(), Some("users"));
     }
 
     #[test]
@@ -422,6 +424,7 @@ mod tests {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "name");
+        assert_eq!(items[0].filter_text.as_deref(), Some("name"));
 
         let mut prefixed_items = Vec::new();
         add_schema_columns(
@@ -447,6 +450,9 @@ mod tests {
             .expect("schema-qualified function reference should match");
 
         assert_eq!(function.name, "calculate_score");
+        let item = create_function_item(function, &schema, true);
+        assert_eq!(item.label, "app.calculate_score");
+        assert_eq!(item.filter_text.as_deref(), Some("calculate_score"));
     }
 
     #[test]
