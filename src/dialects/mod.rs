@@ -35,12 +35,36 @@ impl DialectRegistry {
         };
 
         // 注册所有方言
-        registry.register(Arc::new(MysqlDialect::new()));
-        registry.register(Arc::new(PostgresDialect::new()));
-        registry.register(Arc::new(HiveDialect::new()));
-        registry.register(Arc::new(ElasticsearchEqlDialect::new()));
-        registry.register(Arc::new(ElasticsearchDslDialect::new()));
-        registry.register(Arc::new(ClickHouseDialect::new()));
+        let mysql = Arc::new(MysqlDialect::new());
+        registry.register(mysql.clone());
+        registry.register_alias("mariadb", mysql);
+
+        let postgres = Arc::new(PostgresDialect::new());
+        registry.register(postgres.clone());
+        registry.register_alias("postgresql", postgres.clone());
+        registry.register_alias("pgsql", postgres.clone());
+        registry.register_alias("psql", postgres);
+
+        let hive = Arc::new(HiveDialect::new());
+        registry.register(hive.clone());
+        registry.register_alias("hql", hive);
+
+        let elasticsearch_eql = Arc::new(ElasticsearchEqlDialect::new());
+        registry.register(elasticsearch_eql.clone());
+        registry.register_alias("eql", elasticsearch_eql.clone());
+        registry.register_alias("es-eql", elasticsearch_eql);
+
+        let elasticsearch_dsl = Arc::new(ElasticsearchDslDialect::new());
+        registry.register(elasticsearch_dsl.clone());
+        registry.register_alias("elasticsearch", elasticsearch_dsl.clone());
+        registry.register_alias("elastic", elasticsearch_dsl.clone());
+        registry.register_alias("es", elasticsearch_dsl.clone());
+        registry.register_alias("es-dsl", elasticsearch_dsl);
+
+        let clickhouse = Arc::new(ClickHouseDialect::new());
+        registry.register(clickhouse.clone());
+        registry.register_alias("ch", clickhouse);
+
         registry.register(Arc::new(RedisDialect::new()));
         let mongodb = Arc::new(MongoDbDialect::new());
         registry.register(mongodb.clone());

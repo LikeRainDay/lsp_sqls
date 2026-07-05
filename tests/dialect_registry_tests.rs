@@ -20,11 +20,23 @@ fn test_dialect_registry_get_by_name() {
     let registry = DialectRegistry::new();
 
     assert!(registry.get_by_name("mysql").is_some());
+    assert!(registry.get_by_name("mariadb").is_some());
     assert!(registry.get_by_name("postgres").is_some());
+    assert!(registry.get_by_name("postgresql").is_some());
+    assert!(registry.get_by_name("pgsql").is_some());
+    assert!(registry.get_by_name("psql").is_some());
     assert!(registry.get_by_name("hive").is_some());
+    assert!(registry.get_by_name("hql").is_some());
     assert!(registry.get_by_name("elasticsearch-eql").is_some());
+    assert!(registry.get_by_name("eql").is_some());
+    assert!(registry.get_by_name("es-eql").is_some());
     assert!(registry.get_by_name("elasticsearch-dsl").is_some());
+    assert!(registry.get_by_name("elasticsearch").is_some());
+    assert!(registry.get_by_name("elastic").is_some());
+    assert!(registry.get_by_name("es").is_some());
+    assert!(registry.get_by_name("es-dsl").is_some());
     assert!(registry.get_by_name("clickhouse").is_some());
+    assert!(registry.get_by_name("ch").is_some());
     assert!(registry.get_by_name("redis").is_some());
     assert!(registry.get_by_name("mongodb").is_some());
     assert!(registry.get_by_name("mongo").is_some());
