@@ -248,58 +248,75 @@ impl Dialect for ClickHouseDialect {
                 }
             }
             crate::parser::CompletionContext::WhereClause => {
+                let predicate_operator_expected =
+                    common::predicate_operator_expected(sql, position);
                 let where_keywords: Vec<&str> = keywords
                     .iter()
                     .filter(|&&k| {
-                        matches!(
-                            k,
-                            "AND"
-                                | "OR"
-                                | "NOT"
-                                | "IN"
-                                | "LIKE"
-                                | "ILIKE"
-                                | "BETWEEN"
-                                | "IS"
-                                | "NULL"
-                        )
+                        if predicate_operator_expected {
+                            matches!(
+                                k,
+                                "AND"
+                                    | "OR"
+                                    | "NOT"
+                                    | "IN"
+                                    | "LIKE"
+                                    | "ILIKE"
+                                    | "BETWEEN"
+                                    | "IS"
+                                    | "NULL"
+                            )
+                        } else {
+                            matches!(k, "NOT" | "NULL")
+                        }
                     })
                     .copied()
                     .collect();
-                for keyword in where_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
-                let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
-                for op in operators {
-                    items.push(CompletionItem {
-                        label: op.to_string(),
-                        kind: Some(CompletionItemKind::OPERATOR),
-                        detail: Some(format!("Operator: {}", op)),
-                        documentation: None,
-                        deprecated: None,
-                        preselect: None,
-                        sort_text: Some(format!("1{}", op)),
-                        filter_text: None,
-                        insert_text: Some(op.to_string()),
-                        insert_text_format: None,
-                        insert_text_mode: None,
-                        text_edit: None,
-                        additional_text_edits: None,
-                        commit_characters: None,
-                        command: None,
-                        data: None,
-                        tags: None,
-                        label_details: None,
-                    });
-                }
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
+
+                if !predicate_operator_expected {
+                    if let Some(schema) = schema {
+                        for table in &schema.tables {
+                            for column in &table.columns {
+                                let mut item = self.create_column_item(
+                                    column,
+                                    Some(&format!("{}.{}", schema.database, table.name)),
+                                );
+                                item.sort_text = Some(format!("0{}", column.name));
+                                items.push(item);
+                            }
                         }
+                    }
+                }
+
+                for keyword in where_keywords {
+                    let mut item = self.create_keyword_item(keyword);
+                    item.sort_text = Some(format!("1{}", keyword));
+                    items.push(item);
+                }
+
+                if predicate_operator_expected {
+                    let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
+                    for op in operators {
+                        items.push(CompletionItem {
+                            label: op.to_string(),
+                            kind: Some(CompletionItemKind::OPERATOR),
+                            detail: Some(format!("Operator: {}", op)),
+                            documentation: None,
+                            deprecated: None,
+                            preselect: None,
+                            sort_text: Some(format!("1{}", op)),
+                            filter_text: None,
+                            insert_text: Some(op.to_string()),
+                            insert_text_format: None,
+                            insert_text_mode: None,
+                            text_edit: None,
+                            additional_text_edits: None,
+                            commit_characters: None,
+                            command: None,
+                            data: None,
+                            tags: None,
+                            label_details: None,
+                        });
                     }
                 }
             }

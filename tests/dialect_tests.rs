@@ -775,6 +775,70 @@ async fn test_hive_dialect() {
         )
         .await;
     assert!(items_default.iter().any(|item| item.label == "PARTITION"));
+
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "default".to_string(),
+        tables: vec![Table {
+            name: "events".to_string(),
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: "INT".to_string(),
+                nullable: false,
+                source_location: None,
+                ..Default::default()
+            }],
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+    let where_start_sql = "SELECT * FROM events WHERE ";
+    let where_start_items = dialect
+        .completion(
+            where_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_start_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "Hive WHERE start should include field candidates: {where_start_items:?}"
+    );
+    assert!(
+        !where_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "Hive WHERE start should not suggest operators before a left-side expression: {where_start_items:?}"
+    );
+
+    let where_operator_sql = "SELECT * FROM events WHERE id ";
+    let where_operator_items = dialect
+        .completion(
+            where_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_operator_items.iter().any(|item| item.label == "="),
+        "Hive WHERE operator position should include comparison operators: {where_operator_items:?}"
+    );
+    assert!(
+        !where_operator_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "Hive WHERE operator position should not keep returning fields: {where_operator_items:?}"
+    );
 }
 
 #[tokio::test]
@@ -1060,6 +1124,70 @@ async fn test_clickhouse_dialect() {
         )
         .await;
     assert!(items_default.iter().any(|item| item.label == "MergeTree"));
+
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "default".to_string(),
+        tables: vec![Table {
+            name: "events".to_string(),
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: "UInt64".to_string(),
+                nullable: false,
+                source_location: None,
+                ..Default::default()
+            }],
+            source_location: None,
+            ..Default::default()
+        }],
+        functions: vec![],
+        source_uri: None,
+    };
+    let where_start_sql = "SELECT * FROM events WHERE ";
+    let where_start_items = dialect
+        .completion(
+            where_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_start_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "ClickHouse WHERE start should include field candidates: {where_start_items:?}"
+    );
+    assert!(
+        !where_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "ClickHouse WHERE start should not suggest operators before a left-side expression: {where_start_items:?}"
+    );
+
+    let where_operator_sql = "SELECT * FROM events WHERE id ";
+    let where_operator_items = dialect
+        .completion(
+            where_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_operator_items.iter().any(|item| item.label == "="),
+        "ClickHouse WHERE operator position should include comparison operators: {where_operator_items:?}"
+    );
+    assert!(
+        !where_operator_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "ClickHouse WHERE operator position should not keep returning fields: {where_operator_items:?}"
+    );
 }
 
 #[tokio::test]
