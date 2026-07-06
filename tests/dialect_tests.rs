@@ -240,6 +240,54 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
         !where_alias_items.iter().any(|item| item.label == "name"),
         "WHERE alias member completion should stay scoped to the aliased table"
     );
+
+    let subquery_sql = "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE ";
+    let subquery_items = dialect
+        .completion(
+            subquery_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: subquery_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        subquery_items
+            .iter()
+            .any(|item| item.label == "order_id" || item.label == "orders.order_id"),
+        "subquery WHERE should suggest columns from the subquery table"
+    );
+    assert!(
+        !subquery_items
+            .iter()
+            .any(|item| item.label == "users.name" || item.label == "name"),
+        "subquery WHERE should not suggest outer query columns"
+    );
+
+    let cte_sql = "WITH recent_orders AS (SELECT * FROM orders) SELECT * FROM users WHERE ";
+    let cte_items = dialect
+        .completion(
+            cte_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: cte_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        cte_items.iter().any(|item| item.label == "id"),
+        "CTE main query should suggest users columns"
+    );
+    assert!(
+        !cte_items
+            .iter()
+            .any(|item| item.label == "orders.order_id" || item.label == "order_id"),
+        "CTE main query should not suggest columns from CTE body tables"
+    );
 }
 
 #[tokio::test]

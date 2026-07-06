@@ -350,12 +350,39 @@ async fn test_comprehensive_completion_scenarios() {
     )
     .await;
 
-    // 子查询中应该显示列名（可能带表前缀，因为解析器可能检测到外部查询的多表）
+    // 子查询中应该只显示当前子查询表的列名，不应混入外层 users。
     assert!(
         items7
             .iter()
             .any(|item| item.label.contains("order_id") || item.label.contains("status")),
         "Subquery should suggest column names"
+    );
+    assert!(
+        !items7
+            .iter()
+            .any(|item| item.label.contains("users.") || item.label == "email"),
+        "Subquery WHERE should not suggest outer users columns"
+    );
+
+    println!("\n=== Test 7b: CTE main query scope ===");
+    let sql7b = "WITH recent_orders AS (SELECT * FROM orders WHERE status = 'open') SELECT * FROM users WHERE ";
+    let items7b = test_completion_with_log(
+        &dialect,
+        "CTE main query WHERE clause",
+        sql7b,
+        0,
+        sql7b.len() as u32,
+        Some(&schema),
+    )
+    .await;
+
+    assert!(
+        items7b.iter().any(|item| item.label == "id"),
+        "CTE main query should suggest users.id"
+    );
+    assert!(
+        !items7b.iter().any(|item| item.label.contains("orders.")),
+        "CTE main query should not suggest CTE body table columns"
     );
 
     // ==================== 场景8: 无 Schema 的补全 ====================

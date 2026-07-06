@@ -313,6 +313,7 @@ pub(crate) fn table_column_reference_at_position(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn referenced_table_names(
     parser: &SqlParser,
     tree: &tree_sitter::Tree,
@@ -320,6 +321,22 @@ pub(crate) fn referenced_table_names(
 ) -> Vec<String> {
     let referenced_tables = parser.extract_referenced_tables(tree, sql);
     let aliases = parser.extract_aliases(tree, sql);
+    let mut seen = HashSet::new();
+    referenced_tables
+        .iter()
+        .map(|table| aliases.get(table).unwrap_or(table).clone())
+        .filter(|table| seen.insert(table.to_ascii_lowercase()))
+        .collect()
+}
+
+pub(crate) fn referenced_table_names_at_position(
+    parser: &SqlParser,
+    tree: &tree_sitter::Tree,
+    sql: &str,
+    position: Position,
+) -> Vec<String> {
+    let referenced_tables = parser.extract_referenced_tables_at_position(tree, sql, position);
+    let aliases = parser.extract_aliases_at_position(tree, sql, position);
     let mut seen = HashSet::new();
     referenced_tables
         .iter()

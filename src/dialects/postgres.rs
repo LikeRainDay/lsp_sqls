@@ -83,12 +83,13 @@ impl PostgresDialect {
         common::cursor_has_identifier_qualifier(sql, position)
     }
 
-    fn referenced_table_names(
+    fn referenced_table_names_at_position(
         parser: &SqlParser,
         tree: &tree_sitter::Tree,
         sql: &str,
+        position: Position,
     ) -> Vec<String> {
-        common::referenced_table_names(parser, tree, sql)
+        common::referenced_table_names_at_position(parser, tree, sql, position)
     }
 
     fn add_schema_columns(
@@ -168,7 +169,9 @@ impl Dialect for PostgresDialect {
                     let referenced_tables = parse_result
                         .tree
                         .as_ref()
-                        .map(|tree| Self::referenced_table_names(&parser, tree, sql))
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
                         .unwrap_or_default();
                     let use_table_prefix = referenced_tables.len() > 1;
 
@@ -208,7 +211,8 @@ impl Dialect for PostgresDialect {
                 );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let referenced_tables =
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
                         let use_table_prefix = referenced_tables.len() > 1;
                         self.add_schema_columns(
                             &mut items,
@@ -278,7 +282,8 @@ impl Dialect for PostgresDialect {
                 );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let referenced_tables =
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
                         let use_table_prefix = referenced_tables.len() > 1;
                         self.add_schema_columns(
                             &mut items,
@@ -310,7 +315,8 @@ impl Dialect for PostgresDialect {
                 );
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
-                        let referenced_tables = Self::referenced_table_names(&parser, tree, sql);
+                        let referenced_tables =
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
                         let use_table_prefix = referenced_tables.len() > 1;
                         self.add_schema_columns(
                             &mut items,
