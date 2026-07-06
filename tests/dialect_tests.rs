@@ -410,16 +410,38 @@ async fn test_postgres_completion_keeps_relation_targets_separate_from_column_ta
         .find(|item| item.label == "id")
         .expect("WHERE completion should include columns from the selected table");
     assert_eq!(id_column.sort_text.as_deref(), Some("0:id"));
-    let operator = where_items
-        .iter()
-        .find(|item| item.label == "!=")
-        .expect("WHERE completion should still include operators");
-    assert_eq!(operator.sort_text.as_deref(), Some("1:!="));
+    assert!(
+        !where_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "WHERE clause start should prioritize expression candidates, not comparison operators: {where_items:?}"
+    );
     assert!(
         !where_items
             .iter()
             .any(|item| item.label == "form_background_url"),
         "WHERE completion should stay scoped to public.casbin_api_rule: {where_items:?}"
+    );
+
+    let operator_sql = "SELECT * FROM public.casbin_api_rule where id ";
+    let operator_items = dialect
+        .completion(
+            operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    let operator = operator_items
+        .iter()
+        .find(|item| item.label == "!=")
+        .expect("WHERE completion should include operators after a left-side expression");
+    assert_eq!(operator.sort_text.as_deref(), Some("1:!="));
+    assert!(
+        !operator_items.iter().any(|item| item.label == "id"),
+        "WHERE operator position should not keep returning column candidates: {operator_items:?}"
     );
 }
 
@@ -591,6 +613,52 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     assert!(
         !where_prefix_items.iter().any(|item| item.label == "LIKE"),
         "WHERE prefix should filter unrelated MySQL operators: {where_prefix_items:?}"
+    );
+
+    let where_start_sql = "SELECT * FROM orders WHERE ";
+    let where_start_items = dialect
+        .completion(
+            where_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_start_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "WHERE clause start should include MySQL columns: {where_start_items:?}"
+    );
+    assert!(
+        !where_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "WHERE clause start should not suggest MySQL operators before a left-side expression: {where_start_items:?}"
+    );
+
+    let where_operator_sql = "SELECT * FROM orders WHERE order_id ";
+    let where_operator_items = dialect
+        .completion(
+            where_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        where_operator_items.iter().any(|item| item.label == "LIKE"),
+        "WHERE completion should include MySQL operators after a left-side expression: {where_operator_items:?}"
+    );
+    assert!(
+        !where_operator_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "WHERE operator position should not keep returning MySQL columns: {where_operator_items:?}"
     );
 
     let unqualified_table_items = dialect
@@ -1457,6 +1525,12 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
         where_items.iter().any(|item| item.label == "ptype"),
         "WHERE completion should suggest columns from the referenced table"
     );
+    assert!(
+        !where_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "WHERE keyword completion should not lead with comparison operators: {where_items:?}"
+    );
 
     let where_space_sql = "SELECT * from public.casbin_api_rule where ";
     let where_space_items = dialect
@@ -1473,6 +1547,12 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
         where_space_items.first().map(|item| item.label.as_str()),
         Some("id"),
         "WHERE completion should return columns before operators without relying on client-side sorting: {where_space_items:?}"
+    );
+    assert!(
+        !where_space_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "WHERE clause start should suggest fields before the user has a left-side expression: {where_space_items:?}"
     );
 
     let where_prefix_sql = "SELECT * from public.casbin_api_rule where pt";
@@ -1803,10 +1883,12 @@ async fn test_intelligent_completion_logging() {
     )
     .await;
 
-    // WHERE clause should suggest keyword operators and columns, NOT symbol operators or general keywords
+    // WHERE clause start should suggest expression candidates, not comparison operators.
     assert!(
-        items1.iter().any(|item| item.label == "LIKE"),
-        "Should suggest operator 'LIKE'"
+        !items1
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "Should not suggest operators before a WHERE left-side expression"
     );
     // Single-table query: expect simple column names without table prefix
     assert!(
@@ -1823,6 +1905,21 @@ async fn test_intelligent_completion_logging() {
             .iter()
             .any(|item| item.label == "SELECT" || item.label == "INSERT"),
         "Should NOT suggest general SQL keywords in WHERE clause"
+    );
+
+    let sql1_operator = "SELECT * FROM users WHERE id ";
+    let items1_operator = test_completion_with_log(
+        &dialect,
+        "MySQL - Where Clause Operator Position",
+        sql1_operator,
+        0,
+        sql1_operator.len() as u32,
+        Some(&schema),
+    )
+    .await;
+    assert!(
+        items1_operator.iter().any(|item| item.label == "LIKE"),
+        "Should suggest operator 'LIKE' after a WHERE left-side expression"
     );
 
     // 场景 2: Column Completion (SELECT Context)

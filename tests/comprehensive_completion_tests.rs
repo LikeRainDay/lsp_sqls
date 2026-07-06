@@ -398,16 +398,33 @@ async fn test_comprehensive_completion_scenarios() {
     )
     .await;
 
-    // 没有 schema 时，应该只返回关键字形式的运算符，不返回列名
+    // 没有 schema 且还没有左侧表达式时，不应该返回比较运算符或列名
     assert!(
-        items8.iter().any(|item| item.label == "LIKE"),
-        "Should suggest keyword operators even without schema"
+        !items8
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "Should not suggest operators before a WHERE left-side expression without schema"
     );
     assert!(
         !items8
             .iter()
             .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FIELD)),
         "Should NOT suggest columns without schema"
+    );
+
+    let sql8_operator = "SELECT * FROM users WHERE id ";
+    let items8_operator = test_completion_with_log(
+        &dialect,
+        "No schema - WHERE operator position",
+        sql8_operator,
+        0,
+        sql8_operator.len() as u32,
+        None,
+    )
+    .await;
+    assert!(
+        items8_operator.iter().any(|item| item.label == "LIKE"),
+        "Should suggest keyword operators after a WHERE left-side expression even without schema"
     );
 
     // ==================== 场景9: FROM 子句表名补全 ====================

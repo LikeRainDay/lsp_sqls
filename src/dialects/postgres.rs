@@ -209,33 +209,42 @@ impl Dialect for PostgresDialect {
                     position,
                     &["where", "and", "or", "not"],
                 );
-                if let Some(schema) = schema {
-                    if let Some(tree) = &parse_result.tree {
-                        let referenced_tables =
-                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
-                        let use_table_prefix = referenced_tables.len() > 1;
-                        self.add_schema_columns(
+                let predicate_operator_expected =
+                    common::predicate_operator_expected(sql, position);
+                if !predicate_operator_expected {
+                    if let Some(schema) = schema {
+                        if let Some(tree) = &parse_result.tree {
+                            let referenced_tables = Self::referenced_table_names_at_position(
+                                &parser, tree, sql, position,
+                            );
+                            let use_table_prefix = referenced_tables.len() > 1;
+                            self.add_schema_columns(
+                                &mut items,
+                                schema,
+                                &referenced_tables,
+                                use_table_prefix,
+                                &prefix,
+                                "0",
+                            );
+                        }
+                        self.add_schema_functions(
                             &mut items,
                             schema,
-                            &referenced_tables,
-                            use_table_prefix,
                             &prefix,
-                            "0",
+                            "1",
+                            Self::cursor_has_identifier_qualifier(sql, position),
                         );
                     }
-                    self.add_schema_functions(
-                        &mut items,
-                        schema,
-                        &prefix,
-                        "1",
-                        Self::cursor_has_identifier_qualifier(sql, position),
-                    );
                 }
 
-                let where_keywords = vec![
-                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS", "NULL",
-                    "TRUE", "FALSE",
-                ];
+                let where_keywords = if predicate_operator_expected {
+                    vec![
+                        "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS",
+                        "NULL", "TRUE", "FALSE",
+                    ]
+                } else {
+                    vec!["NOT", "TRUE", "FALSE"]
+                };
                 for keyword in where_keywords {
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;
@@ -246,30 +255,32 @@ impl Dialect for PostgresDialect {
                 }
 
                 let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
-                for op in operators {
-                    if !prefix.is_empty() && !op.to_lowercase().starts_with(&prefix) {
-                        continue;
+                if predicate_operator_expected {
+                    for op in operators {
+                        if !prefix.is_empty() && !op.to_lowercase().starts_with(&prefix) {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: op.to_string(),
+                            kind: Some(CompletionItemKind::OPERATOR),
+                            detail: Some(format!("Operator: {}", op)),
+                            documentation: None,
+                            deprecated: None,
+                            preselect: None,
+                            sort_text: Some(common::completion_sort_text("1", op)),
+                            filter_text: None,
+                            insert_text: Some(op.to_string()),
+                            insert_text_format: None,
+                            insert_text_mode: None,
+                            text_edit: None,
+                            additional_text_edits: None,
+                            commit_characters: None,
+                            command: None,
+                            data: None,
+                            tags: None,
+                            label_details: None,
+                        });
                     }
-                    items.push(CompletionItem {
-                        label: op.to_string(),
-                        kind: Some(CompletionItemKind::OPERATOR),
-                        detail: Some(format!("Operator: {}", op)),
-                        documentation: None,
-                        deprecated: None,
-                        preselect: None,
-                        sort_text: Some(common::completion_sort_text("1", op)),
-                        filter_text: None,
-                        insert_text: Some(op.to_string()),
-                        insert_text_format: None,
-                        insert_text_mode: None,
-                        text_edit: None,
-                        additional_text_edits: None,
-                        commit_characters: None,
-                        command: None,
-                        data: None,
-                        tags: None,
-                        label_details: None,
-                    });
                 }
             }
 

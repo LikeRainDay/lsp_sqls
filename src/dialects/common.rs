@@ -37,6 +37,59 @@ pub(crate) fn cursor_has_identifier_qualifier(sql: &str, position: Position) -> 
     cursor_identifier_token(text_before).contains('.')
 }
 
+pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool {
+    let text_before = text_before_position(sql, position);
+    if text_before.is_empty() {
+        return false;
+    }
+
+    if !text_before
+        .chars()
+        .last()
+        .is_some_and(|ch| ch.is_whitespace())
+    {
+        return false;
+    }
+
+    let trimmed = text_before.trim_end();
+    let Some(last_char) = trimmed.chars().last() else {
+        return false;
+    };
+    if matches!(
+        last_char,
+        '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%' | '(' | ',' | '.'
+    ) {
+        return false;
+    }
+
+    let last_token = trimmed
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
+        .filter(|token| !token.is_empty())
+        .next_back()
+        .unwrap_or("")
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '[' | ']'));
+    let last_token_upper = last_token.to_ascii_uppercase();
+
+    !matches!(
+        last_token_upper.as_str(),
+        "WHERE"
+            | "ON"
+            | "HAVING"
+            | "AND"
+            | "OR"
+            | "NOT"
+            | "SET"
+            | "WHEN"
+            | "THEN"
+            | "ELSE"
+            | "LIKE"
+            | "ILIKE"
+            | "IN"
+            | "BETWEEN"
+            | "IS"
+    )
+}
+
 pub(crate) fn cursor_identifier_token(text_before: &str) -> &str {
     let mut token_start = 0;
     let mut quote_end: Option<char> = None;
@@ -65,6 +118,22 @@ pub(crate) fn cursor_identifier_token(text_before: &str) -> &str {
     }
 
     &text_before[token_start..]
+}
+
+fn text_before_position(sql: &str, position: Position) -> &str {
+    let lines: Vec<&str> = sql.lines().collect();
+    let mut offset = 0usize;
+
+    for (line_index, line_text) in lines.iter().enumerate() {
+        if line_index < position.line as usize {
+            offset += line_text.len() + 1;
+        } else if line_index == position.line as usize {
+            offset += position.character.min(line_text.len() as u32) as usize;
+            break;
+        }
+    }
+
+    sql.get(..offset.min(sql.len())).unwrap_or(sql)
 }
 
 pub(crate) fn completion_sort_text(sort_prefix: &str, label: &str) -> String {
