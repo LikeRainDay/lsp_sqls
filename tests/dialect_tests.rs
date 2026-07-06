@@ -243,6 +243,113 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
 }
 
 #[tokio::test]
+async fn test_postgres_completion_keeps_relation_targets_separate_from_column_targets() {
+    let dialect = PostgresDialect::new();
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "public".to_string(),
+        tables: vec![
+            Table {
+                name: "form".to_string(),
+                columns: vec![
+                    Column {
+                        name: "form_background_url".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "form_css".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+            Table {
+                name: "casbin_api_rule".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "owner".to_string(),
+                        data_type: "varchar".to_string(),
+                        nullable: true,
+                        source_location: None,
+                        ..Default::default()
+                    },
+                ],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let from_sql = "SELECT * from";
+    let from_items = dialect
+        .completion(
+            from_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: from_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        from_items.iter().any(|item| item.label == "public.form"),
+        "FROM completion should include relation targets: {from_items:?}"
+    );
+    assert!(
+        !from_items
+            .iter()
+            .any(|item| item.label == "form_background_url" || item.label == "form_css"),
+        "FROM completion must not leak similarly-prefixed column names: {from_items:?}"
+    );
+
+    let where_sql = "SELECT * FROM public.casbin_api_rule where";
+    let where_items = dialect
+        .completion(
+            where_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: where_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    let id_column = where_items
+        .iter()
+        .find(|item| item.label == "id")
+        .expect("WHERE completion should include columns from the selected table");
+    assert_eq!(id_column.sort_text.as_deref(), Some("0:id"));
+    let operator = where_items
+        .iter()
+        .find(|item| item.label == "!=")
+        .expect("WHERE completion should still include operators");
+    assert_eq!(operator.sort_text.as_deref(), Some("1:!="));
+    assert!(
+        !where_items
+            .iter()
+            .any(|item| item.label == "form_background_url"),
+        "WHERE completion should stay scoped to public.casbin_api_rule: {where_items:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_postgres_completion_uses_utf16_lsp_positions() {
     let dialect = PostgresDialect::new();
     let schema = Schema {
