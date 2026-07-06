@@ -266,11 +266,13 @@ fn completed_sql_context_keyword_at_position(text: &str, position: Position) -> 
 fn apply_completed_sql_context_completion_edits(
     text: &str,
     position: Position,
-    items: &mut [CompletionItem],
+    items: &mut Vec<CompletionItem>,
 ) {
     let Some(keyword) = completed_sql_context_keyword_at_position(text, position) else {
         return;
     };
+    items.retain(|item| completion_item_allowed_after_completed_keyword(&keyword, item));
+
     let range = Range {
         start: position,
         end: position,
@@ -287,6 +289,31 @@ fn apply_completed_sql_context_completion_edits(
             new_text: format!(" {insert_text}"),
         }));
     }
+}
+
+fn completion_item_allowed_after_completed_keyword(keyword: &str, item: &CompletionItem) -> bool {
+    match keyword {
+        "from" | "join" | "into" => is_relation_completion_kind(item.kind),
+        "select" => !is_relation_completion_kind(item.kind),
+        "where" | "on" | "by" | "having" | "values" | "set" => {
+            !is_relation_completion_kind(item.kind)
+        }
+        "limit" | "offset" => true,
+        _ => true,
+    }
+}
+
+fn is_relation_completion_kind(kind: Option<CompletionItemKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            CompletionItemKind::CLASS
+                | CompletionItemKind::STRUCT
+                | CompletionItemKind::MODULE
+                | CompletionItemKind::FILE
+                | CompletionItemKind::FOLDER
+        )
+    )
 }
 
 fn qualified_identifier_range_at_position(text: &str, position: Position) -> Option<Range> {
@@ -994,7 +1021,7 @@ mod tests {
     };
     use crate::schema::{Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
-    use tower_lsp::lsp_types::{CompletionItem, CompletionTextEdit, Position};
+    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, Position};
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
         Schema {
@@ -1333,6 +1360,7 @@ mod tests {
         };
         let mut items = vec![CompletionItem {
             label: "public.users".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
             insert_text: Some("public.users".to_string()),
             ..Default::default()
         }];
@@ -1346,6 +1374,83 @@ mod tests {
         assert_eq!(text_edit.range.start, position);
         assert_eq!(text_edit.range.end, position);
         assert_eq!(text_edit.new_text, " public.users");
+    }
+
+    #[test]
+    fn completion_after_from_keyword_drops_non_relation_items() {
+        let sql = "SELECT * from";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![
+            CompletionItem {
+                label: "public.webhook".to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                insert_text: Some("public.webhook".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "form_background_url".to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                insert_text: Some("form_background_url".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "FROM".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                insert_text: Some("FROM".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        apply_completed_sql_context_completion_edits(sql, position, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "public.webhook");
+        assert_eq!(items[0].filter_text.as_deref(), Some("from"));
+    }
+
+    #[test]
+    fn completion_after_where_keyword_drops_relation_items() {
+        let sql = "SELECT * FROM public.webhook where";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![
+            CompletionItem {
+                label: "owner".to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                insert_text: Some("owner".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "public.form".to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                insert_text: Some("public.form".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "LIKE".to_string(),
+                kind: Some(CompletionItemKind::OPERATOR),
+                insert_text: Some("LIKE".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        apply_completed_sql_context_completion_edits(sql, position, &mut items);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["owner", "LIKE"]
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.filter_text.as_deref() == Some("where")));
     }
 
     #[test]
