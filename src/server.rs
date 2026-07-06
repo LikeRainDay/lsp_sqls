@@ -460,7 +460,7 @@ fn infer_schema_id_from_text(text: &str, schema_manager: &SchemaManager) -> Opti
     let mut parser = SqlParser::new();
     let parse_result = parser.parse(text);
     let tree = parse_result.tree?;
-    let tables = parser.extract_tables(&tree, text);
+    let tables = parser.extract_referenced_tables(&tree, text);
     if tables.is_empty() {
         return None;
     }
@@ -1094,6 +1094,26 @@ mod tests {
 
         assert_eq!(
             infer_schema_id_from_tables(&["users".to_string(), "orders".to_string()], &manager),
+            Some(app_id)
+        );
+    }
+
+    #[test]
+    fn schema_inference_ignores_cte_references_when_scoring_tables() {
+        let manager = SchemaManager::new();
+        let app_id = manager.register(test_schema("app", &["users"]));
+        manager.register(test_schema("scratch", &["recent_users"]));
+        let configured = DashMap::new();
+        let inferred = DashMap::new();
+
+        assert_eq!(
+            schema_id_for_file(
+                "file:///cte.sql",
+                Some("WITH recent_users AS (SELECT * FROM app.users) SELECT * FROM recent_users"),
+                &configured,
+                &inferred,
+                &manager,
+            ),
             Some(app_id)
         );
     }
