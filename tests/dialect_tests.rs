@@ -241,6 +241,32 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
         "WHERE alias member completion should stay scoped to the aliased table"
     );
 
+    let outer_alias_after_subquery_sql =
+        "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders u WHERE u.user_id = u.id) AND u.";
+    let outer_alias_after_subquery_items = dialect
+        .completion(
+            outer_alias_after_subquery_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: outer_alias_after_subquery_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        outer_alias_after_subquery_items
+            .iter()
+            .any(|item| item.label == "name"),
+        "outer alias member completion should use the outer alias table"
+    );
+    assert!(
+        !outer_alias_after_subquery_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "outer alias member completion should not use same-named subquery aliases"
+    );
+
     let subquery_sql = "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE ";
     let subquery_items = dialect
         .completion(
@@ -600,6 +626,31 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     assert_eq!(
         qualified_table_item.insert_text.as_deref(),
         Some("shop.users")
+    );
+
+    let outer_alias_after_subquery_sql =
+        "SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders u WHERE u.user_id = u.id) AND u.";
+    let outer_alias_after_subquery_items = dialect
+        .completion(
+            outer_alias_after_subquery_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: outer_alias_after_subquery_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        outer_alias_after_subquery_items
+            .iter()
+            .any(|item| item.label == "name"),
+        "outer MySQL alias should resolve to users after a same-named subquery alias"
+    );
+    assert!(
+        !outer_alias_after_subquery_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "outer MySQL alias should not resolve to same-named subquery alias"
     );
 
     let on_alias_sql = "SELECT * FROM users u JOIN orders o ON u.";

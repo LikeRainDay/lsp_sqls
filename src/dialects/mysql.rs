@@ -446,7 +446,7 @@ impl Dialect for MysqlDialect {
                         common::table_column_reference_at_position(&parser, tree, sql, position)
                     {
                         if let Some(schema) = schema {
-                            let aliases = parser.extract_aliases(tree, sql);
+                            let aliases = parser.extract_aliases_at_position(tree, sql, position);
 
                             // Resolve alias to real table name
                             let real_table_name = aliases.get(&table_name).unwrap_or(&table_name);

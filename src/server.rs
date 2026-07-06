@@ -909,7 +909,7 @@ fn schema_for_table_column_at_position(
             let node = parser.get_node_at_position(tree, byte_position)?;
             parser.get_table_name_for_column(node, text)
         })?;
-    let aliases = parser.extract_aliases(tree, text);
+    let aliases = parser.extract_aliases_at_position(tree, text, byte_position);
     let table_reference = aliases
         .get(&table_name)
         .map(String::as_str)
