@@ -289,6 +289,103 @@ fn apply_completed_sql_context_completion_edits(
     }
 }
 
+fn qualified_identifier_range_at_position(text: &str, position: Position) -> Option<Range> {
+    let offset = position_to_byte_offset(text, position);
+    let text_before = text.get(..offset)?;
+    let token_start = identifier_path_start_before_cursor(text_before)?;
+    let token = text_before[token_start..].trim();
+
+    token.contains('.').then_some(Range {
+        start: byte_offset_to_lsp_position(text, token_start),
+        end: position,
+    })
+}
+
+fn identifier_path_start_before_cursor(text_before: &str) -> Option<usize> {
+    let mut token_start = 0;
+    let mut quote_end: Option<char> = None;
+    let mut chars = text_before.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        if let Some(end_quote) = quote_end {
+            if ch == end_quote {
+                if chars.peek().is_some_and(|(_, next)| *next == end_quote) {
+                    chars.next();
+                    continue;
+                }
+                quote_end = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '\'' | '`' => quote_end = Some(ch),
+            '[' => quote_end = Some(']'),
+            _ if is_identifier_path_boundary(ch) => token_start = index + ch.len_utf8(),
+            _ => {}
+        }
+    }
+
+    (token_start < text_before.len()).then_some(token_start)
+}
+
+fn is_identifier_path_boundary(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | '(' | ')' | ';' | '=' | '<' | '>' | '!' | '+' | '-' | '*' | '/' | '%'
+        )
+}
+
+fn byte_offset_to_lsp_position(text: &str, target_offset: usize) -> Position {
+    let target_offset = target_offset.min(text.len());
+    let mut line = 0u32;
+    let mut character = 0u32;
+
+    for (byte_index, ch) in text.char_indices() {
+        if byte_index >= target_offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf16() as u32;
+        }
+    }
+
+    Position { line, character }
+}
+
+fn apply_qualified_identifier_completion_edits(
+    text: &str,
+    position: Position,
+    items: &mut [CompletionItem],
+) {
+    let Some(range) = qualified_identifier_range_at_position(text, position) else {
+        return;
+    };
+
+    for item in items {
+        if item.text_edit.is_some() {
+            continue;
+        }
+
+        let insert_text = item
+            .insert_text
+            .clone()
+            .unwrap_or_else(|| item.label.clone());
+        if !insert_text.contains('.') {
+            continue;
+        }
+
+        item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+            range,
+            new_text: insert_text,
+        }));
+    }
+}
+
 fn calculate_schema_match_score(tables: &[String], schema: &Schema) -> i32 {
     use crate::parser::SqlParser;
 
@@ -644,6 +741,7 @@ impl LanguageServer for SqlLspServer {
                 .completion_with_context(&text, position, schema.as_ref(), params.context.as_ref())
                 .await;
             apply_completed_sql_context_completion_edits(&text, position, &mut items);
+            apply_qualified_identifier_completion_edits(&text, position, &mut items);
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
@@ -888,11 +986,11 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_completed_sql_context_completion_edits, calculate_schema_match_score,
-        completed_sql_context_keyword_at_position, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, position_to_byte_offset, schema_for_table_column_at_position,
-        schema_id_for_file, schema_qualifier_at_position,
+        apply_completed_sql_context_completion_edits, apply_qualified_identifier_completion_edits,
+        calculate_schema_match_score, completed_sql_context_keyword_at_position,
+        find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
     };
     use crate::schema::{Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
@@ -1249,6 +1347,74 @@ mod tests {
         assert_eq!(items[0].filter_text.as_deref(), Some("id"));
         assert!(items[0].text_edit.is_none());
         assert_eq!(items[0].insert_text.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn completion_after_qualified_identifier_replaces_full_identifier_path() {
+        let sql = "SELECT * FROM public.us";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![CompletionItem {
+            label: "public.users".to_string(),
+            insert_text: Some("public.users".to_string()),
+            ..Default::default()
+        }];
+
+        apply_qualified_identifier_completion_edits(sql, position, &mut items);
+
+        let Some(CompletionTextEdit::Edit(text_edit)) = &items[0].text_edit else {
+            panic!("qualified completion should use a text edit");
+        };
+        assert_eq!(
+            text_edit.range.start,
+            Position {
+                line: 0,
+                character: "SELECT * FROM ".len() as u32,
+            }
+        );
+        assert_eq!(text_edit.range.end, position);
+        assert_eq!(text_edit.new_text, "public.users");
+    }
+
+    #[test]
+    fn qualified_completion_edit_preserves_function_call_insert_text() {
+        let sql = "SELECT test_db.calc";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![CompletionItem {
+            label: "test_db.calculate_score".to_string(),
+            insert_text: Some("test_db.calculate_score()".to_string()),
+            ..Default::default()
+        }];
+
+        apply_qualified_identifier_completion_edits(sql, position, &mut items);
+
+        let Some(CompletionTextEdit::Edit(text_edit)) = &items[0].text_edit else {
+            panic!("qualified function completion should use a text edit");
+        };
+        assert_eq!(text_edit.new_text, "test_db.calculate_score()");
+    }
+
+    #[test]
+    fn qualified_completion_edit_does_not_replace_alias_member_columns() {
+        let sql = "SELECT * FROM users u WHERE u.";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![CompletionItem {
+            label: "id".to_string(),
+            insert_text: Some("id".to_string()),
+            ..Default::default()
+        }];
+
+        apply_qualified_identifier_completion_edits(sql, position, &mut items);
+
+        assert!(items[0].text_edit.is_none());
     }
 
     #[test]
