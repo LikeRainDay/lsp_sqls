@@ -445,6 +445,31 @@ async fn test_comprehensive_completion_scenarios() {
         "FROM keyword position should prefer table suggestions, not columns"
     );
 
+    println!("\n=== Test 9c: DML table target completion ===");
+    for (name, sql) in [
+        ("INSERT INTO table target", "INSERT INTO "),
+        ("UPDATE table target", "UPDATE "),
+        ("DELETE FROM table target", "DELETE FROM "),
+    ] {
+        let items =
+            test_completion_with_log(&dialect, name, sql, 0, sql.len() as u32, Some(&schema)).await;
+
+        assert!(
+            items.iter().any(|item| item.label == "users"),
+            "{name} should suggest table 'users'"
+        );
+        assert!(
+            items.iter().any(|item| item.label == "orders"),
+            "{name} should suggest table 'orders'"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::FIELD)),
+            "{name} should prefer table suggestions, not columns"
+        );
+    }
+
     // ==================== 场景10: 多表 SELECT 子句 ====================
     println!("\n=== Test 10: Multi-table SELECT clause ===");
     let sql10 = "SELECT u.name, o. FROM users u JOIN orders o ON u.id = o.user_id";

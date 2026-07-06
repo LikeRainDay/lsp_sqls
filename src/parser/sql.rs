@@ -738,6 +738,16 @@ impl SqlParser {
         if Self::words_end_with(&words, &["FROM"]) {
             return Some(CompletionContext::FromClause);
         }
+        if Self::words_end_with(&words, &["INSERT", "INTO"])
+            || Self::words_end_with(&words, &["UPDATE"])
+            || Self::words_end_with(&words, &["DELETE", "FROM"])
+            || Self::words_end_with(&words, &["TRUNCATE", "TABLE"])
+            || Self::words_end_with(&words, &["ALTER", "TABLE"])
+            || Self::words_end_with(&words, &["DROP", "TABLE"])
+            || Self::words_end_with(&words, &["DROP", "VIEW"])
+        {
+            return Some(CompletionContext::FromClause);
+        }
         if Self::words_end_with(&words, &["JOIN"])
             || Self::words_end_with(&words, &["INNER", "JOIN"])
             || Self::words_end_with(&words, &["LEFT", "JOIN"])
@@ -747,12 +757,19 @@ impl SqlParser {
         {
             return Some(CompletionContext::JoinClause);
         }
+        if Self::words_end_with(&words, &["ON"]) || Self::words_end_with(&words, &["USING"]) {
+            return Some(CompletionContext::WhereClause);
+        }
         if Self::words_end_with(&words, &["WHERE"])
             || Self::words_end_with(&words, &["AND"])
             || Self::words_end_with(&words, &["OR"])
             || Self::words_end_with(&words, &["NOT"])
+            || Self::words_end_with(&words, &["SET"])
         {
             return Some(CompletionContext::WhereClause);
+        }
+        if Self::words_end_with(&words, &["RETURNING"]) {
+            return Some(CompletionContext::SelectClause);
         }
         if Self::words_end_with(&words, &["ORDER", "BY"]) {
             return Some(CompletionContext::OrderByClause);
@@ -782,10 +799,24 @@ impl SqlParser {
         };
         let searchable_text_before = Self::mask_sql_noise(text_before);
         let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
 
         // Priority 1: Check for table/alias column access (ends with .)
         if text_before.trim_end().ends_with('.') {
             return CompletionContext::TableColumn;
+        }
+
+        if Self::is_insert_column_context(statement_upper) {
+            return CompletionContext::SelectClause;
+        }
+
+        if Self::is_update_set_context(statement_upper) {
+            return CompletionContext::WhereClause;
+        }
+
+        if Self::is_relation_target_context(statement_upper) {
+            return CompletionContext::FromClause;
         }
 
         // Priority 2: Find the last complete keyword to determine context
@@ -855,6 +886,68 @@ impl SqlParser {
         }
 
         CompletionContext::Default
+    }
+
+    fn is_relation_target_context(statement_upper: &str) -> bool {
+        let relation_targets = [
+            ("INSERT INTO", &["VALUES", "SELECT", "RETURNING"][..]),
+            ("UPDATE", &["SET", "WHERE", "RETURNING"][..]),
+            ("DELETE FROM", &["WHERE", "RETURNING", "USING"][..]),
+            ("TRUNCATE TABLE", &[][..]),
+            ("ALTER TABLE", &[][..]),
+            ("DROP TABLE", &[][..]),
+            ("DROP VIEW", &[][..]),
+        ];
+
+        relation_targets.iter().any(|(phrase, terminators)| {
+            let Some(position) = Self::previous_keyword_position(statement_upper, phrase) else {
+                return false;
+            };
+            let after_phrase = position + phrase.len();
+            !Self::statement_has_any_keyword(
+                statement_upper,
+                after_phrase,
+                statement_upper.len(),
+                terminators,
+            )
+        })
+    }
+
+    fn is_insert_column_context(statement_upper: &str) -> bool {
+        let Some(into_position) = Self::previous_keyword_position(statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+        let after_into = into_position + "INSERT INTO".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_into,
+            statement_upper.len(),
+            &["VALUES", "SELECT", "RETURNING"],
+        ) {
+            return false;
+        }
+
+        statement_upper[after_into..].contains('(')
+    }
+
+    fn is_update_set_context(statement_upper: &str) -> bool {
+        let Some(update_position) = Self::previous_keyword_position(statement_upper, "UPDATE")
+        else {
+            return false;
+        };
+        let after_update = update_position + "UPDATE".len();
+        let Some(set_position) = Self::next_keyword_position(statement_upper, "SET", after_update)
+        else {
+            return false;
+        };
+
+        !Self::statement_has_any_keyword(
+            statement_upper,
+            set_position + "SET".len(),
+            statement_upper.len(),
+            &["WHERE", "RETURNING"],
+        )
     }
 
     /// 获取表名（用于 TableColumn 上下文）
@@ -1867,6 +1960,26 @@ mod tests {
             analyzed_context_at_end("SELECT name, count(*) FROM users GROUP BY name HAVING"),
             CompletionContext::HavingClause
         );
+        assert_eq!(
+            analyzed_context_at_end("INSERT INTO"),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("UPDATE"),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("DELETE FROM"),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("TRUNCATE TABLE"),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users u JOIN orders o ON"),
+            CompletionContext::WhereClause
+        );
     }
 
     #[test]
@@ -1902,8 +2015,7 @@ mod tests {
     fn fallback_completion_context_uses_latest_grouping_clause() {
         let parser = SqlParser::new();
 
-        let having_sql =
-            "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > ";
+        let having_sql = "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > ";
         assert_eq!(
             parser.analyze_completion_context_fallback(having_sql, position_at_end(having_sql)),
             CompletionContext::HavingClause
@@ -1914,6 +2026,56 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(order_sql, position_at_end(order_sql)),
             CompletionContext::OrderByClause
+        );
+    }
+
+    #[test]
+    fn fallback_completion_context_handles_dml_table_and_column_positions() {
+        let parser = SqlParser::new();
+
+        let insert_table_sql = "INSERT INTO app.us";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_table_sql,
+                position_at_end(insert_table_sql)
+            ),
+            CompletionContext::FromClause
+        );
+
+        let insert_column_sql = "INSERT INTO app.users (";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_column_sql,
+                position_at_end(insert_column_sql)
+            ),
+            CompletionContext::SelectClause
+        );
+
+        let update_table_sql = "UPDATE app.us";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_table_sql,
+                position_at_end(update_table_sql)
+            ),
+            CompletionContext::FromClause
+        );
+
+        let update_set_sql = "UPDATE app.users SET ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_set_sql,
+                position_at_end(update_set_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let delete_table_sql = "DELETE FROM app.se";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                delete_table_sql,
+                position_at_end(delete_table_sql)
+            ),
+            CompletionContext::FromClause
         );
     }
 

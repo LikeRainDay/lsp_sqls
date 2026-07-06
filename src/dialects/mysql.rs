@@ -85,7 +85,8 @@ impl MysqlDialect {
             sql,
             position,
             &[
-                "from", "join", "inner", "left", "right", "full", "outer", "cross",
+                "from", "join", "inner", "left", "right", "full", "outer", "cross", "insert",
+                "into", "update", "delete", "truncate", "alter", "drop", "table", "view",
             ],
         )
     }
