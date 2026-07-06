@@ -812,21 +812,20 @@ impl SqlParser {
             }
         }
 
-        // IMPORTANT: Check for HAVING before GROUP BY and ORDER BY
-        // because HAVING comes after GROUP BY in SQL syntax
-        // When both exist, we want to detect the later one
-        if Self::previous_keyword_position(&text_upper, "HAVING").is_some() {
-            return CompletionContext::HavingClause;
-        }
+        let latest_grouping_clause = [
+            Self::previous_keyword_position(&text_upper, "GROUP BY")
+                .map(|position| (position, CompletionContext::GroupByClause)),
+            Self::previous_keyword_position(&text_upper, "HAVING")
+                .map(|position| (position, CompletionContext::HavingClause)),
+            Self::previous_keyword_position(&text_upper, "ORDER BY")
+                .map(|position| (position, CompletionContext::OrderByClause)),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(position, _)| *position);
 
-        // Check for ORDER BY clause
-        if Self::previous_keyword_position(&text_upper, "ORDER BY").is_some() {
-            return CompletionContext::OrderByClause;
-        }
-
-        // Check for GROUP BY clause
-        if Self::previous_keyword_position(&text_upper, "GROUP BY").is_some() {
-            return CompletionContext::GroupByClause;
+        if let Some((_, context)) = latest_grouping_clause {
+            return context;
         }
 
         // Check for FROM clause
@@ -1896,6 +1895,25 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
             CompletionContext::FromClause
+        );
+    }
+
+    #[test]
+    fn fallback_completion_context_uses_latest_grouping_clause() {
+        let parser = SqlParser::new();
+
+        let having_sql =
+            "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(having_sql, position_at_end(having_sql)),
+            CompletionContext::HavingClause
+        );
+
+        let order_sql =
+            "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > 1 ORDER BY ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(order_sql, position_at_end(order_sql)),
+            CompletionContext::OrderByClause
         );
     }
 
