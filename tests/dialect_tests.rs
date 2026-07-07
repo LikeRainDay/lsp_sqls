@@ -882,18 +882,32 @@ async fn test_hive_dialect() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
-        tables: vec![Table {
-            name: "events".to_string(),
-            columns: vec![Column {
-                name: "id".to_string(),
-                data_type: "INT".to_string(),
-                nullable: false,
+        tables: vec![
+            Table {
+                name: "events".to_string(),
+                columns: vec![Column {
+                    name: "id".to_string(),
+                    data_type: "INT".to_string(),
+                    nullable: false,
+                    source_location: None,
+                    ..Default::default()
+                }],
                 source_location: None,
                 ..Default::default()
-            }],
-            source_location: None,
-            ..Default::default()
-        }],
+            },
+            Table {
+                name: "form".to_string(),
+                columns: vec![Column {
+                    name: "form_background_url".to_string(),
+                    data_type: "STRING".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                }],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
         functions: vec![],
         source_uri: None,
     };
@@ -909,10 +923,14 @@ async fn test_hive_dialect() {
         )
         .await;
     assert!(
-        where_start_items
-            .iter()
-            .any(|item| item.label.ends_with(".id")),
+        where_start_items.iter().any(|item| item.label == "id"),
         "Hive WHERE start should include field candidates: {where_start_items:?}"
+    );
+    assert!(
+        !where_start_items
+            .iter()
+            .any(|item| item.label.contains("form_background_url")),
+        "Hive WHERE start should stay scoped to referenced tables: {where_start_items:?}"
     );
     assert!(
         !where_start_items
@@ -939,7 +957,7 @@ async fn test_hive_dialect() {
     assert!(
         !where_operator_items
             .iter()
-            .any(|item| item.label.ends_with(".id")),
+            .any(|item| item.label == "id" || item.label.ends_with(".id")),
         "Hive WHERE operator position should not keep returning fields: {where_operator_items:?}"
     );
 
@@ -955,10 +973,14 @@ async fn test_hive_dialect() {
         )
         .await;
     assert!(
-        having_start_items
-            .iter()
-            .any(|item| item.label.ends_with(".id")),
+        having_start_items.iter().any(|item| item.label == "id"),
         "Hive HAVING start should include field candidates: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.label.contains("form_background_url")),
+        "Hive HAVING start should stay scoped to referenced tables: {having_start_items:?}"
     );
     assert!(
         having_start_items.iter().any(|item| item.label == "COUNT"),
@@ -1281,18 +1303,32 @@ async fn test_clickhouse_dialect() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
-        tables: vec![Table {
-            name: "events".to_string(),
-            columns: vec![Column {
-                name: "id".to_string(),
-                data_type: "UInt64".to_string(),
-                nullable: false,
+        tables: vec![
+            Table {
+                name: "events".to_string(),
+                columns: vec![Column {
+                    name: "id".to_string(),
+                    data_type: "UInt64".to_string(),
+                    nullable: false,
+                    source_location: None,
+                    ..Default::default()
+                }],
                 source_location: None,
                 ..Default::default()
-            }],
-            source_location: None,
-            ..Default::default()
-        }],
+            },
+            Table {
+                name: "form".to_string(),
+                columns: vec![Column {
+                    name: "form_background_url".to_string(),
+                    data_type: "String".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                }],
+                source_location: None,
+                ..Default::default()
+            },
+        ],
         functions: vec![],
         source_uri: None,
     };
@@ -1308,10 +1344,14 @@ async fn test_clickhouse_dialect() {
         )
         .await;
     assert!(
-        where_start_items
-            .iter()
-            .any(|item| item.label.ends_with(".id")),
+        where_start_items.iter().any(|item| item.label == "id"),
         "ClickHouse WHERE start should include field candidates: {where_start_items:?}"
+    );
+    assert!(
+        !where_start_items
+            .iter()
+            .any(|item| item.label.contains("form_background_url")),
+        "ClickHouse WHERE start should stay scoped to referenced tables: {where_start_items:?}"
     );
     assert!(
         !where_start_items
@@ -1338,7 +1378,7 @@ async fn test_clickhouse_dialect() {
     assert!(
         !where_operator_items
             .iter()
-            .any(|item| item.label.ends_with(".id")),
+            .any(|item| item.label == "id" || item.label.ends_with(".id")),
         "ClickHouse WHERE operator position should not keep returning fields: {where_operator_items:?}"
     );
 
@@ -1354,10 +1394,14 @@ async fn test_clickhouse_dialect() {
         )
         .await;
     assert!(
-        having_start_items
-            .iter()
-            .any(|item| item.label.ends_with(".id")),
+        having_start_items.iter().any(|item| item.label == "id"),
         "ClickHouse HAVING start should include field candidates: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.label.contains("form_background_url")),
+        "ClickHouse HAVING start should stay scoped to referenced tables: {having_start_items:?}"
     );
     assert!(
         having_start_items.iter().any(|item| item.label == "COUNT"),
