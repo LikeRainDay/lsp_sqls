@@ -468,6 +468,33 @@ impl Dialect for ClickHouseDialect {
                     items.push(self.create_keyword_item(keyword));
                 }
             }
+            crate::parser::CompletionContext::InsertActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["(", "VALUES", "SELECT", "FORMAT"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
+            crate::parser::CompletionContext::UpdateActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["SET", "WHERE"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
+            crate::parser::CompletionContext::DeleteActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["WHERE"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

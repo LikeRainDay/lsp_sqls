@@ -34,6 +34,12 @@ pub enum CompletionContext {
     ConstraintTargetClause,
     /// 在 ALTER TABLE 表名之后，应该补全结构操作
     AlterTableActionClause,
+    /// 在 INSERT INTO 表名之后，应该补全插入动作
+    InsertActionClause,
+    /// 在 UPDATE 表名之后，应该补全更新动作
+    UpdateActionClause,
+    /// 在 DELETE FROM 表名之后，应该补全删除动作
+    DeleteActionClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -655,6 +661,10 @@ impl SqlParser {
             return CompletionContext::AlterTableActionClause;
         }
 
+        if let Some(context) = Self::analyze_dml_action_context_at_position(source, position) {
+            return context;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -859,6 +869,10 @@ impl SqlParser {
 
         if Self::is_alter_table_action_context(statement_upper) {
             return CompletionContext::AlterTableActionClause;
+        }
+
+        if let Some(context) = Self::analyze_dml_action_context(statement_upper) {
+            return context;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1127,6 +1141,34 @@ impl SqlParser {
         Self::is_alter_table_action_context(statement_upper)
     }
 
+    fn analyze_dml_action_context_at_position(
+        source: &str,
+        position: Position,
+    ) -> Option<CompletionContext> {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::analyze_dml_action_context(statement_upper)
+    }
+
+    fn analyze_dml_action_context(statement_upper: &str) -> Option<CompletionContext> {
+        if Self::is_relation_action_context(statement_upper, "INSERT INTO") {
+            return Some(CompletionContext::InsertActionClause);
+        }
+        if Self::is_relation_action_context(statement_upper, "UPDATE") {
+            return Some(CompletionContext::UpdateActionClause);
+        }
+        if Self::is_relation_action_context(statement_upper, "DELETE FROM") {
+            return Some(CompletionContext::DeleteActionClause);
+        }
+
+        None
+    }
+
     fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
         if Self::is_alter_table_target_context(
             statement_upper,
@@ -1163,6 +1205,29 @@ impl SqlParser {
             statement_upper,
             after_alter_table,
         ) else {
+            return false;
+        };
+
+        let trailing = &statement_upper[after_table..];
+        let trimmed = trailing.trim_start();
+        if trimmed.is_empty() {
+            return !trailing.is_empty();
+        }
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return false;
+        }
+
+        Self::statement_words(trimmed).len() == 1
+    }
+
+    fn is_relation_action_context(statement_upper: &str, phrase: &str) -> bool {
+        let Some(phrase_position) = Self::previous_keyword_position(statement_upper, phrase) else {
+            return false;
+        };
+        let after_phrase = phrase_position + phrase.len();
+        let Some((_, after_table)) =
+            Self::read_relation_reference_after_preserving_trailing(statement_upper, after_phrase)
+        else {
             return false;
         };
 
@@ -2489,6 +2554,24 @@ mod tests {
             CompletionContext::FromClause
         );
 
+        let insert_action_sql = "INSERT INTO app.users ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_action_sql,
+                position_at_end(insert_action_sql)
+            ),
+            CompletionContext::InsertActionClause
+        );
+
+        let insert_action_prefix_sql = "INSERT INTO app.users VAL";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_action_prefix_sql,
+                position_at_end(insert_action_prefix_sql)
+            ),
+            CompletionContext::InsertActionClause
+        );
+
         let insert_column_sql = "INSERT INTO app.users (";
         assert_eq!(
             parser.analyze_completion_context_fallback(
@@ -2507,6 +2590,24 @@ mod tests {
             CompletionContext::FromClause
         );
 
+        let update_action_sql = "UPDATE app.users ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_action_sql,
+                position_at_end(update_action_sql)
+            ),
+            CompletionContext::UpdateActionClause
+        );
+
+        let update_action_prefix_sql = "UPDATE app.users S";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_action_prefix_sql,
+                position_at_end(update_action_prefix_sql)
+            ),
+            CompletionContext::UpdateActionClause
+        );
+
         let update_set_sql = "UPDATE app.users SET ";
         assert_eq!(
             parser.analyze_completion_context_fallback(
@@ -2523,6 +2624,24 @@ mod tests {
                 position_at_end(delete_table_sql)
             ),
             CompletionContext::FromClause
+        );
+
+        let delete_action_sql = "DELETE FROM app.sessions ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                delete_action_sql,
+                position_at_end(delete_action_sql)
+            ),
+            CompletionContext::DeleteActionClause
+        );
+
+        let delete_action_prefix_sql = "DELETE FROM app.sessions WH";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                delete_action_prefix_sql,
+                position_at_end(delete_action_prefix_sql)
+            ),
+            CompletionContext::DeleteActionClause
         );
 
         let create_index_table_sql = "CREATE INDEX users_email_idx ON app.us";
