@@ -230,16 +230,42 @@ pub(crate) fn predicate_continuation_keywords(
             previous_keyword_position(statement, clause).map(|position| (position, clause))
         })
         .max_by_key(|(position, _)| *position)
-        .map(|(_, clause)| clause);
+        .map(|(position, clause)| (position, clause));
 
     match latest_clause {
-        Some("SET") if supports_returning => vec![",", "WHERE", "RETURNING"],
-        Some("SET") => vec![",", "WHERE"],
-        Some("HAVING") => vec!["AND", "OR", "ORDER BY", "LIMIT"],
-        Some("ON") => vec!["AND", "OR", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
-        Some("WHERE") => vec!["AND", "OR", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"],
+        Some((clause_position, clause))
+            if between_first_value_needs_and(statement, clause_position, clause) =>
+        {
+            vec!["AND"]
+        }
+        Some((_, "SET")) if supports_returning => vec![",", "WHERE", "RETURNING"],
+        Some((_, "SET")) => vec![",", "WHERE"],
+        Some((_, "HAVING")) => vec!["AND", "OR", "ORDER BY", "LIMIT"],
+        Some((_, "ON")) => vec!["AND", "OR", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
+        Some((_, "WHERE")) => vec!["AND", "OR", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"],
         _ => vec!["AND", "OR"],
     }
+}
+
+fn between_first_value_needs_and(
+    statement_upper: &str,
+    clause_position: usize,
+    clause: &str,
+) -> bool {
+    if !matches!(clause, "WHERE" | "HAVING" | "ON") {
+        return false;
+    }
+
+    let after_clause = clause_position + clause.len();
+    let Some(segment) = statement_upper.get(after_clause..) else {
+        return false;
+    };
+    let Some(between_position) = previous_keyword_position(segment, "BETWEEN") else {
+        return false;
+    };
+    let after_between = between_position + "BETWEEN".len();
+
+    previous_keyword_position(&segment[after_between..], "AND").is_none()
 }
 
 fn previous_keyword_position(source_upper: &str, keyword: &str) -> Option<usize> {

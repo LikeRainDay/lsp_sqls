@@ -4078,6 +4078,14 @@ mod tests {
             CompletionContext::ExpressionValueClause
         );
         assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner BETWEEN 1 "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner BETWEEN 1 A"),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
             analyzed_context_at_end("SELECT * FROM users where owner BETWEEN 1 AND 5 "),
             CompletionContext::PredicateContinuationClause
         );

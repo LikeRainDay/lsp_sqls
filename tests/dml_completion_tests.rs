@@ -380,6 +380,40 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&where_continuation_prefixed, "AND"));
     assert!(!has_label(&where_continuation_prefixed, "owner"));
 
+    let where_between_first_value = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner BETWEEN 1 "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_between_first_value, "AND"));
+    assert!(
+        !has_label(&where_between_first_value, "OR"),
+        "BETWEEN first bound should only advance to AND: {where_between_first_value:?}"
+    );
+    assert!(
+        !has_label(&where_between_first_value, "ORDER BY"),
+        "BETWEEN first bound should not suggest query continuations before AND: {where_between_first_value:?}"
+    );
+    assert!(
+        !has_label(&where_between_first_value, "owner"),
+        "BETWEEN first bound should not return fields: {where_between_first_value:?}"
+    );
+    assert!(
+        !has_operator(&where_between_first_value, "="),
+        "BETWEEN first bound should not return operators: {where_between_first_value:?}"
+    );
+
+    let where_between_first_value_prefixed = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner BETWEEN 1 A"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_between_first_value_prefixed, "AND"));
+    assert!(!has_label(&where_between_first_value_prefixed, "OR"));
+    assert!(!has_label(&where_between_first_value_prefixed, "owner"));
+
     let where_in_continuation = complete(
         dialect,
         &format!("SELECT * FROM {qualified_table} WHERE owner IN ('app') "),
