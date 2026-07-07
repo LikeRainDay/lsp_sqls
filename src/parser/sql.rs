@@ -1195,6 +1195,9 @@ impl SqlParser {
     fn is_data_type_context(statement_upper: &str) -> bool {
         Self::is_create_table_column_type_context(statement_upper)
             || Self::is_alter_table_add_column_type_context(statement_upper)
+            || Self::is_alter_table_modify_column_type_context(statement_upper)
+            || Self::is_alter_table_change_column_type_context(statement_upper)
+            || Self::is_alter_table_alter_column_type_context(statement_upper)
     }
 
     fn is_create_table_column_type_context(statement_upper: &str) -> bool {
@@ -1222,24 +1225,44 @@ impl SqlParser {
     }
 
     fn is_alter_table_add_column_type_context(statement_upper: &str) -> bool {
+        if Self::is_alter_table_column_definition_type_after_phrase(statement_upper, "ADD COLUMN") {
+            return true;
+        }
+
+        Self::is_alter_table_column_definition_type_after_phrase(statement_upper, "ADD")
+    }
+
+    fn is_alter_table_modify_column_type_context(statement_upper: &str) -> bool {
+        if Self::is_alter_table_column_definition_type_after_phrase(
+            statement_upper,
+            "MODIFY COLUMN",
+        ) {
+            return true;
+        }
+
+        Self::is_alter_table_column_definition_type_after_phrase(statement_upper, "MODIFY")
+    }
+
+    fn is_alter_table_column_definition_type_after_phrase(
+        statement_upper: &str,
+        phrase: &str,
+    ) -> bool {
         let Some(alter_table_position) =
             Self::previous_keyword_position(statement_upper, "ALTER TABLE")
         else {
             return false;
         };
-        let Some(add_column_position) =
-            Self::previous_keyword_position(statement_upper, "ADD COLUMN")
-        else {
+        let Some(phrase_position) = Self::previous_keyword_position(statement_upper, phrase) else {
             return false;
         };
-        if add_column_position < alter_table_position {
+        if phrase_position < alter_table_position {
             return false;
         }
 
-        let after_add_column = add_column_position + "ADD COLUMN".len();
+        let after_phrase = phrase_position + phrase.len();
         if Self::statement_has_any_keyword(
             statement_upper,
-            after_add_column,
+            after_phrase,
             statement_upper.len(),
             &[
                 "NOT NULL",
@@ -1255,7 +1278,95 @@ impl SqlParser {
             return false;
         }
 
-        Self::is_column_definition_type_segment(&statement_upper[after_add_column..])
+        Self::is_column_definition_type_segment(&statement_upper[after_phrase..])
+    }
+
+    fn is_alter_table_change_column_type_context(statement_upper: &str) -> bool {
+        if Self::is_alter_table_change_column_type_after_phrase(statement_upper, "CHANGE COLUMN") {
+            return true;
+        }
+
+        Self::is_alter_table_change_column_type_after_phrase(statement_upper, "CHANGE")
+    }
+
+    fn is_alter_table_change_column_type_after_phrase(statement_upper: &str, phrase: &str) -> bool {
+        let Some(alter_table_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER TABLE")
+        else {
+            return false;
+        };
+        let Some(phrase_position) = Self::previous_keyword_position(statement_upper, phrase) else {
+            return false;
+        };
+        if phrase_position < alter_table_position {
+            return false;
+        }
+
+        let after_phrase = phrase_position + phrase.len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_phrase,
+            statement_upper.len(),
+            &[
+                "NOT NULL",
+                "NULL",
+                "DEFAULT",
+                "PRIMARY KEY",
+                "UNIQUE",
+                "CHECK",
+                "REFERENCES",
+                "CONSTRAINT",
+            ],
+        ) {
+            return false;
+        }
+
+        Self::is_column_change_type_segment(&statement_upper[after_phrase..])
+    }
+
+    fn is_alter_table_alter_column_type_context(statement_upper: &str) -> bool {
+        let Some(alter_table_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER TABLE")
+        else {
+            return false;
+        };
+        let Some(alter_column_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER COLUMN")
+        else {
+            return false;
+        };
+        if alter_column_position < alter_table_position {
+            return false;
+        }
+
+        let Some(type_position) = Self::previous_keyword_position(statement_upper, "TYPE") else {
+            return false;
+        };
+        if type_position < alter_column_position {
+            return false;
+        }
+
+        let after_type = type_position + "TYPE".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_type,
+            statement_upper.len(),
+            &[
+                "USING",
+                "COLLATE",
+                "NOT NULL",
+                "NULL",
+                "DEFAULT",
+                "PRIMARY KEY",
+                "UNIQUE",
+                "CHECK",
+                "REFERENCES",
+            ],
+        ) {
+            return false;
+        }
+
+        Self::is_data_type_name_segment(&statement_upper[after_type..])
     }
 
     fn is_column_definition_type_segment(segment: &str) -> bool {
@@ -1270,7 +1381,17 @@ impl SqlParser {
             .unwrap_or("");
         if matches!(
             first_word,
-            "PRIMARY" | "FOREIGN" | "UNIQUE" | "CHECK" | "CONSTRAINT" | "KEY" | "EXCLUDE" | "LIKE"
+            "PRIMARY"
+                | "FOREIGN"
+                | "UNIQUE"
+                | "CHECK"
+                | "CONSTRAINT"
+                | "KEY"
+                | "INDEX"
+                | "FULLTEXT"
+                | "SPATIAL"
+                | "EXCLUDE"
+                | "LIKE"
         ) {
             return false;
         }
@@ -1290,6 +1411,33 @@ impl SqlParser {
         }
 
         words.len() == 2
+    }
+
+    fn is_column_change_type_segment(segment: &str) -> bool {
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return words.len() == 2;
+        }
+
+        words.len() == 3
+    }
+
+    fn is_data_type_name_segment(segment: &str) -> bool {
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() {
+            return !segment.is_empty();
+        }
+
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return false;
+        }
+
+        Self::statement_words(trimmed).len() == 1
     }
 
     fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
@@ -2928,11 +3076,83 @@ mod tests {
             CompletionContext::DataTypeClause
         );
 
+        let alter_add_without_column_type_sql = "ALTER TABLE app.users ADD status ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_add_without_column_type_sql,
+                position_at_end(alter_add_without_column_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_modify_column_type_sql = "ALTER TABLE app.users MODIFY COLUMN status ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_modify_column_type_sql,
+                position_at_end(alter_modify_column_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_modify_type_prefix_sql = "ALTER TABLE app.users MODIFY status var";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_modify_type_prefix_sql,
+                position_at_end(alter_modify_type_prefix_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_change_column_type_sql = "ALTER TABLE app.users CHANGE COLUMN status state ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_change_column_type_sql,
+                position_at_end(alter_change_column_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_change_type_prefix_sql = "ALTER TABLE app.users CHANGE status state var";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_change_type_prefix_sql,
+                position_at_end(alter_change_type_prefix_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_column_type_sql = "ALTER TABLE app.users ALTER COLUMN status TYPE ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_column_type_sql,
+                position_at_end(alter_column_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_column_type_prefix_sql = "ALTER TABLE app.users ALTER COLUMN status TYPE var";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_column_type_prefix_sql,
+                position_at_end(alter_column_type_prefix_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
         let create_table_constraint_sql = "CREATE TABLE app.users (PRIMARY ";
         assert_ne!(
             parser.analyze_completion_context_fallback(
                 create_table_constraint_sql,
                 position_at_end(create_table_constraint_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_add_index_sql = "ALTER TABLE app.users ADD INDEX users_name_idx";
+        assert_ne!(
+            parser.analyze_completion_context_fallback(
+                alter_add_index_sql,
+                position_at_end(alter_add_index_sql)
             ),
             CompletionContext::DataTypeClause
         );

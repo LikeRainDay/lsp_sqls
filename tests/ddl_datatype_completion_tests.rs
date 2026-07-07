@@ -99,6 +99,16 @@ async fn assert_relational_datatypes(dialect: &dyn Dialect, database: &str, expe
     .await;
     assert!(has_label(&alter_prefixed, "VARCHAR"));
     assert!(!has_label(&alter_prefixed, expected_text));
+
+    let alter_without_column = complete(
+        dialect,
+        &format!("ALTER TABLE {database}.webhook ADD status "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&alter_without_column, "VARCHAR"));
+    assert!(has_label(&alter_without_column, expected_text));
+    assert!(!has_label(&alter_without_column, "owner"));
 }
 
 #[tokio::test]
@@ -109,6 +119,56 @@ async fn postgres_column_definition_completion_suggests_data_types() {
 #[tokio::test]
 async fn mysql_column_definition_completion_suggests_data_types() {
     assert_relational_datatypes(&MysqlDialect::new(), "shop", "TEXT").await;
+}
+
+#[tokio::test]
+async fn postgres_alter_column_type_completion_suggests_data_types() {
+    let schema = schema("public");
+
+    let items = complete(
+        &PostgresDialect::new(),
+        "ALTER TABLE public.webhook ALTER COLUMN owner TYPE ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&items, "VARCHAR"));
+    assert!(has_label(&items, "JSONB"));
+    assert!(!has_label(&items, "owner"));
+    assert!(!has_kind(&items, CompletionItemKind::OPERATOR));
+
+    let prefixed = complete(
+        &PostgresDialect::new(),
+        "ALTER TABLE public.webhook ALTER COLUMN owner TYPE var",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&prefixed, "VARCHAR"));
+    assert!(!has_label(&prefixed, "TEXT"));
+}
+
+#[tokio::test]
+async fn mysql_modify_and_change_column_completion_suggests_data_types() {
+    let schema = schema("shop");
+
+    let modified = complete(
+        &MysqlDialect::new(),
+        "ALTER TABLE shop.webhook MODIFY COLUMN owner ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&modified, "VARCHAR"));
+    assert!(has_label(&modified, "JSON"));
+    assert!(!has_label(&modified, "owner"));
+    assert!(!has_kind(&modified, CompletionItemKind::CLASS));
+
+    let changed = complete(
+        &MysqlDialect::new(),
+        "ALTER TABLE shop.webhook CHANGE COLUMN owner owner_name var",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&changed, "VARCHAR"));
+    assert!(!has_label(&changed, "TEXT"));
 }
 
 #[tokio::test]
