@@ -215,6 +215,78 @@ pub(crate) fn expression_value_allows_default(sql: &str, position: Position) -> 
     !statement[set_position + "SET".len()..].contains("WHERE")
 }
 
+pub(crate) fn predicate_continuation_keywords(
+    sql: &str,
+    position: Position,
+    supports_returning: bool,
+) -> Vec<&'static str> {
+    let text_before = text_before_position(sql, position).to_ascii_uppercase();
+    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement = &text_before[statement_start..];
+
+    let latest_clause = ["WHERE", "HAVING", "ON", "SET"]
+        .into_iter()
+        .filter_map(|clause| {
+            previous_keyword_position(statement, clause).map(|position| (position, clause))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, clause)| clause);
+
+    match latest_clause {
+        Some("SET") if supports_returning => vec![",", "WHERE", "RETURNING"],
+        Some("SET") => vec![",", "WHERE"],
+        Some("HAVING") => vec!["AND", "OR", "ORDER BY", "LIMIT"],
+        Some("ON") => vec!["AND", "OR", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
+        Some("WHERE") => vec!["AND", "OR", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"],
+        _ => vec!["AND", "OR"],
+    }
+}
+
+fn previous_keyword_position(source_upper: &str, keyword: &str) -> Option<usize> {
+    let mut search_pos = 0;
+    let mut previous = None;
+
+    while let Some(relative_position) = source_upper[search_pos..].find(keyword) {
+        let position = search_pos + relative_position;
+        if is_keyword_at(source_upper, position, keyword) {
+            previous = Some(position);
+        }
+        search_pos = position + keyword.len();
+    }
+
+    previous
+}
+
+fn is_keyword_at(source_upper: &str, start: usize, keyword: &str) -> bool {
+    let end = start + keyword.len();
+    if end > source_upper.len() {
+        return false;
+    }
+
+    let before_is_boundary = if start == 0 {
+        true
+    } else {
+        source_upper[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_identifier_char(ch))
+    };
+    let after_is_boundary = if end == source_upper.len() {
+        true
+    } else {
+        source_upper[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_identifier_char(ch))
+    };
+
+    before_is_boundary && after_is_boundary
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+}
+
 fn normalize_order_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ';'))

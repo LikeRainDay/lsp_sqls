@@ -211,6 +211,23 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&update_value_prefixed, "DEFAULT"));
     assert!(!has_label(&update_value_prefixed, "owner"));
 
+    let update_value_continuation = complete(
+        dialect,
+        &format!("UPDATE {qualified_table} SET owner = 'app' "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&update_value_continuation, ","));
+    assert!(has_label(&update_value_continuation, "WHERE"));
+    assert!(
+        !has_label(&update_value_continuation, "owner"),
+        "UPDATE SET completed value should suggest continuations, not fields: {update_value_continuation:?}"
+    );
+    assert!(
+        !has_operator(&update_value_continuation, "="),
+        "UPDATE SET completed value should not suggest operators: {update_value_continuation:?}"
+    );
+
     let delete_actions =
         complete(dialect, &format!("DELETE FROM {qualified_table} "), &schema).await;
     assert!(has_label(&delete_actions, "WHERE"));
@@ -289,6 +306,35 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         "Value keyword prefix should filter unrelated keywords: {where_value_prefixed:?}"
     );
     assert!(!has_label(&where_value_prefixed, "owner"));
+
+    let where_value_continuation = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner = 'app' "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_value_continuation, "AND"));
+    assert!(has_label(&where_value_continuation, "OR"));
+    assert!(has_label(&where_value_continuation, "ORDER BY"));
+    assert!(
+        !has_label(&where_value_continuation, "owner"),
+        "WHERE completed value should suggest continuations, not fields: {where_value_continuation:?}"
+    );
+    assert!(
+        !has_operator(&where_value_continuation, "="),
+        "WHERE completed value should not suggest operators: {where_value_continuation:?}"
+    );
+
+    let where_continuation_prefixed = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner = 'app' O"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_continuation_prefixed, "OR"));
+    assert!(has_label(&where_continuation_prefixed, "ORDER BY"));
+    assert!(!has_label(&where_continuation_prefixed, "AND"));
+    assert!(!has_label(&where_continuation_prefixed, "owner"));
 
     let returning = complete(
         dialect,

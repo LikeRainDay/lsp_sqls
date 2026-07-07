@@ -22,6 +22,8 @@ pub enum CompletionContext {
     WhereClause,
     /// 在谓词或赋值操作符之后，应该补全值表达式
     ExpressionValueClause,
+    /// 在完整谓词或赋值之后，应该补全连接词或后续子句
+    PredicateContinuationClause,
     /// 在表名后（如 table.），应该补全列名
     TableColumn,
     /// 在 JOIN 子句中，应该补全表名
@@ -673,6 +675,14 @@ impl SqlParser {
             return CompletionContext::SelectContinuationClause;
         }
 
+        if Self::expression_value_context_at_position(source, position) {
+            return CompletionContext::ExpressionValueClause;
+        }
+
+        if Self::predicate_continuation_context_at_position(source, position) {
+            return CompletionContext::PredicateContinuationClause;
+        }
+
         if let Some(context) = Self::analyze_completed_keyword_context(source, position) {
             return context;
         }
@@ -723,10 +733,6 @@ impl SqlParser {
 
         if Self::insert_value_context_at_position(source, position) {
             return CompletionContext::InsertValueClause;
-        }
-
-        if Self::expression_value_context_at_position(source, position) {
-            return CompletionContext::ExpressionValueClause;
         }
 
         if let Some(context) =
@@ -975,8 +981,12 @@ impl SqlParser {
             return CompletionContext::InsertValueClause;
         }
 
-        if Self::is_expression_value_context(statement_upper) {
+        if Self::is_expression_value_context(statement_upper, raw_statement_upper) {
             return CompletionContext::ExpressionValueClause;
+        }
+
+        if Self::is_predicate_continuation_context(statement_upper, raw_statement_upper) {
+            return CompletionContext::PredicateContinuationClause;
         }
 
         if Self::is_update_set_context(statement_upper) {
@@ -1215,8 +1225,8 @@ impl SqlParser {
             .is_some_and(|word| Self::is_value_keyword_prefix(word))
     }
 
-    fn is_expression_value_context(statement_upper: &str) -> bool {
-        let Some((clause_position, clause)) = [
+    fn latest_predicate_clause(statement_upper: &str) -> Option<(usize, &'static str)> {
+        [
             (
                 "WHERE",
                 Self::previous_keyword_position(statement_upper, "WHERE"),
@@ -1233,11 +1243,14 @@ impl SqlParser {
         ]
         .into_iter()
         .filter_map(|(clause, position)| position.map(|position| (position, clause)))
-        .max_by_key(|(position, _)| *position) else {
-            return false;
-        };
+        .max_by_key(|(position, _)| *position)
+    }
 
-        let after_clause = clause_position + clause.len();
+    fn predicate_clause_has_later_terminator(
+        statement_upper: &str,
+        after_clause: usize,
+        clause: &str,
+    ) -> bool {
         let terminators = match clause {
             "SET" => &["WHERE", "RETURNING"][..],
             "WHERE" | "ON" => &[
@@ -1251,26 +1264,52 @@ impl SqlParser {
             "HAVING" => &["ORDER BY", "LIMIT", "UNION"][..],
             _ => &[][..],
         };
-        if Self::statement_has_any_keyword(
+
+        Self::statement_has_any_keyword(
             statement_upper,
             after_clause,
             statement_upper.len(),
             terminators,
-        ) {
+        )
+    }
+
+    fn is_expression_value_context(statement_upper: &str, raw_statement_upper: &str) -> bool {
+        let Some((clause_position, clause)) = Self::latest_predicate_clause(statement_upper) else {
+            return false;
+        };
+
+        let after_clause = clause_position + clause.len();
+        if Self::predicate_clause_has_later_terminator(statement_upper, after_clause, clause) {
             return false;
         }
 
         let segment = &statement_upper[after_clause..];
+        let raw_segment = raw_statement_upper.get(after_clause..).unwrap_or(segment);
         let trimmed = segment.trim_end();
         if trimmed.is_empty() || trimmed.ends_with('.') {
             return false;
         }
 
-        if Self::ends_with_value_operator(trimmed) {
+        let Some(operator_end) = Self::latest_value_operator_end(trimmed) else {
+            return false;
+        };
+        let raw_after_operator = raw_segment.get(operator_end..).unwrap_or("");
+        let value_text = raw_after_operator.trim_start();
+        let value_text_trimmed = value_text.trim_end();
+        if value_text_trimmed.is_empty() {
             return true;
         }
 
-        let words = Self::statement_words(trimmed);
+        if raw_after_operator
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+        {
+            return false;
+        }
+
+        let value_text_upper = value_text_trimmed.to_ascii_uppercase();
+        let words = Self::statement_words(&value_text_upper);
         let Some(prefix) = words.last().copied() else {
             return false;
         };
@@ -1278,40 +1317,224 @@ impl SqlParser {
             return false;
         }
 
-        let Some(prefix_start) = trimmed.rfind(prefix) else {
+        let Some(prefix_start) = value_text_upper.rfind(prefix) else {
             return false;
         };
-        Self::ends_with_value_operator(trimmed[..prefix_start].trim_end())
+        value_text_trimmed[..prefix_start].trim().is_empty()
     }
 
-    fn ends_with_value_operator(segment: &str) -> bool {
-        let trimmed = segment.trim_end();
-        if trimmed.is_empty() {
-            return false;
-        }
+    fn latest_value_operator_end(segment_upper: &str) -> Option<usize> {
+        let trimmed_len = segment_upper.trim_end().len();
+        let raw_segment = &segment_upper[..trimmed_len];
+        let searchable_segment = Self::mask_nested_parenthesized_regions(raw_segment);
+        let segment = searchable_segment.as_str();
+        let mut best: Option<(usize, usize)> = None;
 
-        if [
+        let mut consider = |position: usize, end: usize| {
+            if best.is_none_or(|(best_position, best_end)| {
+                position > best_position || (position == best_position && end > best_end)
+            }) {
+                best = Some((position, end));
+            }
+        };
+
+        [
             "!=", "<>", "<=", ">=", "=", "<", ">", "+", "-", "*", "/", "%",
         ]
         .iter()
-        .any(|operator| trimmed.ends_with(operator))
+        .filter_map(|operator| {
+            segment
+                .rfind(operator)
+                .map(|position| (position, position + operator.len()))
+        })
+        .for_each(|(position, end)| consider(position, end));
+
+        for operator in [
+            "LIKE", "ILIKE", "RLIKE", "REGEXP", "IS NOT", "IS", "NOT IN", "IN", "BETWEEN",
+        ] {
+            if let Some(position) = Self::previous_keyword_position(segment, operator) {
+                let mut end = position + operator.len();
+                if matches!(operator, "IN" | "NOT IN") {
+                    end = Self::extend_operator_end_through_open_paren(segment, end);
+                }
+                consider(position, end);
+            }
+        }
+
+        if let Some(between_position) = Self::previous_keyword_position(segment, "BETWEEN") {
+            let after_between = between_position + "BETWEEN".len();
+            if let Some(and_relative) =
+                Self::previous_keyword_position(&segment[after_between..], "AND")
+            {
+                let and_position = after_between + and_relative;
+                consider(and_position, and_position + "AND".len());
+            }
+        }
+
+        best.map(|(_, end)| end)
+    }
+
+    fn extend_operator_end_through_open_paren(segment_upper: &str, operator_end: usize) -> usize {
+        let Some(after_operator) = segment_upper.get(operator_end..) else {
+            return operator_end;
+        };
+        let leading_whitespace = after_operator
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if after_operator[leading_whitespace..].starts_with('(') {
+            operator_end + leading_whitespace + 1
+        } else {
+            operator_end
+        }
+    }
+
+    fn is_predicate_continuation_context(statement_upper: &str, raw_statement_upper: &str) -> bool {
+        let Some((clause_position, clause)) = Self::latest_predicate_clause(statement_upper) else {
+            return false;
+        };
+
+        let after_clause = clause_position + clause.len();
+        if Self::predicate_clause_has_later_terminator(statement_upper, after_clause, clause) {
+            return false;
+        }
+
+        let segment = &statement_upper[after_clause..];
+        let raw_segment = raw_statement_upper.get(after_clause..).unwrap_or(segment);
+        let trimmed = segment.trim_end();
+        if trimmed.is_empty() || trimmed.ends_with('.') {
+            return false;
+        }
+
+        let Some(operator_end) = Self::latest_value_operator_end(trimmed) else {
+            return false;
+        };
+        let raw_after_operator = raw_segment.get(operator_end..).unwrap_or("");
+        let Some(value_segment) =
+            Self::predicate_continuation_value_segment(raw_after_operator, clause)
+        else {
+            return false;
+        };
+
+        Self::is_completed_value_expression(value_segment)
+    }
+
+    fn predicate_continuation_value_segment<'a>(
+        raw_after_operator: &'a str,
+        clause: &str,
+    ) -> Option<&'a str> {
+        let trimmed_end = raw_after_operator.trim_end();
+        if trimmed_end.trim().is_empty() {
+            return None;
+        }
+
+        if raw_after_operator
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
         {
+            let value_segment = trimmed_end.trim();
+            return (!value_segment.ends_with(',')).then_some(value_segment);
+        }
+
+        let upper = trimmed_end.to_ascii_uppercase();
+        let words = Self::statement_words(&upper);
+        let prefix = words.last().copied()?;
+        if !Self::is_predicate_continuation_prefix(prefix, clause) {
+            return None;
+        }
+
+        let prefix_start = upper.rfind(prefix)?;
+        let before_prefix = &trimmed_end[..prefix_start];
+        if !before_prefix
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+        {
+            return None;
+        }
+
+        let value_segment = before_prefix.trim();
+        (!value_segment.ends_with(',')).then_some(value_segment)
+    }
+
+    fn is_completed_value_expression(value_segment: &str) -> bool {
+        let value = value_segment.trim();
+        if value.is_empty() || value.ends_with(',') {
+            return false;
+        }
+        if value.ends_with(')') {
+            return true;
+        }
+        if value.ends_with('\'') || value.ends_with('"') {
             return true;
         }
 
-        let words = Self::statement_words(trimmed);
+        let token = value
+            .split(|ch: char| ch.is_whitespace() || ch == ',')
+            .filter(|token| !token.is_empty())
+            .next_back()
+            .unwrap_or("")
+            .trim_matches(|ch| matches!(ch, '\'' | '"' | '`' | '[' | ']' | ';'));
+        if token.is_empty() {
+            return false;
+        }
+
+        let token_upper = token.to_ascii_uppercase();
         matches!(
-            words.as_slice(),
-            [.., "LIKE"]
-                | [.., "ILIKE"]
-                | [.., "RLIKE"]
-                | [.., "REGEXP"]
-                | [.., "IS"]
-                | [.., "IS", "NOT"]
-                | [.., "IN"]
-                | [.., "BETWEEN"]
-        ) || trimmed.ends_with("IN (")
-            || trimmed.ends_with("NOT IN (")
+            token_upper.as_str(),
+            "DEFAULT"
+                | "NULL"
+                | "TRUE"
+                | "FALSE"
+                | "CURRENT_DATE"
+                | "CURRENT_TIMESTAMP"
+                | "NOW"
+                | "NOW()"
+                | "TODAY"
+                | "TODAY()"
+        ) || token.parse::<f64>().is_ok()
+            || token.starts_with('$')
+            || token.starts_with(':')
+            || token == "?"
+    }
+
+    fn is_predicate_continuation_prefix(prefix: &str, clause: &str) -> bool {
+        matches!(
+            prefix,
+            "A" | "AN" | "AND" | "O" | "OR" | "L" | "LI" | "LIM" | "LIMI" | "LIMIT"
+        ) || matches!(
+            (clause, prefix),
+            (
+                "WHERE" | "ON",
+                "G" | "GR"
+                    | "GRO"
+                    | "GROU"
+                    | "GROUP"
+                    | "H"
+                    | "HA"
+                    | "HAV"
+                    | "HAVI"
+                    | "HAVIN"
+                    | "HAVING"
+                    | "ORD"
+                    | "ORDE"
+                    | "ORDER"
+            ) | ("HAVING", "ORD" | "ORDE" | "ORDER")
+                | ("ON" | "SET", "W" | "WH" | "WHE" | "WHER" | "WHERE")
+                | (
+                    "SET",
+                    "R" | "RE"
+                        | "RET"
+                        | "RETU"
+                        | "RETUR"
+                        | "RETURN"
+                        | "RETURNI"
+                        | "RETURNIN"
+                        | "RETURNING"
+                )
+        )
     }
 
     fn is_value_keyword_prefix(word: &str) -> bool {
@@ -1446,10 +1669,25 @@ impl SqlParser {
         let text_before = source.get(..cursor_offset).unwrap_or(source);
         let searchable_text_before = Self::mask_sql_noise(text_before);
         let text_upper = searchable_text_before.to_ascii_uppercase();
+        let raw_text_upper = text_before.to_ascii_uppercase();
         let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
         let statement_upper = &text_upper[statement_start..];
+        let raw_statement_upper = &raw_text_upper[statement_start..];
 
-        Self::is_expression_value_context(statement_upper)
+        Self::is_expression_value_context(statement_upper, raw_statement_upper)
+    }
+
+    fn predicate_continuation_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let raw_text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+        let raw_statement_upper = &raw_text_upper[statement_start..];
+
+        Self::is_predicate_continuation_context(statement_upper, raw_statement_upper)
     }
 
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
@@ -3799,6 +4037,26 @@ mod tests {
             CompletionContext::ExpressionValueClause
         );
         assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner = 'app' "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner = 'app' O"),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner = 'app' AND "),
+            CompletionContext::WhereClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner BETWEEN 1 AND "),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner BETWEEN 1 AND 5 "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
             analyzed_context_at_end("SELECT * FROM users "),
             CompletionContext::FromContinuationClause
         );
@@ -3901,6 +4159,16 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(having_sql, position_at_end(having_sql)),
             CompletionContext::ExpressionValueClause
+        );
+
+        let having_continuation_sql =
+            "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > 1 ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                having_continuation_sql,
+                position_at_end(having_continuation_sql)
+            ),
+            CompletionContext::PredicateContinuationClause
         );
 
         let order_sql =
@@ -4073,6 +4341,15 @@ mod tests {
                 position_at_end(update_value_prefix_sql)
             ),
             CompletionContext::ExpressionValueClause
+        );
+
+        let update_value_continuation_sql = "UPDATE app.users SET name = 'app' ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_value_continuation_sql,
+                position_at_end(update_value_continuation_sql)
+            ),
+            CompletionContext::PredicateContinuationClause
         );
 
         let update_table_sql = "UPDATE app.us";

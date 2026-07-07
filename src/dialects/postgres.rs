@@ -671,6 +671,18 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::PredicateContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in common::predicate_continuation_keywords(sql, position, true) {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::UpdateActionClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 for keyword in ["SET"] {
