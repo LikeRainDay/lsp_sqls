@@ -448,6 +448,15 @@ impl Dialect for ClickHouseDialect {
                     items.push(self.create_keyword_item(keyword));
                 }
             }
+            crate::parser::CompletionContext::ReferenceRuleClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["CASCADE", "RESTRICT", "NO ACTION", "SET NULL"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
             crate::parser::CompletionContext::ColumnTargetClause => {
                 let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["column"]);
                 if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {

@@ -172,6 +172,38 @@ async fn assert_references_completion(
     assert!(has_label(&prefixed_action, "ON DELETE"));
     assert!(has_label(&prefixed_action, "ON UPDATE"));
 
+    let delete_rules = complete(
+        dialect,
+        &format!(
+            "CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook ON DELETE "
+        ),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&delete_rules, "CASCADE"));
+    assert!(has_label(&delete_rules, "RESTRICT"));
+    assert!(has_label(&delete_rules, "NO ACTION"));
+    assert!(has_label(&delete_rules, "SET NULL"));
+    assert!(
+        !has_label(&delete_rules, qualified_table_label),
+        "REFERENCES rule position should not suggest relation names: {delete_rules:?}"
+    );
+    assert!(
+        !has_label(&delete_rules, "owner"),
+        "REFERENCES rule position should not suggest columns: {delete_rules:?}"
+    );
+
+    let prefixed_rule = complete(
+        dialect,
+        &format!(
+            "CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook ON UPDATE C"
+        ),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&prefixed_rule, "CASCADE"));
+    assert!(!has_label(&prefixed_rule, "RESTRICT"));
+
     let alter_columns = complete(
         dialect,
         &format!(

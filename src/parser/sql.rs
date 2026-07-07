@@ -32,6 +32,8 @@ pub enum CompletionContext {
     ReferenceColumnClause,
     /// 在 REFERENCES table 之后，应该补全外键引用动作
     ReferenceActionClause,
+    /// 在 REFERENCES table ON DELETE/UPDATE 之后，应该补全外键规则
+    ReferenceRuleClause,
     /// 在 ALTER TABLE 的列目标位置，应该补全当前表列名
     ColumnTargetClause,
     /// 在 ALTER TABLE 的约束目标位置，应该补全当前表约束名
@@ -665,6 +667,10 @@ impl SqlParser {
             return CompletionContext::ReferenceColumnClause;
         }
 
+        if Self::reference_rule_context_at_position(source, position) {
+            return CompletionContext::ReferenceRuleClause;
+        }
+
         if Self::reference_action_context_at_position(source, position) {
             return CompletionContext::ReferenceActionClause;
         }
@@ -889,6 +895,10 @@ impl SqlParser {
 
         if Self::is_reference_column_context(statement_upper) {
             return CompletionContext::ReferenceColumnClause;
+        }
+
+        if Self::is_reference_rule_context(statement_upper) {
+            return CompletionContext::ReferenceRuleClause;
         }
 
         if Self::is_reference_action_context(statement_upper) {
@@ -1148,6 +1158,17 @@ impl SqlParser {
         Self::is_reference_action_context(statement_upper)
     }
 
+    fn reference_rule_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_reference_rule_context(statement_upper)
+    }
+
     fn is_join_using_column_context(statement_upper: &str) -> bool {
         let Some(using_position) = Self::previous_keyword_position(statement_upper, "USING") else {
             return false;
@@ -1282,6 +1303,72 @@ impl SqlParser {
             .last()
             .is_some_and(|ch| ch.is_whitespace())
             && words.len() <= 2
+    }
+
+    fn is_reference_rule_context(statement_upper: &str) -> bool {
+        let Some(references_position) =
+            Self::previous_keyword_position(statement_upper, "REFERENCES")
+        else {
+            return false;
+        };
+        let after_references = references_position + "REFERENCES".len();
+        let Some((_, after_relation)) = Self::read_relation_reference_after_preserving_trailing(
+            statement_upper,
+            after_references,
+        ) else {
+            return false;
+        };
+        let after_relation_text = &statement_upper[after_relation..];
+        if after_relation_text.contains('(') {
+            return false;
+        }
+
+        let delete_position = Self::previous_keyword_position(statement_upper, "ON DELETE");
+        let update_position = Self::previous_keyword_position(statement_upper, "ON UPDATE");
+        let Some((action_position, action_keyword)) = [
+            delete_position.map(|position| (position, "ON DELETE")),
+            update_position.map(|position| (position, "ON UPDATE")),
+        ]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(position, _)| *position) else {
+            return false;
+        };
+        if action_position < after_relation {
+            return false;
+        }
+
+        let after_action = action_position + action_keyword.len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_action,
+            statement_upper.len(),
+            &[
+                "ON DELETE",
+                "ON UPDATE",
+                "MATCH",
+                "DEFERRABLE",
+                "NOT DEFERRABLE",
+                "INITIALLY",
+            ],
+        ) {
+            return false;
+        }
+
+        let after_action_text = &statement_upper[after_action..];
+        if after_action_text.trim_start().is_empty() {
+            return !after_action_text.is_empty();
+        }
+
+        if after_action_text
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+        {
+            return false;
+        }
+
+        Self::statement_words(after_action_text).len() <= 2
     }
 
     fn is_reference_column_context(statement_upper: &str) -> bool {
@@ -3256,12 +3343,32 @@ mod tests {
 
         let references_on_delete_sql =
             "CREATE TABLE app.orders (user_id INT REFERENCES app.users ON DELETE ";
-        assert_ne!(
+        assert_eq!(
             parser.analyze_completion_context_fallback(
                 references_on_delete_sql,
                 position_at_end(references_on_delete_sql)
             ),
-            CompletionContext::ReferenceActionClause
+            CompletionContext::ReferenceRuleClause
+        );
+
+        let references_on_update_prefix_sql =
+            "CREATE TABLE app.orders (user_id INT REFERENCES app.users ON UPDATE C";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                references_on_update_prefix_sql,
+                position_at_end(references_on_update_prefix_sql)
+            ),
+            CompletionContext::ReferenceRuleClause
+        );
+
+        let references_on_delete_rule_sql =
+            "CREATE TABLE app.orders (user_id INT REFERENCES app.users ON DELETE CASCADE ";
+        assert_ne!(
+            parser.analyze_completion_context_fallback(
+                references_on_delete_rule_sql,
+                position_at_end(references_on_delete_rule_sql)
+            ),
+            CompletionContext::ReferenceRuleClause
         );
 
         let references_completed_column_sql =
