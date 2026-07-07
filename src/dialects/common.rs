@@ -167,6 +167,43 @@ pub(crate) fn create_keyword_item(dialect_label: &str, keyword: &str) -> Complet
     }
 }
 
+pub(crate) fn create_operator_item(operator: &str, sort_prefix: &str) -> CompletionItem {
+    CompletionItem {
+        label: operator.to_string(),
+        kind: Some(CompletionItemKind::OPERATOR),
+        detail: Some(format!("Operator: {}", operator)),
+        documentation: None,
+        deprecated: None,
+        preselect: None,
+        sort_text: Some(completion_sort_text(sort_prefix, operator)),
+        filter_text: None,
+        insert_text: Some(operator.to_string()),
+        insert_text_format: None,
+        insert_text_mode: None,
+        text_edit: None,
+        additional_text_edits: None,
+        commit_characters: None,
+        command: None,
+        data: None,
+        tags: None,
+        label_details: None,
+    }
+}
+
+pub(crate) fn add_operator_items(
+    items: &mut Vec<CompletionItem>,
+    operators: &[&str],
+    prefix: &str,
+    sort_prefix: &str,
+) {
+    for operator in operators {
+        if !prefix.is_empty() && !operator.to_lowercase().starts_with(prefix) {
+            continue;
+        }
+        items.push(create_operator_item(operator, sort_prefix));
+    }
+}
+
 pub(crate) fn create_table_item(
     table: &Table,
     schema: &Schema,

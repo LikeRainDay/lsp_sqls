@@ -342,40 +342,71 @@ impl Dialect for ClickHouseDialect {
                 }
             }
             crate::parser::CompletionContext::HavingClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["having", "and", "or", "not"],
+                );
+                let predicate_operator_expected =
+                    common::predicate_operator_expected(sql, position);
                 let having_keywords: Vec<&str> = keywords
                     .iter()
                     .filter(|&&k| {
-                        matches!(
-                            k,
-                            "AND"
-                                | "OR"
-                                | "NOT"
-                                | "IN"
-                                | "LIKE"
-                                | "ILIKE"
-                                | "BETWEEN"
-                                | "IS"
-                                | "NULL"
-                        )
+                        if predicate_operator_expected {
+                            matches!(
+                                k,
+                                "AND"
+                                    | "OR"
+                                    | "NOT"
+                                    | "IN"
+                                    | "LIKE"
+                                    | "ILIKE"
+                                    | "BETWEEN"
+                                    | "IS"
+                                    | "NULL"
+                            )
+                        } else {
+                            matches!(k, "NOT" | "NULL")
+                        }
                     })
                     .copied()
                     .collect();
-                for keyword in having_keywords {
-                    items.push(self.create_keyword_item(keyword));
-                }
-                let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
-                for func in aggregate_functions {
-                    items.push(self.create_keyword_item(func));
-                }
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
+
+                if !predicate_operator_expected {
+                    let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
+                    for func in aggregate_functions {
+                        if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
+                            continue;
+                        }
+                        items.push(self.create_keyword_item(func));
+                    }
+                    if let Some(schema) = schema {
+                        for table in &schema.tables {
+                            for column in &table.columns {
+                                if !prefix.is_empty()
+                                    && !column.name.to_lowercase().starts_with(&prefix)
+                                {
+                                    continue;
+                                }
+                                items.push(self.create_column_item(
+                                    column,
+                                    Some(&format!("{}.{}", schema.database, table.name)),
+                                ));
+                            }
                         }
                     }
+                }
+
+                for keyword in having_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+
+                if predicate_operator_expected {
+                    let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
+                    common::add_operator_items(&mut items, &operators, &prefix, "1");
                 }
             }
             crate::parser::CompletionContext::TableColumn => {

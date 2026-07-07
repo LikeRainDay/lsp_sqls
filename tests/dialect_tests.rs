@@ -443,6 +443,54 @@ async fn test_postgres_completion_keeps_relation_targets_separate_from_column_ta
         !operator_items.iter().any(|item| item.label == "id"),
         "WHERE operator position should not keep returning column candidates: {operator_items:?}"
     );
+
+    let having_start_sql =
+        "SELECT owner, COUNT(*) FROM public.casbin_api_rule GROUP BY owner HAVING ";
+    let having_start_items = dialect
+        .completion(
+            having_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_start_items.iter().any(|item| item.label == "owner"),
+        "HAVING start should include expression candidates: {having_start_items:?}"
+    );
+    assert!(
+        having_start_items.iter().any(|item| item.label == "COUNT"),
+        "HAVING start should include aggregate functions: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "HAVING start should not suggest operators before a left-side expression: {having_start_items:?}"
+    );
+
+    let having_operator_sql =
+        "SELECT owner, COUNT(*) FROM public.casbin_api_rule GROUP BY owner HAVING COUNT(*) ";
+    let having_operator_items = dialect
+        .completion(
+            having_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_operator_items.iter().any(|item| item.label == ">"),
+        "HAVING operator position should include comparison operators: {having_operator_items:?}"
+    );
+    assert!(
+        !having_operator_items.iter().any(|item| item.label == "owner"),
+        "HAVING operator position should not keep returning expression candidates: {having_operator_items:?}"
+    );
 }
 
 #[tokio::test]
@@ -655,10 +703,65 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
         "WHERE completion should include MySQL operators after a left-side expression: {where_operator_items:?}"
     );
     assert!(
+        where_operator_items.iter().any(|item| item.label == "="),
+        "WHERE completion should include MySQL symbol operators after a left-side expression: {where_operator_items:?}"
+    );
+    assert!(
         !where_operator_items
             .iter()
             .any(|item| item.label == "order_id"),
         "WHERE operator position should not keep returning MySQL columns: {where_operator_items:?}"
+    );
+
+    let having_start_sql = "SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING ";
+    let having_start_items = dialect
+        .completion(
+            having_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_start_items
+            .iter()
+            .any(|item| item.label == "user_id"),
+        "HAVING start should include MySQL expression candidates: {having_start_items:?}"
+    );
+    assert!(
+        having_start_items.iter().any(|item| item.label == "COUNT"),
+        "HAVING start should include MySQL aggregate functions: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "HAVING start should not suggest MySQL operators before a left-side expression: {having_start_items:?}"
+    );
+
+    let having_operator_sql =
+        "SELECT user_id, COUNT(*) FROM orders GROUP BY user_id HAVING COUNT(*) ";
+    let having_operator_items = dialect
+        .completion(
+            having_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_operator_items.iter().any(|item| item.label == "="),
+        "HAVING operator position should include MySQL symbol operators: {having_operator_items:?}"
+    );
+    assert!(
+        !having_operator_items
+            .iter()
+            .any(|item| item.label == "user_id"),
+        "HAVING operator position should not keep returning MySQL expression candidates: {having_operator_items:?}"
     );
 
     let unqualified_table_items = dialect
@@ -838,6 +941,56 @@ async fn test_hive_dialect() {
             .iter()
             .any(|item| item.label.ends_with(".id")),
         "Hive WHERE operator position should not keep returning fields: {where_operator_items:?}"
+    );
+
+    let having_start_sql = "SELECT id, COUNT(*) FROM events GROUP BY id HAVING ";
+    let having_start_items = dialect
+        .completion(
+            having_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_start_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "Hive HAVING start should include field candidates: {having_start_items:?}"
+    );
+    assert!(
+        having_start_items.iter().any(|item| item.label == "COUNT"),
+        "Hive HAVING start should include aggregate functions: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "Hive HAVING start should not suggest operators before a left-side expression: {having_start_items:?}"
+    );
+
+    let having_operator_sql = "SELECT id, COUNT(*) FROM events GROUP BY id HAVING COUNT(*) ";
+    let having_operator_items = dialect
+        .completion(
+            having_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_operator_items.iter().any(|item| item.label == "="),
+        "Hive HAVING operator position should include comparison operators: {having_operator_items:?}"
+    );
+    assert!(
+        !having_operator_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "Hive HAVING operator position should not keep returning fields: {having_operator_items:?}"
     );
 }
 
@@ -1187,6 +1340,56 @@ async fn test_clickhouse_dialect() {
             .iter()
             .any(|item| item.label.ends_with(".id")),
         "ClickHouse WHERE operator position should not keep returning fields: {where_operator_items:?}"
+    );
+
+    let having_start_sql = "SELECT id, COUNT(*) FROM events GROUP BY id HAVING ";
+    let having_start_items = dialect
+        .completion(
+            having_start_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_start_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_start_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "ClickHouse HAVING start should include field candidates: {having_start_items:?}"
+    );
+    assert!(
+        having_start_items.iter().any(|item| item.label == "COUNT"),
+        "ClickHouse HAVING start should include aggregate functions: {having_start_items:?}"
+    );
+    assert!(
+        !having_start_items
+            .iter()
+            .any(|item| item.kind == Some(tower_lsp::lsp_types::CompletionItemKind::OPERATOR)),
+        "ClickHouse HAVING start should not suggest operators before a left-side expression: {having_start_items:?}"
+    );
+
+    let having_operator_sql = "SELECT id, COUNT(*) FROM events GROUP BY id HAVING COUNT(*) ";
+    let having_operator_items = dialect
+        .completion(
+            having_operator_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: having_operator_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        having_operator_items.iter().any(|item| item.label == "="),
+        "ClickHouse HAVING operator position should include comparison operators: {having_operator_items:?}"
+    );
+    assert!(
+        !having_operator_items
+            .iter()
+            .any(|item| item.label.ends_with(".id")),
+        "ClickHouse HAVING operator position should not keep returning fields: {having_operator_items:?}"
     );
 }
 

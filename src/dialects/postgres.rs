@@ -324,43 +324,53 @@ impl Dialect for PostgresDialect {
                     position,
                     &["having", "and", "or", "not"],
                 );
-                if let Some(schema) = schema {
-                    if let Some(tree) = &parse_result.tree {
-                        let referenced_tables =
-                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
-                        let use_table_prefix = referenced_tables.len() > 1;
-                        self.add_schema_columns(
+                let predicate_operator_expected =
+                    common::predicate_operator_expected(sql, position);
+                if !predicate_operator_expected {
+                    if let Some(schema) = schema {
+                        if let Some(tree) = &parse_result.tree {
+                            let referenced_tables = Self::referenced_table_names_at_position(
+                                &parser, tree, sql, position,
+                            );
+                            let use_table_prefix = referenced_tables.len() > 1;
+                            self.add_schema_columns(
+                                &mut items,
+                                schema,
+                                &referenced_tables,
+                                use_table_prefix,
+                                &prefix,
+                                "0",
+                            );
+                        }
+                        self.add_schema_functions(
                             &mut items,
                             schema,
-                            &referenced_tables,
-                            use_table_prefix,
                             &prefix,
-                            "0",
+                            "1",
+                            Self::cursor_has_identifier_qualifier(sql, position),
                         );
                     }
-                    self.add_schema_functions(
-                        &mut items,
-                        schema,
-                        &prefix,
-                        "1",
-                        Self::cursor_has_identifier_qualifier(sql, position),
-                    );
-                }
 
-                let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
-                for func in aggregate_functions {
-                    if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
-                        continue;
+                    let aggregate_functions = vec!["COUNT", "SUM", "AVG", "MIN", "MAX"];
+                    for func in aggregate_functions {
+                        if !prefix.is_empty() && !func.to_lowercase().starts_with(&prefix) {
+                            continue;
+                        }
+                        let mut item = self.create_keyword_item(func);
+                        item.kind = Some(CompletionItemKind::FUNCTION);
+                        common::set_completion_sort_text(&mut item, "1", func);
+                        items.push(item);
                     }
-                    let mut item = self.create_keyword_item(func);
-                    item.kind = Some(CompletionItemKind::FUNCTION);
-                    common::set_completion_sort_text(&mut item, "1", func);
-                    items.push(item);
                 }
 
-                let having_keywords = vec![
-                    "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
-                ];
+                let having_keywords = if predicate_operator_expected {
+                    vec![
+                        "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "SIMILAR", "BETWEEN", "IS",
+                        "NULL", "TRUE", "FALSE",
+                    ]
+                } else {
+                    vec!["NOT", "TRUE", "FALSE"]
+                };
                 for keyword in having_keywords {
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;
@@ -368,6 +378,11 @@ impl Dialect for PostgresDialect {
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "2", keyword);
                     items.push(item);
+                }
+
+                if predicate_operator_expected {
+                    let operators = vec!["=", "<>", "!=", ">", "<", ">=", "<="];
+                    common::add_operator_items(&mut items, &operators, &prefix, "1");
                 }
             }
 
