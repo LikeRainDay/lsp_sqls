@@ -166,6 +166,15 @@ pub(crate) fn order_direction_sort_prefix(keyword: &str) -> &'static str {
     }
 }
 
+pub(crate) fn group_by_continuation_sort_prefix(keyword: &str) -> &'static str {
+    match keyword {
+        "," => "0",
+        "HAVING" => "1",
+        "ORDER BY" => "2",
+        _ => "3",
+    }
+}
+
 fn normalize_order_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ';'))

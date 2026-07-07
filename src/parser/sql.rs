@@ -26,6 +26,8 @@ pub enum CompletionContext {
     OrderDirectionClause,
     /// 在 GROUP BY 子句中，应该补全列名
     GroupByClause,
+    /// 在 GROUP BY 表达式之后，应该补全后续分组子句
+    GroupByContinuationClause,
     /// 在 HAVING 子句中，应该补全列名和关键字
     HavingClause,
     /// 在 JOIN ... USING (...) 子句中，应该补全可共享的列名
@@ -669,6 +671,10 @@ impl SqlParser {
             return CompletionContext::OrderDirectionClause;
         }
 
+        if Self::group_by_continuation_context_at_position(source, position) {
+            return CompletionContext::GroupByContinuationClause;
+        }
+
         if Self::reference_column_context_at_position(source, position) {
             return CompletionContext::ReferenceColumnClause;
         }
@@ -901,6 +907,10 @@ impl SqlParser {
 
         if Self::is_order_direction_context(statement_upper) {
             return CompletionContext::OrderDirectionClause;
+        }
+
+        if Self::is_group_by_continuation_context(statement_upper) {
+            return CompletionContext::GroupByContinuationClause;
         }
 
         if Self::is_reference_column_context(statement_upper) {
@@ -1146,6 +1156,17 @@ impl SqlParser {
         Self::is_order_direction_context(statement_upper)
     }
 
+    fn group_by_continuation_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_group_by_continuation_context(statement_upper)
+    }
+
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
         let cursor_offset = Self::byte_offset_for_position(source, position);
         let text_before = source.get(..cursor_offset).unwrap_or(source);
@@ -1345,6 +1366,104 @@ impl SqlParser {
             ),
             _ => false,
         }
+    }
+
+    fn is_group_by_continuation_context(statement_upper: &str) -> bool {
+        let Some(group_position) = Self::previous_keyword_position(statement_upper, "GROUP BY")
+        else {
+            return false;
+        };
+        let after_group = group_position + "GROUP BY".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_group,
+            statement_upper.len(),
+            &[
+                "HAVING", "ORDER BY", "LIMIT", "OFFSET", "FETCH", "UNION", "WHERE",
+            ],
+        ) {
+            return false;
+        }
+
+        let segment_start = statement_upper[after_group..]
+            .rfind(',')
+            .map(|position| after_group + position + 1)
+            .unwrap_or(after_group);
+        let segment = &statement_upper[segment_start..];
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() || trimmed.ends_with('.') || trimmed.ends_with('(') {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        if words.is_empty() {
+            return false;
+        }
+
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return true;
+        }
+
+        if words.len() < 2 {
+            return false;
+        }
+
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        matches!(
+            prefix,
+            "H" | "HA"
+                | "HAV"
+                | "HAVI"
+                | "HAVIN"
+                | "HAVING"
+                | "O"
+                | "OR"
+                | "ORD"
+                | "ORDE"
+                | "ORDER"
+                | "L"
+                | "LI"
+                | "LIM"
+                | "LIMI"
+                | "LIMIT"
+                | "OF"
+                | "OFF"
+                | "OFFS"
+                | "OFFSE"
+                | "OFFSET"
+                | "F"
+                | "FE"
+                | "FET"
+                | "FETC"
+                | "FETCH"
+                | "W"
+                | "WI"
+                | "WIT"
+                | "WITH"
+                | "S"
+                | "SO"
+                | "SOR"
+                | "SORT"
+                | "C"
+                | "CL"
+                | "CLU"
+                | "CLUS"
+                | "CLUST"
+                | "CLUSTE"
+                | "CLUSTER"
+                | "D"
+                | "DI"
+                | "DIS"
+                | "DIST"
+                | "DISTR"
+                | "DISTRI"
+                | "DISTRIB"
+                | "DISTRIBU"
+                | "DISTRIBUT"
+                | "DISTRIBUTE"
+        )
     }
 
     fn is_reference_relation_target_context(statement_upper: &str) -> bool {
@@ -3297,6 +3416,40 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(order_sql, position_at_end(order_sql)),
             CompletionContext::OrderByClause
+        );
+
+        let group_sql = "SELECT user_id, count(*) FROM orders GROUP BY ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(group_sql, position_at_end(group_sql)),
+            CompletionContext::GroupByClause
+        );
+
+        let group_continuation_sql = "SELECT user_id, count(*) FROM orders GROUP BY user_id ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                group_continuation_sql,
+                position_at_end(group_continuation_sql)
+            ),
+            CompletionContext::GroupByContinuationClause
+        );
+
+        let group_continuation_prefix_sql =
+            "SELECT user_id, count(*) FROM orders GROUP BY user_id H";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                group_continuation_prefix_sql,
+                position_at_end(group_continuation_prefix_sql)
+            ),
+            CompletionContext::GroupByContinuationClause
+        );
+
+        let group_after_comma_sql = "SELECT user_id, count(*) FROM orders GROUP BY user_id, ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                group_after_comma_sql,
+                position_at_end(group_after_comma_sql)
+            ),
+            CompletionContext::GroupByClause
         );
 
         let order_direction_sql = "SELECT * FROM users ORDER BY name ";

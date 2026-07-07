@@ -284,13 +284,9 @@ impl Dialect for PostgresDialect {
                 }
             }
 
-            crate::parser::CompletionContext::OrderByClause
-            | crate::parser::CompletionContext::GroupByClause => {
-                let prefix = common::cursor_prefix_excluding_keywords(
-                    sql,
-                    position,
-                    &["order", "group", "by"],
-                );
+            crate::parser::CompletionContext::OrderByClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["order", "by"]);
                 if let Some(schema) = schema {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables =
@@ -314,6 +310,42 @@ impl Dialect for PostgresDialect {
                     }
                     let mut item = self.create_keyword_item(keyword);
                     common::set_completion_sort_text(&mut item, "1", keyword);
+                    items.push(item);
+                }
+            }
+
+            crate::parser::CompletionContext::GroupByClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["group", "by"]);
+                if let Some(schema) = schema {
+                    if let Some(tree) = &parse_result.tree {
+                        let referenced_tables =
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position);
+                        let use_table_prefix = referenced_tables.len() > 1;
+                        self.add_schema_columns(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            use_table_prefix,
+                            &prefix,
+                            "0",
+                        );
+                    }
+                }
+            }
+
+            crate::parser::CompletionContext::GroupByContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [",", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "FETCH"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(
+                        &mut item,
+                        common::group_by_continuation_sort_prefix(keyword),
+                        keyword,
+                    );
                     items.push(item);
                 }
             }

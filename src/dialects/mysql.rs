@@ -394,6 +394,22 @@ impl Dialect for MysqlDialect {
                 // GROUP BY 不添加任何关键字
             }
 
+            crate::parser::CompletionContext::GroupByContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [",", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "WITH ROLLUP"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(
+                        &mut item,
+                        common::group_by_continuation_sort_prefix(keyword),
+                        keyword,
+                    );
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::HavingClause => {
                 let prefix = common::cursor_prefix_excluding_keywords(
                     sql,

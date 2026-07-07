@@ -320,8 +320,7 @@ impl Dialect for ClickHouseDialect {
                     }
                 }
             }
-            crate::parser::CompletionContext::OrderByClause
-            | crate::parser::CompletionContext::GroupByClause => {
+            crate::parser::CompletionContext::OrderByClause => {
                 let keywords_list: Vec<&str> = keywords
                     .iter()
                     .filter(|&&k| matches!(k, "ASC" | "DESC" | "BY"))
@@ -339,6 +338,33 @@ impl Dialect for ClickHouseDialect {
                             ));
                         }
                     }
+                }
+            }
+            crate::parser::CompletionContext::GroupByClause => {
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            items.push(self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            ));
+                        }
+                    }
+                }
+            }
+            crate::parser::CompletionContext::GroupByContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [",", "HAVING", "ORDER BY", "LIMIT", "OFFSET", "WITH TOTALS"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(
+                        &mut item,
+                        common::group_by_continuation_sort_prefix(keyword),
+                        keyword,
+                    );
+                    items.push(item);
                 }
             }
             crate::parser::CompletionContext::OrderDirectionClause => {
