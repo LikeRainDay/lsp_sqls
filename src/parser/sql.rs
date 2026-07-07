@@ -1262,9 +1262,59 @@ impl SqlParser {
         }
 
         if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
-            return words
-                .last()
-                .is_some_and(|word| !matches!(*word, "FIRST" | "LAST"));
+            return true;
+        }
+
+        if words.len() < 2 {
+            return false;
+        }
+
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        let is_order_modifier_prefix = matches!(
+            prefix,
+            "A" | "AS"
+                | "ASC"
+                | "D"
+                | "DE"
+                | "DES"
+                | "DESC"
+                | "N"
+                | "NU"
+                | "NUL"
+                | "NULL"
+                | "NULLS"
+                | "F"
+                | "FI"
+                | "FIR"
+                | "FIRS"
+                | "FIRST"
+                | "FE"
+                | "FET"
+                | "FETC"
+                | "FETCH"
+                | "L"
+                | "LI"
+                | "LIM"
+                | "LIMI"
+                | "LIMIT"
+                | "LA"
+                | "LAS"
+                | "LAST"
+                | "O"
+                | "OF"
+                | "OFF"
+                | "OFFS"
+                | "OFFSE"
+                | "OFFSET"
+                | "W"
+                | "WI"
+                | "WIT"
+                | "WITH"
+        );
+        if is_order_modifier_prefix {
+            return true;
         }
 
         match words.as_slice() {
@@ -3272,6 +3322,24 @@ mod tests {
             parser.analyze_completion_context_fallback(
                 order_nulls_prefix_sql,
                 position_at_end(order_nulls_prefix_sql)
+            ),
+            CompletionContext::OrderDirectionClause
+        );
+
+        let order_after_direction_sql = "SELECT * FROM users ORDER BY name DESC ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                order_after_direction_sql,
+                position_at_end(order_after_direction_sql)
+            ),
+            CompletionContext::OrderDirectionClause
+        );
+
+        let order_after_nulls_sql = "SELECT * FROM users ORDER BY name DESC NULLS FIRST ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                order_after_nulls_sql,
+                position_at_end(order_after_nulls_sql)
             ),
             CompletionContext::OrderDirectionClause
         );

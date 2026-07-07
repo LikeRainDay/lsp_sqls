@@ -90,6 +90,88 @@ pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool
     )
 }
 
+pub(crate) fn order_direction_keywords(
+    sql: &str,
+    position: Position,
+    supports_nulls_ordering: bool,
+    continuation_keywords: &[&'static str],
+) -> Vec<&'static str> {
+    let text_before = text_before_position(sql, position);
+    let text_upper = text_before.to_ascii_uppercase();
+    let statement_start = text_upper.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_upper = &text_upper[statement_start..];
+
+    let Some(order_position) = statement_upper.rfind("ORDER BY") else {
+        return Vec::new();
+    };
+
+    let after_order_start = statement_start + order_position + "ORDER BY".len();
+    let after_order = text_before.get(after_order_start..).unwrap_or("");
+    let segment = after_order.rsplit(',').next().unwrap_or(after_order);
+    let trimmed = segment.trim_end();
+    if trimmed.is_empty() || trimmed.ends_with('.') || trimmed.ends_with('(') {
+        return Vec::new();
+    }
+
+    let has_trailing_whitespace = segment.chars().last().is_some_and(|ch| ch.is_whitespace());
+    let raw_tokens = trimmed
+        .split(|ch: char| ch.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if raw_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let complete_tokens = if has_trailing_whitespace {
+        raw_tokens.as_slice()
+    } else {
+        &raw_tokens[..raw_tokens.len().saturating_sub(1)]
+    };
+    let complete_upper = complete_tokens
+        .iter()
+        .map(|token| normalize_order_token(token))
+        .collect::<Vec<_>>();
+    let last_complete = complete_upper.last().map(String::as_str);
+    let previous_complete = complete_upper.iter().rev().nth(1).map(String::as_str);
+
+    let mut keywords = match (previous_complete, last_complete) {
+        (_, Some("NULLS")) if supports_nulls_ordering => vec!["FIRST", "LAST"],
+        (Some("NULLS"), Some("FIRST" | "LAST")) => continuation_keywords.to_vec(),
+        (_, Some("ASC" | "DESC")) => {
+            let mut options = Vec::new();
+            if supports_nulls_ordering {
+                options.extend(["NULLS FIRST", "NULLS LAST"]);
+            }
+            options.extend_from_slice(continuation_keywords);
+            options
+        }
+        _ => {
+            let mut options = vec!["ASC", "DESC"];
+            if supports_nulls_ordering {
+                options.extend(["NULLS FIRST", "NULLS LAST"]);
+            }
+            options.extend_from_slice(continuation_keywords);
+            options
+        }
+    };
+    keywords.dedup();
+    keywords
+}
+
+pub(crate) fn order_direction_sort_prefix(keyword: &str) -> &'static str {
+    match keyword {
+        "ASC" | "DESC" | "NULLS FIRST" | "NULLS LAST" | "FIRST" | "LAST" => "0",
+        "," => "1",
+        _ => "2",
+    }
+}
+
+fn normalize_order_token(token: &str) -> String {
+    token
+        .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ';'))
+        .to_ascii_uppercase()
+}
+
 pub(crate) fn cursor_identifier_token(text_before: &str) -> &str {
     let mut token_start = 0;
     let mut quote_end: Option<char> = None;

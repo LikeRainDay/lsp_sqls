@@ -320,12 +320,21 @@ impl Dialect for PostgresDialect {
 
             crate::parser::CompletionContext::OrderDirectionClause => {
                 let prefix = common::cursor_prefix(sql, position);
-                for keyword in ["ASC", "DESC", "NULLS FIRST", "NULLS LAST"] {
+                for keyword in common::order_direction_keywords(
+                    sql,
+                    position,
+                    true,
+                    &[",", "LIMIT", "OFFSET", "FETCH"],
+                ) {
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;
                     }
                     let mut item = self.create_keyword_item(keyword);
-                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    common::set_completion_sort_text(
+                        &mut item,
+                        common::order_direction_sort_prefix(keyword),
+                        keyword,
+                    );
                     items.push(item);
                 }
             }

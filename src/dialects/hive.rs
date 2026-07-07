@@ -340,11 +340,19 @@ impl Dialect for HiveDialect {
             }
             crate::parser::CompletionContext::OrderDirectionClause => {
                 let prefix = common::cursor_prefix(sql, position);
-                for keyword in ["ASC", "DESC"] {
+                for keyword in
+                    common::order_direction_keywords(sql, position, false, &[",", "LIMIT"])
+                {
                     if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
                         continue;
                     }
-                    items.push(self.create_keyword_item(keyword));
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(
+                        &mut item,
+                        common::order_direction_sort_prefix(keyword),
+                        keyword,
+                    );
+                    items.push(item);
                 }
             }
             crate::parser::CompletionContext::HavingClause => {

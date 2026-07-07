@@ -65,6 +65,20 @@ async fn mysql_order_by_direction_completion_excludes_fields() {
     assert!(has_label(&items, "DESC"));
     assert!(!has_label(&items, "owner"));
     assert!(!has_kind(&items, CompletionItemKind::FIELD));
+
+    let after_direction = complete(
+        &MysqlDialect::new(),
+        "SELECT * FROM shop.webhook ORDER BY owner ASC ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&after_direction, ","));
+    assert!(has_label(&after_direction, "LIMIT"));
+    assert!(has_label(&after_direction, "OFFSET"));
+    assert!(!has_label(&after_direction, "ASC"));
+    assert!(!has_label(&after_direction, "DESC"));
+    assert!(!has_label(&after_direction, "owner"));
+    assert!(!has_kind(&after_direction, CompletionItemKind::FIELD));
 }
 
 #[tokio::test]
@@ -93,4 +107,43 @@ async fn postgres_order_by_direction_completion_includes_nulls_options() {
     assert!(has_label(&prefixed, "NULLS FIRST"));
     assert!(has_label(&prefixed, "NULLS LAST"));
     assert!(!has_label(&prefixed, "ASC"));
+
+    let after_direction = complete(
+        &PostgresDialect::new(),
+        "SELECT * FROM public.webhook ORDER BY created_time DESC ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&after_direction, "NULLS FIRST"));
+    assert!(has_label(&after_direction, "NULLS LAST"));
+    assert!(has_label(&after_direction, "LIMIT"));
+    assert!(!has_label(&after_direction, "ASC"));
+    assert!(!has_label(&after_direction, "DESC"));
+    assert!(!has_label(&after_direction, "created_time"));
+    assert!(!has_kind(&after_direction, CompletionItemKind::FIELD));
+
+    let nulls_position = complete(
+        &PostgresDialect::new(),
+        "SELECT * FROM public.webhook ORDER BY created_time DESC NULLS ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&nulls_position, "FIRST"));
+    assert!(has_label(&nulls_position, "LAST"));
+    assert!(!has_label(&nulls_position, "NULLS FIRST"));
+    assert!(!has_label(&nulls_position, "ASC"));
+
+    let after_nulls_position = complete(
+        &PostgresDialect::new(),
+        "SELECT * FROM public.webhook ORDER BY created_time DESC NULLS FIRST ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&after_nulls_position, ","));
+    assert!(has_label(&after_nulls_position, "LIMIT"));
+    assert!(has_label(&after_nulls_position, "OFFSET"));
+    assert!(!has_label(&after_nulls_position, "NULLS FIRST"));
+    assert!(!has_label(&after_nulls_position, "ASC"));
+    assert!(!has_label(&after_nulls_position, "created_time"));
+    assert!(!has_kind(&after_nulls_position, CompletionItemKind::FIELD));
 }
