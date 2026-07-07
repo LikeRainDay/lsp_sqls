@@ -180,6 +180,37 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         "UPDATE SET operator position should not keep returning field candidates: {update_operator:?}"
     );
 
+    let update_value = complete(
+        dialect,
+        &format!("UPDATE {qualified_table} SET owner = "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&update_value, "DEFAULT"));
+    assert!(has_label(&update_value, "NULL"));
+    assert!(
+        !has_label(&update_value, "owner"),
+        "UPDATE SET value position should not return fields: {update_value:?}"
+    );
+    assert!(
+        !has_kind(&update_value, CompletionItemKind::CLASS),
+        "UPDATE SET value position should not return relation targets: {update_value:?}"
+    );
+    assert!(
+        !has_operator(&update_value, "="),
+        "UPDATE SET value position should not return operators: {update_value:?}"
+    );
+
+    let update_value_prefixed = complete(
+        dialect,
+        &format!("UPDATE {qualified_table} SET owner = NU"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&update_value_prefixed, "NULL"));
+    assert!(!has_label(&update_value_prefixed, "DEFAULT"));
+    assert!(!has_label(&update_value_prefixed, "owner"));
+
     let delete_actions =
         complete(dialect, &format!("DELETE FROM {qualified_table} "), &schema).await;
     assert!(has_label(&delete_actions, "WHERE"));
@@ -220,6 +251,44 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(has_label(&delete_where, "owner"));
     assert!(has_label(&delete_where, "name"));
     assert!(!has_label(&delete_where, "form_background_url"));
+
+    let where_value = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner = "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_value, "NULL"));
+    assert!(has_label(&where_value, "TRUE"));
+    assert!(
+        !has_label(&where_value, "DEFAULT"),
+        "WHERE value position should not suggest DEFAULT outside assignment values: {where_value:?}"
+    );
+    assert!(
+        !has_label(&where_value, "owner"),
+        "WHERE value position should not keep returning fields: {where_value:?}"
+    );
+    assert!(
+        !has_kind(&where_value, CompletionItemKind::CLASS),
+        "WHERE value position should not return relation targets: {where_value:?}"
+    );
+    assert!(
+        !has_operator(&where_value, "="),
+        "WHERE value position should not return operators: {where_value:?}"
+    );
+
+    let where_value_prefixed = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner = N"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_value_prefixed, "NULL"));
+    assert!(
+        !has_label(&where_value_prefixed, "TRUE"),
+        "Value keyword prefix should filter unrelated keywords: {where_value_prefixed:?}"
+    );
+    assert!(!has_label(&where_value_prefixed, "owner"));
 
     let returning = complete(
         dialect,

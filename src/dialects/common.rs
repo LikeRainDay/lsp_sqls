@@ -197,6 +197,24 @@ pub(crate) fn select_continuation_keywords(sql: &str, position: Position) -> Vec
     }
 }
 
+pub(crate) fn expression_value_allows_default(sql: &str, position: Position) -> bool {
+    let text_before = text_before_position(sql, position).to_ascii_uppercase();
+    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement = &text_before[statement_start..];
+
+    let Some(update_position) = statement.rfind("UPDATE") else {
+        return false;
+    };
+    let Some(set_position) = statement.rfind("SET") else {
+        return false;
+    };
+    if set_position < update_position {
+        return false;
+    }
+
+    !statement[set_position + "SET".len()..].contains("WHERE")
+}
+
 fn normalize_order_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ';'))

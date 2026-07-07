@@ -624,6 +624,22 @@ impl Dialect for HiveDialect {
                     items.push(item);
                 }
             }
+            crate::parser::CompletionContext::ExpressionValueClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                let mut keywords =
+                    vec!["NULL", "TRUE", "FALSE", "CURRENT_DATE", "CURRENT_TIMESTAMP"];
+                if common::expression_value_allows_default(sql, position) {
+                    keywords.insert(0, "DEFAULT");
+                }
+                for keyword in keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
             crate::parser::CompletionContext::UpdateActionClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 for keyword in ["SET"] {

@@ -20,6 +20,8 @@ pub enum CompletionContext {
     SelectContinuationClause,
     /// 在 WHERE 子句中，应该补全列名、操作符、关键字
     WhereClause,
+    /// 在谓词或赋值操作符之后，应该补全值表达式
+    ExpressionValueClause,
     /// 在表名后（如 table.），应该补全列名
     TableColumn,
     /// 在 JOIN 子句中，应该补全表名
@@ -723,6 +725,10 @@ impl SqlParser {
             return CompletionContext::InsertValueClause;
         }
 
+        if Self::expression_value_context_at_position(source, position) {
+            return CompletionContext::ExpressionValueClause;
+        }
+
         if let Some(context) =
             Self::analyze_relation_continuation_context_at_position(source, position)
         {
@@ -921,10 +927,6 @@ impl SqlParser {
             return CompletionContext::SelectClause;
         }
 
-        if Self::is_update_set_context(statement_upper) {
-            return CompletionContext::WhereClause;
-        }
-
         if Self::is_join_using_column_context(statement_upper) {
             return CompletionContext::UsingClause;
         }
@@ -971,6 +973,14 @@ impl SqlParser {
 
         if Self::is_insert_value_context(statement_upper) {
             return CompletionContext::InsertValueClause;
+        }
+
+        if Self::is_expression_value_context(statement_upper) {
+            return CompletionContext::ExpressionValueClause;
+        }
+
+        if Self::is_update_set_context(statement_upper) {
+            return CompletionContext::WhereClause;
         }
 
         if let Some(context) = Self::analyze_relation_continuation_context(statement_upper) {
@@ -1200,39 +1210,148 @@ impl SqlParser {
             return false;
         }
 
-        words.last().is_some_and(|word| {
-            matches!(
-                *word,
-                "D" | "DE"
-                    | "DEF"
-                    | "DEFA"
-                    | "DEFAU"
-                    | "DEFAUL"
-                    | "DEFAULT"
-                    | "N"
-                    | "NU"
-                    | "NUL"
-                    | "NULL"
-                    | "T"
-                    | "TR"
-                    | "TRU"
-                    | "TRUE"
-                    | "F"
-                    | "FA"
-                    | "FAL"
-                    | "FALS"
-                    | "FALSE"
-                    | "C"
-                    | "CU"
-                    | "CUR"
-                    | "CURR"
-                    | "CURRE"
-                    | "CURREN"
-                    | "CURRENT"
-                    | "CURRENT_DATE"
-                    | "CURRENT_TIMESTAMP"
-            )
-        })
+        words
+            .last()
+            .is_some_and(|word| Self::is_value_keyword_prefix(word))
+    }
+
+    fn is_expression_value_context(statement_upper: &str) -> bool {
+        let Some((clause_position, clause)) = [
+            (
+                "WHERE",
+                Self::previous_keyword_position(statement_upper, "WHERE"),
+            ),
+            (
+                "HAVING",
+                Self::previous_keyword_position(statement_upper, "HAVING"),
+            ),
+            ("ON", Self::previous_keyword_position(statement_upper, "ON")),
+            (
+                "SET",
+                Self::previous_keyword_position(statement_upper, "SET"),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(clause, position)| position.map(|position| (position, clause)))
+        .max_by_key(|(position, _)| *position) else {
+            return false;
+        };
+
+        let after_clause = clause_position + clause.len();
+        let terminators = match clause {
+            "SET" => &["WHERE", "RETURNING"][..],
+            "WHERE" | "ON" => &[
+                "GROUP BY",
+                "ORDER BY",
+                "HAVING",
+                "LIMIT",
+                "RETURNING",
+                "UNION",
+            ][..],
+            "HAVING" => &["ORDER BY", "LIMIT", "UNION"][..],
+            _ => &[][..],
+        };
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_clause,
+            statement_upper.len(),
+            terminators,
+        ) {
+            return false;
+        }
+
+        let segment = &statement_upper[after_clause..];
+        let trimmed = segment.trim_end();
+        if trimmed.is_empty() || trimmed.ends_with('.') {
+            return false;
+        }
+
+        if Self::ends_with_value_operator(trimmed) {
+            return true;
+        }
+
+        let words = Self::statement_words(trimmed);
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        if !Self::is_value_keyword_prefix(prefix) {
+            return false;
+        }
+
+        let Some(prefix_start) = trimmed.rfind(prefix) else {
+            return false;
+        };
+        Self::ends_with_value_operator(trimmed[..prefix_start].trim_end())
+    }
+
+    fn ends_with_value_operator(segment: &str) -> bool {
+        let trimmed = segment.trim_end();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        if [
+            "!=", "<>", "<=", ">=", "=", "<", ">", "+", "-", "*", "/", "%",
+        ]
+        .iter()
+        .any(|operator| trimmed.ends_with(operator))
+        {
+            return true;
+        }
+
+        let words = Self::statement_words(trimmed);
+        matches!(
+            words.as_slice(),
+            [.., "LIKE"]
+                | [.., "ILIKE"]
+                | [.., "RLIKE"]
+                | [.., "REGEXP"]
+                | [.., "IS"]
+                | [.., "IS", "NOT"]
+                | [.., "IN"]
+                | [.., "BETWEEN"]
+        ) || trimmed.ends_with("IN (")
+            || trimmed.ends_with("NOT IN (")
+    }
+
+    fn is_value_keyword_prefix(word: &str) -> bool {
+        matches!(
+            word,
+            "D" | "DE"
+                | "DEF"
+                | "DEFA"
+                | "DEFAU"
+                | "DEFAUL"
+                | "DEFAULT"
+                | "N"
+                | "NO"
+                | "NOW"
+                | "NU"
+                | "NUL"
+                | "NULL"
+                | "T"
+                | "TR"
+                | "TRU"
+                | "TRUE"
+                | "F"
+                | "FA"
+                | "FAL"
+                | "FALS"
+                | "FALSE"
+                | "TO"
+                | "TOD"
+                | "TODA"
+                | "TODAY"
+                | "C"
+                | "CU"
+                | "CUR"
+                | "CURR"
+                | "CURRE"
+                | "CURREN"
+                | "CURRENT"
+                | "CURRENT_DATE"
+                | "CURRENT_TIMESTAMP"
+        )
     }
 
     fn is_update_set_context(statement_upper: &str) -> bool {
@@ -1320,6 +1439,17 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::is_insert_value_context(statement_upper)
+    }
+
+    fn expression_value_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_expression_value_context(statement_upper)
     }
 
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
@@ -3661,6 +3791,14 @@ mod tests {
             CompletionContext::WhereClause
         );
         assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner = "),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner = N"),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
             analyzed_context_at_end("SELECT * FROM users "),
             CompletionContext::FromContinuationClause
         );
@@ -3762,7 +3900,7 @@ mod tests {
         let having_sql = "SELECT user_id, count(*) FROM orders GROUP BY user_id HAVING count(*) > ";
         assert_eq!(
             parser.analyze_completion_context_fallback(having_sql, position_at_end(having_sql)),
-            CompletionContext::HavingClause
+            CompletionContext::ExpressionValueClause
         );
 
         let order_sql =
@@ -3917,6 +4055,24 @@ mod tests {
                 position_at_end(insert_value_after_comma_sql)
             ),
             CompletionContext::InsertValueClause
+        );
+
+        let update_value_sql = "UPDATE app.users SET name = ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_value_sql,
+                position_at_end(update_value_sql)
+            ),
+            CompletionContext::ExpressionValueClause
+        );
+
+        let update_value_prefix_sql = "UPDATE app.users SET name = NU";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_value_prefix_sql,
+                position_at_end(update_value_prefix_sql)
+            ),
+            CompletionContext::ExpressionValueClause
         );
 
         let update_table_sql = "UPDATE app.us";
