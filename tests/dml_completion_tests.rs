@@ -114,6 +114,33 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         "INSERT column list should stay scoped to the target table: {insert_columns:?}"
     );
 
+    let insert_values = complete(
+        dialect,
+        &format!("INSERT INTO {qualified_table} (owner, name) VALUES ("),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&insert_values, "DEFAULT"));
+    assert!(has_label(&insert_values, "NULL"));
+    assert!(
+        !has_label(&insert_values, "owner"),
+        "INSERT value position should not suggest columns: {insert_values:?}"
+    );
+    assert!(
+        !has_kind(&insert_values, CompletionItemKind::CLASS),
+        "INSERT value position should not suggest relation targets: {insert_values:?}"
+    );
+
+    let insert_values_prefixed = complete(
+        dialect,
+        &format!("INSERT INTO {qualified_table} (owner, name) VALUES (NU"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&insert_values_prefixed, "NULL"));
+    assert!(!has_label(&insert_values_prefixed, "DEFAULT"));
+    assert!(!has_label(&insert_values_prefixed, "owner"));
+
     let update_actions = complete(dialect, &format!("UPDATE {qualified_table} "), &schema).await;
     assert!(has_label(&update_actions, "SET"));
     assert!(

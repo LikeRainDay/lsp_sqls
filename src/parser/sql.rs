@@ -52,6 +52,8 @@ pub enum CompletionContext {
     AlterTableActionClause,
     /// 在 INSERT INTO 表名之后，应该补全插入动作
     InsertActionClause,
+    /// 在 INSERT ... VALUES (...) 值位置，应该补全值相关关键字
+    InsertValueClause,
     /// 在 UPDATE 表名之后，应该补全更新动作
     UpdateActionClause,
     /// 在 DELETE FROM 表名之后，应该补全删除动作
@@ -717,6 +719,10 @@ impl SqlParser {
             return context;
         }
 
+        if Self::insert_value_context_at_position(source, position) {
+            return CompletionContext::InsertValueClause;
+        }
+
         if let Some(context) =
             Self::analyze_relation_continuation_context_at_position(source, position)
         {
@@ -963,6 +969,10 @@ impl SqlParser {
             return context;
         }
 
+        if Self::is_insert_value_context(statement_upper) {
+            return CompletionContext::InsertValueClause;
+        }
+
         if let Some(context) = Self::analyze_relation_continuation_context(statement_upper) {
             return context;
         }
@@ -1141,6 +1151,90 @@ impl SqlParser {
         statement_upper[after_into..].contains('(')
     }
 
+    fn is_insert_value_context(statement_upper: &str) -> bool {
+        let Some(into_position) = Self::previous_keyword_position(statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+        let Some(values_position) = Self::previous_keyword_position(statement_upper, "VALUES")
+            .or_else(|| Self::previous_keyword_position(statement_upper, "VALUE"))
+        else {
+            return false;
+        };
+        if values_position < into_position {
+            return false;
+        }
+
+        let after_values = values_position
+            + if statement_upper[values_position..].starts_with("VALUES") {
+                "VALUES".len()
+            } else {
+                "VALUE".len()
+            };
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_values,
+            statement_upper.len(),
+            &["RETURNING", "ON CONFLICT", "ON DUPLICATE", "SELECT"],
+        ) {
+            return false;
+        }
+
+        let segment = &statement_upper[after_values..];
+        let Some(last_open) = segment.rfind('(') else {
+            return false;
+        };
+        let after_open = &segment[last_open + 1..];
+        if after_open.contains(')') {
+            return false;
+        }
+
+        let trimmed = after_open.trim_start();
+        let trimmed_end = trimmed.trim_end();
+        if trimmed_end.is_empty() || trimmed_end.ends_with(',') {
+            return true;
+        }
+
+        let words = Self::statement_words(trimmed_end);
+        if words.is_empty() || trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return false;
+        }
+
+        words.last().is_some_and(|word| {
+            matches!(
+                *word,
+                "D" | "DE"
+                    | "DEF"
+                    | "DEFA"
+                    | "DEFAU"
+                    | "DEFAUL"
+                    | "DEFAULT"
+                    | "N"
+                    | "NU"
+                    | "NUL"
+                    | "NULL"
+                    | "T"
+                    | "TR"
+                    | "TRU"
+                    | "TRUE"
+                    | "F"
+                    | "FA"
+                    | "FAL"
+                    | "FALS"
+                    | "FALSE"
+                    | "C"
+                    | "CU"
+                    | "CUR"
+                    | "CURR"
+                    | "CURRE"
+                    | "CURREN"
+                    | "CURRENT"
+                    | "CURRENT_DATE"
+                    | "CURRENT_TIMESTAMP"
+            )
+        })
+    }
+
     fn is_update_set_context(statement_upper: &str) -> bool {
         let Some(update_position) = Self::previous_keyword_position(statement_upper, "UPDATE")
         else {
@@ -1215,6 +1309,17 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::is_select_continuation_context(statement_upper)
+    }
+
+    fn insert_value_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_insert_value_context(statement_upper)
     }
 
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
@@ -3785,6 +3890,33 @@ mod tests {
                 position_at_end(insert_column_sql)
             ),
             CompletionContext::SelectClause
+        );
+
+        let insert_value_sql = "INSERT INTO app.users (name) VALUES (";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_value_sql,
+                position_at_end(insert_value_sql)
+            ),
+            CompletionContext::InsertValueClause
+        );
+
+        let insert_value_prefix_sql = "INSERT INTO app.users (name) VALUES (NU";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_value_prefix_sql,
+                position_at_end(insert_value_prefix_sql)
+            ),
+            CompletionContext::InsertValueClause
+        );
+
+        let insert_value_after_comma_sql = "INSERT INTO app.users (owner, name) VALUES ('app', ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_value_after_comma_sql,
+                position_at_end(insert_value_after_comma_sql)
+            ),
+            CompletionContext::InsertValueClause
         );
 
         let update_table_sql = "UPDATE app.us";
