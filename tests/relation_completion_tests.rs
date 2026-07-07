@@ -83,6 +83,65 @@ async fn mysql_from_continuation_excludes_relation_targets() {
 }
 
 #[tokio::test]
+async fn relation_target_completion_suggests_tables_not_columns() {
+    let mysql_schema = schema("shop");
+    let mysql_items = complete(&MysqlDialect::new(), "SELECT * from", &mysql_schema).await;
+
+    assert!(has_label(&mysql_items, "webhook"));
+    assert!(has_label(&mysql_items, "form"));
+    assert!(has_kind(&mysql_items, CompletionItemKind::CLASS));
+    assert!(!has_label(&mysql_items, "owner"));
+    assert!(!has_label(&mysql_items, "form_css"));
+    assert!(!has_kind(&mysql_items, CompletionItemKind::FIELD));
+
+    let postgres_schema = schema("public");
+    let postgres_items = complete(
+        &PostgresDialect::new(),
+        "SELECT * FROM public.",
+        &postgres_schema,
+    )
+    .await;
+
+    assert!(has_label(&postgres_items, "public.webhook"));
+    assert!(has_label(&postgres_items, "public.form"));
+    assert!(has_kind(&postgres_items, CompletionItemKind::CLASS));
+    assert!(!has_label(&postgres_items, "owner"));
+    assert!(!has_kind(&postgres_items, CompletionItemKind::FIELD));
+}
+
+#[tokio::test]
+async fn where_clause_start_suggests_scoped_columns_before_operators() {
+    let schema = schema("public");
+    let items = complete(
+        &PostgresDialect::new(),
+        "SELECT * FROM public.webhook WHERE ",
+        &schema,
+    )
+    .await;
+
+    assert!(has_label(&items, "owner"));
+    assert!(!has_label(&items, "form_css"));
+    assert!(has_kind(&items, CompletionItemKind::FIELD));
+    assert!(!has_kind(&items, CompletionItemKind::CLASS));
+    assert!(!has_kind(&items, CompletionItemKind::OPERATOR));
+
+    let owner = items
+        .iter()
+        .find(|item| item.label == "owner")
+        .and_then(|item| item.sort_text.as_deref())
+        .unwrap_or_default();
+    let truthy = items
+        .iter()
+        .find(|item| item.label == "TRUE")
+        .and_then(|item| item.sort_text.as_deref())
+        .unwrap_or_default();
+    assert!(
+        owner < truthy,
+        "columns should sort before literal keywords"
+    );
+}
+
+#[tokio::test]
 async fn postgres_join_condition_completion_excludes_relation_targets() {
     let schema = schema("public");
     let items = complete(

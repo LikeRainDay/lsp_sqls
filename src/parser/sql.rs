@@ -876,16 +876,19 @@ impl SqlParser {
         let cursor_offset = Self::byte_offset_for_position(source, position);
         let text_before = source.get(..cursor_offset).unwrap_or(source);
 
-        if text_before.trim_end().ends_with('.') {
-            return Some(CompletionContext::TableColumn);
-        }
-
         let searchable_text_before = Self::mask_sql_noise(text_before);
         let text_upper = searchable_text_before.to_ascii_uppercase();
         let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
         let statement = text_upper[statement_start..].trim_end();
         if statement.is_empty() {
             return None;
+        }
+
+        if text_before.trim_end().ends_with('.') {
+            if Self::is_dotted_relation_target_context(statement) {
+                return Some(CompletionContext::FromClause);
+            }
+            return Some(CompletionContext::TableColumn);
         }
 
         let words = Self::statement_words(statement);
@@ -986,6 +989,9 @@ impl SqlParser {
 
         // Priority 1: Check for table/alias column access (ends with .)
         if text_before.trim_end().ends_with('.') {
+            if Self::is_dotted_relation_target_context(statement_upper) {
+                return CompletionContext::FromClause;
+            }
             return CompletionContext::TableColumn;
         }
 
@@ -1184,6 +1190,68 @@ impl SqlParser {
 
     fn is_relation_target_context(statement_upper: &str) -> bool {
         let relation_targets = [
+            ("INSERT INTO", &["VALUES", "SELECT", "RETURNING"][..]),
+            ("UPDATE", &["SET", "WHERE", "RETURNING"][..]),
+            ("DELETE FROM", &["WHERE", "RETURNING", "USING"][..]),
+            ("TRUNCATE TABLE", &[][..]),
+            (
+                "ALTER TABLE",
+                &[
+                    "ADD", "ALTER", "DROP", "RENAME", "OWNER", "SET", "RESET", "VALIDATE",
+                    "ENABLE", "DISABLE",
+                ][..],
+            ),
+            ("DROP TABLE", &[][..]),
+            ("DROP VIEW", &[][..]),
+        ];
+
+        relation_targets.iter().any(|(phrase, terminators)| {
+            let Some(position) = Self::previous_keyword_position(statement_upper, phrase) else {
+                return false;
+            };
+            let after_phrase = position + phrase.len();
+            !Self::statement_has_any_keyword(
+                statement_upper,
+                after_phrase,
+                statement_upper.len(),
+                terminators,
+            )
+        })
+    }
+
+    fn is_dotted_relation_target_context(statement_upper: &str) -> bool {
+        let statement_upper = statement_upper.trim_end();
+        if !statement_upper.ends_with('.') {
+            return false;
+        }
+
+        let relation_targets = [
+            (
+                "FROM",
+                &[
+                    "WHERE",
+                    "GROUP BY",
+                    "ORDER BY",
+                    "HAVING",
+                    "LIMIT",
+                    "OFFSET",
+                    "FETCH",
+                    "UNION",
+                    "EXCEPT",
+                    "INTERSECT",
+                    "RETURNING",
+                    "JOIN",
+                    "INNER JOIN",
+                    "LEFT JOIN",
+                    "RIGHT JOIN",
+                    "FULL JOIN",
+                    "CROSS JOIN",
+                ][..],
+            ),
+            (
+                "JOIN",
+                &["ON", "USING", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"][..],
+            ),
             ("INSERT INTO", &["VALUES", "SELECT", "RETURNING"][..]),
             ("UPDATE", &["SET", "WHERE", "RETURNING"][..]),
             ("DELETE FROM", &["WHERE", "RETURNING", "USING"][..]),

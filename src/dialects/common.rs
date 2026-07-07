@@ -10,6 +10,10 @@ pub(crate) fn cursor_prefix(sql: &str, position: Position) -> String {
 
     let token = cursor_identifier_token(text_before);
 
+    if token.trim_end().ends_with('.') {
+        return String::new();
+    }
+
     SqlParser::identifier_last_part(token).to_lowercase()
 }
 
