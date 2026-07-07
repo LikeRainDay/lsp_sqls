@@ -311,6 +311,52 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         assert!(!has_label(&conflict_update_value_continuation, "owner"));
         assert!(!has_operator(&conflict_update_value_continuation, "="));
     } else {
+        let insert_set = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} SET "),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&insert_set, "owner"));
+        assert!(has_label(&insert_set, "name"));
+        assert!(!has_label(&insert_set, "form_background_url"));
+        assert!(!has_operator(&insert_set, "="));
+
+        let insert_set_operator = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} SET owner "),
+            &schema,
+        )
+        .await;
+        assert!(has_operator(&insert_set_operator, "="));
+        assert!(!has_label(&insert_set_operator, "owner"));
+
+        let insert_set_value = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} SET owner = "),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&insert_set_value, "DEFAULT"));
+        assert!(has_label(&insert_set_value, "NULL"));
+        assert!(!has_label(&insert_set_value, "owner"));
+        assert!(!has_operator(&insert_set_value, "="));
+
+        let insert_set_value_continuation = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} SET owner = 'app' "),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&insert_set_value_continuation, ","));
+        assert!(has_label(
+            &insert_set_value_continuation,
+            "ON DUPLICATE KEY UPDATE"
+        ));
+        assert!(!has_label(&insert_set_value_continuation, "WHERE"));
+        assert!(!has_label(&insert_set_value_continuation, "owner"));
+        assert!(!has_operator(&insert_set_value_continuation, "="));
+
         let duplicate_update_set = complete(
             dialect,
             &format!(

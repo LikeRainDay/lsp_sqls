@@ -217,6 +217,10 @@ pub(crate) fn expression_value_allows_default(sql: &str, position: Position) -> 
     let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
     let statement = &text_before[statement_start..];
 
+    if let Some(set_position) = insert_set_position(statement) {
+        return !statement[set_position + "SET".len()..].contains("ON DUPLICATE");
+    }
+
     if let Some(duplicate_update_position) = statement.rfind("ON DUPLICATE KEY UPDATE") {
         let after_duplicate_update = duplicate_update_position + "ON DUPLICATE KEY UPDATE".len();
         return !statement[after_duplicate_update..].contains("WHERE");
@@ -258,6 +262,9 @@ pub(crate) fn predicate_continuation_keywords(
         {
             vec!["AND"]
         }
+        Some((set_position, "SET")) if insert_set_position(statement) == Some(set_position) => {
+            vec![",", "ON DUPLICATE KEY UPDATE"]
+        }
         Some((_, "SET")) if supports_returning => vec![",", "WHERE", "RETURNING"],
         Some((_, "SET")) => vec![",", "WHERE"],
         Some((_, "UPDATE")) => vec![","],
@@ -267,6 +274,25 @@ pub(crate) fn predicate_continuation_keywords(
         Some((_, "WHERE")) => vec!["AND", "OR", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"],
         _ => vec!["AND", "OR"],
     }
+}
+
+fn insert_set_position(statement_upper: &str) -> Option<usize> {
+    let insert_position = previous_keyword_position(statement_upper, "INSERT INTO")?;
+    let set_position = previous_keyword_position(statement_upper, "SET")?;
+    if set_position < insert_position {
+        return None;
+    }
+
+    let after_insert = insert_position + "INSERT INTO".len();
+    let between_insert_and_set = statement_upper.get(after_insert..set_position)?;
+    if ["VALUES", "VALUE", "SELECT"]
+        .into_iter()
+        .any(|keyword| previous_keyword_position(between_insert_and_set, keyword).is_some())
+    {
+        return None;
+    }
+
+    Some(set_position)
 }
 
 pub(crate) fn case_continuation_keywords(sql: &str, position: Position) -> Vec<&'static str> {

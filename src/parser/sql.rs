@@ -1061,6 +1061,10 @@ impl SqlParser {
             return CompletionContext::InsertConflictActionClause;
         }
 
+        if Self::is_insert_set_assignment_context(raw_statement_upper) {
+            return CompletionContext::WhereClause;
+        }
+
         if Self::is_insert_duplicate_update_assignment_context(raw_statement_upper) {
             return CompletionContext::WhereClause;
         }
@@ -1583,6 +1587,45 @@ impl SqlParser {
 
         let after_duplicate_update = duplicate_update_position + "ON DUPLICATE KEY UPDATE".len();
         let Some(tail) = statement_upper.get(after_duplicate_update..) else {
+            return false;
+        };
+        let segment = tail.rsplit(',').next().unwrap_or(tail);
+        let trimmed = segment.trim_end();
+        if trimmed.trim_start().is_empty() {
+            return true;
+        }
+        if Self::latest_value_operator_end(trimmed).is_some() {
+            return false;
+        }
+
+        Self::statement_words(trimmed).len() <= 1
+    }
+
+    fn is_insert_set_assignment_context(statement_upper: &str) -> bool {
+        let Some(insert_position) = Self::previous_keyword_position(statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+        let Some(set_position) = Self::previous_keyword_position(statement_upper, "SET") else {
+            return false;
+        };
+        if set_position < insert_position {
+            return false;
+        }
+        let after_insert = insert_position + "INSERT INTO".len();
+        let Some(between_insert_and_set) = statement_upper.get(after_insert..set_position) else {
+            return false;
+        };
+        if Self::statement_has_any_keyword(
+            between_insert_and_set,
+            0,
+            between_insert_and_set.len(),
+            &["VALUES", "VALUE", "SELECT", "UPDATE"],
+        ) {
+            return false;
+        }
+
+        let Some(tail) = statement_upper.get(set_position + "SET".len()..) else {
             return false;
         };
         let segment = tail.rsplit(',').next().unwrap_or(tail);
@@ -5218,6 +5261,42 @@ mod tests {
                 position_at_end(insert_default_continuation_sql)
             ),
             CompletionContext::InsertContinuationClause
+        );
+
+        let insert_set_sql = "INSERT INTO app.users SET ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_set_sql,
+                position_at_end(insert_set_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_set_operator_sql = "INSERT INTO app.users SET name ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_set_operator_sql,
+                position_at_end(insert_set_operator_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_set_value_sql = "INSERT INTO app.users SET name = ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_set_value_sql,
+                position_at_end(insert_set_value_sql)
+            ),
+            CompletionContext::ExpressionValueClause
+        );
+
+        let insert_set_continuation_sql = "INSERT INTO app.users SET name = 'app' ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_set_continuation_sql,
+                position_at_end(insert_set_continuation_sql)
+            ),
+            CompletionContext::PredicateContinuationClause
         );
 
         let insert_duplicate_update_sql =
