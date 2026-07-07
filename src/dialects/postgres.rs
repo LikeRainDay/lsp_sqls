@@ -666,6 +666,54 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::InsertConflictTargetClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["on", "conflict"]);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    self.add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        false,
+                        &prefix,
+                        "0",
+                    );
+                }
+            }
+
+            crate::parser::CompletionContext::InsertConflictActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                let text_before = common::text_before_position(sql, position).to_ascii_uppercase();
+                let searchable = SqlParser::mask_sql_noise(&text_before);
+                let in_do_tail = searchable
+                    .rfind("ON CONFLICT")
+                    .and_then(|conflict_position| searchable.get(conflict_position..))
+                    .is_some_and(|conflict_segment| {
+                        conflict_segment.trim_end().ends_with(" DO")
+                            || conflict_segment.contains(" DO ")
+                    });
+                let keywords: &[&str] = if in_do_tail {
+                    &["NOTHING", "UPDATE SET"]
+                } else {
+                    &["(", "ON CONSTRAINT", "DO NOTHING", "DO UPDATE SET"]
+                };
+                for keyword in keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::ExpressionValueClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 let mut keywords =

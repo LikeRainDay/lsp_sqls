@@ -66,6 +66,10 @@ pub enum CompletionContext {
     InsertValueClause,
     /// 在 INSERT 值列表或 DEFAULT VALUES 之后，应该补全后续动作
     InsertContinuationClause,
+    /// 在 PostgreSQL ON CONFLICT (...) 中，应该补全冲突目标列
+    InsertConflictTargetClause,
+    /// 在 PostgreSQL ON CONFLICT 之后，应该补全冲突处理动作
+    InsertConflictActionClause,
     /// 在 UPDATE 表名之后，应该补全更新动作
     UpdateActionClause,
     /// 在 DELETE FROM 表名之后，应该补全删除动作
@@ -763,6 +767,14 @@ impl SqlParser {
             return CompletionContext::InsertValueClause;
         }
 
+        if Self::insert_conflict_target_context_at_position(source, position) {
+            return CompletionContext::InsertConflictTargetClause;
+        }
+
+        if Self::insert_conflict_action_context_at_position(source, position) {
+            return CompletionContext::InsertConflictActionClause;
+        }
+
         if Self::insert_continuation_context_at_position(source, position) {
             return CompletionContext::InsertContinuationClause;
         }
@@ -1024,6 +1036,14 @@ impl SqlParser {
 
         if Self::is_insert_continuation_context(raw_statement_upper) {
             return CompletionContext::InsertContinuationClause;
+        }
+
+        if Self::is_insert_conflict_target_context(raw_statement_upper) {
+            return CompletionContext::InsertConflictTargetClause;
+        }
+
+        if Self::is_insert_conflict_action_context(raw_statement_upper) {
+            return CompletionContext::InsertConflictActionClause;
         }
 
         if Self::is_expression_value_context(statement_upper, raw_statement_upper) {
@@ -1374,6 +1394,106 @@ impl SqlParser {
                 | "RETURNIN"
                 | "RETURNING"
         )
+    }
+
+    fn latest_insert_conflict_segments<'raw, 'search>(
+        raw_statement_upper: &'raw str,
+        searchable_statement_upper: &'search str,
+    ) -> Option<(&'raw str, &'search str)> {
+        let into_position =
+            Self::previous_keyword_position(searchable_statement_upper, "INSERT INTO")?;
+        let conflict_position =
+            Self::previous_keyword_position(searchable_statement_upper, "ON CONFLICT")?;
+        if conflict_position < into_position {
+            return None;
+        }
+
+        let after_conflict = conflict_position + "ON CONFLICT".len();
+        if Self::statement_has_any_keyword(
+            searchable_statement_upper,
+            after_conflict,
+            searchable_statement_upper.len(),
+            &["RETURNING", "ON DUPLICATE"],
+        ) {
+            return None;
+        }
+
+        Some((
+            raw_statement_upper.get(after_conflict..)?,
+            searchable_statement_upper.get(after_conflict..)?,
+        ))
+    }
+
+    fn is_insert_conflict_target_context(statement_upper: &str) -> bool {
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some((_, searchable_segment)) =
+            Self::latest_insert_conflict_segments(statement_upper, &searchable_statement_upper)
+        else {
+            return false;
+        };
+        if Self::previous_keyword_position(searchable_segment, "DO").is_some() {
+            return false;
+        }
+
+        let Some(last_open) = searchable_segment.rfind('(') else {
+            return false;
+        };
+        !searchable_segment[last_open + 1..].contains(')')
+    }
+
+    fn is_insert_conflict_action_context(statement_upper: &str) -> bool {
+        if Self::is_insert_conflict_target_context(statement_upper) {
+            return false;
+        }
+
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some((raw_segment, searchable_segment)) =
+            Self::latest_insert_conflict_segments(statement_upper, &searchable_statement_upper)
+        else {
+            return false;
+        };
+        if Self::statement_has_any_keyword(
+            searchable_segment,
+            0,
+            searchable_segment.len(),
+            &["DO NOTHING", "DO UPDATE"],
+        ) {
+            return false;
+        }
+
+        let tail_start = Self::insert_conflict_action_tail_start(searchable_segment);
+        let Some(raw_tail) = raw_segment.get(tail_start..) else {
+            return false;
+        };
+        let prefix = raw_tail.trim_start().trim_end().to_ascii_uppercase();
+
+        prefix.is_empty() || Self::is_insert_conflict_action_prefix(&prefix)
+    }
+
+    fn insert_conflict_action_tail_start(searchable_segment: &str) -> usize {
+        let trimmed_start_len = searchable_segment.len() - searchable_segment.trim_start().len();
+        let after_start = &searchable_segment[trimmed_start_len..];
+
+        if after_start.starts_with('(') {
+            if let Some(close_relative) = after_start.find(')') {
+                return trimmed_start_len + close_relative + 1;
+            }
+        }
+
+        trimmed_start_len
+    }
+
+    fn is_insert_conflict_action_prefix(prefix: &str) -> bool {
+        [
+            "(",
+            "ON CONSTRAINT",
+            "DO NOTHING",
+            "DO UPDATE SET",
+            "NOTHING",
+            "UPDATE SET",
+        ]
+        .iter()
+        .any(|keyword| keyword.starts_with(prefix))
     }
 
     fn latest_predicate_clause(statement_upper: &str) -> Option<(usize, &'static str)> {
@@ -2159,6 +2279,26 @@ impl SqlParser {
         let statement_upper = &raw_text_upper[statement_start..];
 
         Self::is_insert_continuation_context(statement_upper)
+    }
+
+    fn insert_conflict_target_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let raw_text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&raw_text_upper, raw_text_upper.len());
+        let statement_upper = &raw_text_upper[statement_start..];
+
+        Self::is_insert_conflict_target_context(statement_upper)
+    }
+
+    fn insert_conflict_action_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let raw_text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&raw_text_upper, raw_text_upper.len());
+        let statement_upper = &raw_text_upper[statement_start..];
+
+        Self::is_insert_conflict_action_context(statement_upper)
     }
 
     fn expression_value_context_at_position(source: &str, position: Position) -> bool {
@@ -4943,6 +5083,54 @@ mod tests {
                 position_at_end(insert_default_continuation_sql)
             ),
             CompletionContext::InsertContinuationClause
+        );
+
+        let insert_conflict_action_sql = "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_action_sql,
+                position_at_end(insert_conflict_action_sql)
+            ),
+            CompletionContext::InsertConflictActionClause
+        );
+
+        let insert_conflict_target_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT (";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_target_sql,
+                position_at_end(insert_conflict_target_sql)
+            ),
+            CompletionContext::InsertConflictTargetClause
+        );
+
+        let insert_conflict_target_action_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT (name) ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_target_action_sql,
+                position_at_end(insert_conflict_target_action_sql)
+            ),
+            CompletionContext::InsertConflictActionClause
+        );
+
+        let insert_conflict_do_sql = "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT DO ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_do_sql,
+                position_at_end(insert_conflict_do_sql)
+            ),
+            CompletionContext::InsertConflictActionClause
+        );
+
+        let insert_conflict_do_prefix_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT DO N";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_do_prefix_sql,
+                position_at_end(insert_conflict_do_prefix_sql)
+            ),
+            CompletionContext::InsertConflictActionClause
         );
 
         let update_value_sql = "UPDATE app.users SET name = ";

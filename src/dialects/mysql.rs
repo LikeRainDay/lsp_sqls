@@ -705,6 +705,9 @@ impl Dialect for MysqlDialect {
                 }
             }
 
+            crate::parser::CompletionContext::InsertConflictTargetClause
+            | crate::parser::CompletionContext::InsertConflictActionClause => {}
+
             crate::parser::CompletionContext::ExpressionValueClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 let mut keywords = vec![

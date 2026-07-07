@@ -174,6 +174,42 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     }
     assert!(!has_label(&insert_continuation_prefixed, "owner"));
 
+    if database == "public" {
+        let conflict_target = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') ON CONFLICT ("),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&conflict_target, "owner"));
+        assert!(has_label(&conflict_target, "name"));
+        assert!(!has_label(&conflict_target, "form_background_url"));
+        assert!(!has_label(&conflict_target, "DO NOTHING"));
+        assert!(!has_operator(&conflict_target, "="));
+
+        let conflict_action = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') ON CONFLICT (owner) "),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&conflict_action, "DO NOTHING"));
+        assert!(has_label(&conflict_action, "DO UPDATE SET"));
+        assert!(!has_label(&conflict_action, "owner"));
+        assert!(!has_operator(&conflict_action, "="));
+
+        let conflict_do_tail = complete(
+            dialect,
+            &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') ON CONFLICT DO "),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&conflict_do_tail, "NOTHING"));
+        assert!(has_label(&conflict_do_tail, "UPDATE SET"));
+        assert!(!has_label(&conflict_do_tail, "DO NOTHING"));
+        assert!(!has_label(&conflict_do_tail, "owner"));
+    }
+
     let update_actions = complete(dialect, &format!("UPDATE {qualified_table} "), &schema).await;
     assert!(has_label(&update_actions, "SET"));
     assert!(

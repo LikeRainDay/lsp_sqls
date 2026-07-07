@@ -384,7 +384,7 @@ pub(crate) fn cursor_identifier_token(text_before: &str) -> &str {
     &text_before[token_start..]
 }
 
-fn text_before_position(sql: &str, position: Position) -> &str {
+pub(crate) fn text_before_position(sql: &str, position: Position) -> &str {
     let lines: Vec<&str> = sql.lines().collect();
     let mut offset = 0usize;
 
