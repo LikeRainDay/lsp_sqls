@@ -1305,6 +1305,11 @@ impl SqlParser {
             .last()
             .is_some_and(|ch| ch.is_whitespace())
         {
+            if value_text_trimmed.ends_with(',')
+                && Self::is_in_list_value_operator(trimmed, operator_end)
+            {
+                return true;
+            }
             return false;
         }
 
@@ -1320,7 +1325,10 @@ impl SqlParser {
         let Some(prefix_start) = value_text_upper.rfind(prefix) else {
             return false;
         };
-        value_text_trimmed[..prefix_start].trim().is_empty()
+        let before_prefix = value_text_trimmed[..prefix_start].trim_end();
+        before_prefix.trim().is_empty()
+            || (before_prefix.ends_with(',')
+                && Self::is_in_list_value_operator(trimmed, operator_end))
     }
 
     fn latest_value_operator_end(segment_upper: &str) -> Option<usize> {
@@ -1388,6 +1396,23 @@ impl SqlParser {
         } else {
             operator_end
         }
+    }
+
+    fn is_in_list_value_operator(segment_upper: &str, operator_end: usize) -> bool {
+        let trimmed_len = segment_upper.trim_end().len();
+        let raw_segment = &segment_upper[..trimmed_len];
+        let searchable_segment = Self::mask_nested_parenthesized_regions(raw_segment);
+        let Some(before_operator_end) = searchable_segment.get(..operator_end) else {
+            return false;
+        };
+        let before_operator_end = before_operator_end.trim_end();
+        if !before_operator_end.ends_with('(') {
+            return false;
+        }
+
+        let before_open = before_operator_end[..before_operator_end.len() - 1].trim_end();
+        let words = Self::statement_words(before_open);
+        matches!(words.as_slice(), [.., "IN"])
     }
 
     fn is_predicate_continuation_context(statement_upper: &str, raw_statement_upper: &str) -> bool {
@@ -4057,6 +4082,22 @@ mod tests {
             CompletionContext::PredicateContinuationClause
         );
         assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner IN ("),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner IN ('app', "),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner IN ('app', N"),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users where owner IN ('app') "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
             analyzed_context_at_end("SELECT * FROM users "),
             CompletionContext::FromContinuationClause
         );
@@ -4350,6 +4391,15 @@ mod tests {
                 position_at_end(update_value_continuation_sql)
             ),
             CompletionContext::PredicateContinuationClause
+        );
+
+        let update_next_assignment_sql = "UPDATE app.users SET name = 'app', ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                update_next_assignment_sql,
+                position_at_end(update_next_assignment_sql)
+            ),
+            CompletionContext::WhereClause
         );
 
         let update_table_sql = "UPDATE app.us";

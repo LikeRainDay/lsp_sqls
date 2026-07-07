@@ -307,6 +307,50 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     );
     assert!(!has_label(&where_value_prefixed, "owner"));
 
+    let where_in_first_value = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner IN ("),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_in_first_value, "NULL"));
+    assert!(has_label(&where_in_first_value, "TRUE"));
+    assert!(
+        !has_label(&where_in_first_value, "owner"),
+        "IN list first value should not return fields: {where_in_first_value:?}"
+    );
+    assert!(
+        !has_operator(&where_in_first_value, "="),
+        "IN list first value should not return operators: {where_in_first_value:?}"
+    );
+
+    let where_in_next_value = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner IN ('app', "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_in_next_value, "NULL"));
+    assert!(has_label(&where_in_next_value, "TRUE"));
+    assert!(
+        !has_label(&where_in_next_value, "owner"),
+        "IN list next value should not return fields: {where_in_next_value:?}"
+    );
+    assert!(
+        !has_operator(&where_in_next_value, "="),
+        "IN list next value should not return operators: {where_in_next_value:?}"
+    );
+
+    let where_in_next_value_prefixed = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner IN ('app', N"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_in_next_value_prefixed, "NULL"));
+    assert!(!has_label(&where_in_next_value_prefixed, "TRUE"));
+    assert!(!has_label(&where_in_next_value_prefixed, "owner"));
+
     let where_value_continuation = complete(
         dialect,
         &format!("SELECT * FROM {qualified_table} WHERE owner = 'app' "),
@@ -335,6 +379,17 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(has_label(&where_continuation_prefixed, "ORDER BY"));
     assert!(!has_label(&where_continuation_prefixed, "AND"));
     assert!(!has_label(&where_continuation_prefixed, "owner"));
+
+    let where_in_continuation = complete(
+        dialect,
+        &format!("SELECT * FROM {qualified_table} WHERE owner IN ('app') "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_in_continuation, "AND"));
+    assert!(has_label(&where_in_continuation, "OR"));
+    assert!(!has_label(&where_in_continuation, "owner"));
+    assert!(!has_operator(&where_in_continuation, "="));
 
     let returning = complete(
         dialect,
