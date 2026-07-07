@@ -26,6 +26,8 @@ pub enum CompletionContext {
     GroupByClause,
     /// 在 HAVING 子句中，应该补全列名和关键字
     HavingClause,
+    /// 在 JOIN ... USING (...) 子句中，应该补全可共享的列名
+    UsingClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -635,6 +637,10 @@ impl SqlParser {
             return context;
         }
 
+        if Self::join_using_column_context_at_position(source, position) {
+            return CompletionContext::UsingClause;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -676,6 +682,9 @@ impl SqlParser {
                 // HAVING clause
                 "having_clause" => {
                     return CompletionContext::HavingClause;
+                }
+                "using_clause" => {
+                    return CompletionContext::UsingClause;
                 }
                 // If we hit the statement level, we might be in a specific position
                 "select_statement" => {
@@ -763,8 +772,9 @@ impl SqlParser {
             }
             return Some(CompletionContext::WhereClause);
         }
-        if Self::words_end_with(&words, &["USING"]) {
-            return Some(CompletionContext::WhereClause);
+        if Self::words_end_with(&words, &["USING"]) && Self::is_join_using_column_context(statement)
+        {
+            return Some(CompletionContext::UsingClause);
         }
         if Self::words_end_with(&words, &["WHERE"])
             || Self::words_end_with(&words, &["AND"])
@@ -823,6 +833,10 @@ impl SqlParser {
 
         if Self::is_update_set_context(statement_upper) {
             return CompletionContext::WhereClause;
+        }
+
+        if Self::is_join_using_column_context(statement_upper) {
+            return CompletionContext::UsingClause;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1006,6 +1020,58 @@ impl SqlParser {
             statement_upper.len(),
             &["WHERE", "RETURNING"],
         )
+    }
+
+    fn join_using_column_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = text_upper[statement_start..].trim_end();
+
+        Self::is_join_using_column_context(statement_upper)
+    }
+
+    fn is_join_using_column_context(statement_upper: &str) -> bool {
+        let Some(using_position) = Self::previous_keyword_position(statement_upper, "USING") else {
+            return false;
+        };
+        let Some(join_position) =
+            Self::previous_keyword_position(&statement_upper[..using_position], "JOIN")
+        else {
+            return false;
+        };
+        if join_position > using_position {
+            return false;
+        }
+
+        let after_using = using_position + "USING".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_using,
+            statement_upper.len(),
+            &["WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "UNION"],
+        ) {
+            return false;
+        }
+
+        let text_after_using = &statement_upper[after_using..];
+        let Some(open_position) = text_after_using.find('(') else {
+            return text_after_using.trim().is_empty();
+        };
+
+        let text_after_open = &text_after_using[open_position..];
+        let mut depth = 0isize;
+        for ch in text_after_open.chars() {
+            if ch == '(' {
+                depth += 1;
+            } else if ch == ')' {
+                depth -= 1;
+            }
+        }
+
+        depth > 0 || text_after_open.trim_end().ends_with(',')
     }
 
     /// 获取表名（用于 TableColumn 上下文）
@@ -2167,6 +2233,14 @@ mod tests {
         assert_eq!(
             analyzed_context_at_end("SELECT * FROM users u JOIN orders o ON"),
             CompletionContext::WhereClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users u JOIN orders o USING ("),
+            CompletionContext::UsingClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users u JOIN orders o USING (id, "),
+            CompletionContext::UsingClause
         );
         assert_eq!(
             analyzed_context_at_end("CREATE INDEX users_email_idx ON"),

@@ -406,6 +406,20 @@ impl Dialect for HiveDialect {
                     common::add_operator_items(&mut items, &operators, &prefix, "1");
                 }
             }
+            crate::parser::CompletionContext::UsingClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["using"]);
+                if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+                    let referenced_tables =
+                        common::referenced_table_names_at_position(&parser, tree, sql, position);
+                    common::add_schema_using_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                    );
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

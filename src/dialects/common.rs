@@ -386,6 +386,49 @@ pub(crate) fn add_schema_columns(
     }
 }
 
+pub(crate) fn add_schema_using_columns(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    prefix: &str,
+    sort_prefix: &str,
+) {
+    let referenced_schema_tables = referenced_tables
+        .iter()
+        .filter_map(|reference| find_table_by_reference(schema, reference))
+        .collect::<Vec<_>>();
+
+    let Some((right_table, left_tables)) = referenced_schema_tables.split_last() else {
+        return;
+    };
+
+    if left_tables.is_empty() {
+        add_schema_columns(items, schema, referenced_tables, false, prefix, sort_prefix);
+        return;
+    }
+
+    let left_column_names = left_tables
+        .iter()
+        .flat_map(|table| table.columns.iter())
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    let mut seen = HashSet::new();
+    for column in &right_table.columns {
+        let column_key = column.name.to_ascii_lowercase();
+        if !left_column_names.contains(&column_key) || !seen.insert(column_key) {
+            continue;
+        }
+        if !prefix.is_empty() && !column.name.to_lowercase().starts_with(prefix) {
+            continue;
+        }
+
+        let mut item = create_column_item(column, None);
+        set_completion_sort_text(&mut item, sort_prefix, &column.name);
+        items.push(item);
+    }
+}
+
 pub(crate) fn table_matches(schema: &Schema, table: &Table, reference: &str) -> bool {
     SqlParser::table_name_matches(reference, &schema.database, &table.name)
 }
