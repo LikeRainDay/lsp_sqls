@@ -614,6 +614,7 @@ impl Dialect for ClickHouseDialect {
                     items.push(item);
                 }
             }
+            crate::parser::CompletionContext::InsertContinuationClause => {}
             crate::parser::CompletionContext::ExpressionValueClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 let mut keywords = vec!["NULL", "TRUE", "FALSE", "now()", "today()"];

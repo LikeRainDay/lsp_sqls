@@ -64,6 +64,8 @@ pub enum CompletionContext {
     InsertActionClause,
     /// 在 INSERT ... VALUES (...) 值位置，应该补全值相关关键字
     InsertValueClause,
+    /// 在 INSERT 值列表或 DEFAULT VALUES 之后，应该补全后续动作
+    InsertContinuationClause,
     /// 在 UPDATE 表名之后，应该补全更新动作
     UpdateActionClause,
     /// 在 DELETE FROM 表名之后，应该补全删除动作
@@ -761,6 +763,10 @@ impl SqlParser {
             return CompletionContext::InsertValueClause;
         }
 
+        if Self::insert_continuation_context_at_position(source, position) {
+            return CompletionContext::InsertContinuationClause;
+        }
+
         if let Some(context) =
             Self::analyze_relation_continuation_context_at_position(source, position)
         {
@@ -1014,6 +1020,10 @@ impl SqlParser {
 
         if Self::is_insert_value_context(statement_upper) {
             return CompletionContext::InsertValueClause;
+        }
+
+        if Self::is_insert_continuation_context(raw_statement_upper) {
+            return CompletionContext::InsertContinuationClause;
         }
 
         if Self::is_expression_value_context(statement_upper, raw_statement_upper) {
@@ -1274,6 +1284,96 @@ impl SqlParser {
         words
             .last()
             .is_some_and(|word| Self::is_value_keyword_prefix(word))
+    }
+
+    fn is_insert_continuation_context(statement_upper: &str) -> bool {
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some(into_position) =
+            Self::previous_keyword_position(&searchable_statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+
+        let Some((values_position, values_keyword)) =
+            Self::previous_keyword_position(&searchable_statement_upper, "DEFAULT VALUES")
+                .map(|position| (position, "DEFAULT VALUES"))
+                .or_else(|| {
+                    Self::previous_keyword_position(&searchable_statement_upper, "VALUES")
+                        .map(|position| (position, "VALUES"))
+                })
+                .or_else(|| {
+                    Self::previous_keyword_position(&searchable_statement_upper, "VALUE")
+                        .map(|position| (position, "VALUE"))
+                })
+        else {
+            return false;
+        };
+        if values_position < into_position {
+            return false;
+        }
+
+        let after_values = values_position + values_keyword.len();
+        if Self::statement_has_any_keyword(
+            &searchable_statement_upper,
+            after_values,
+            searchable_statement_upper.len(),
+            &["RETURNING", "ON CONFLICT", "ON DUPLICATE", "SELECT"],
+        ) {
+            return false;
+        }
+
+        let Some(segment) = statement_upper.get(after_values..) else {
+            return false;
+        };
+        let trimmed = segment.trim_end();
+        if trimmed.is_empty() {
+            return values_keyword == "DEFAULT VALUES";
+        }
+
+        let continuation_tail = if values_keyword == "DEFAULT VALUES" {
+            trimmed
+        } else {
+            let Some(last_close) = trimmed.rfind(')') else {
+                return false;
+            };
+            &trimmed[last_close + 1..]
+        };
+        let prefix = continuation_tail.trim_start();
+
+        prefix.is_empty() || Self::is_insert_continuation_prefix(&prefix.to_ascii_uppercase())
+    }
+
+    fn is_insert_continuation_prefix(prefix: &str) -> bool {
+        matches!(
+            prefix,
+            "O" | "ON"
+                | "ON C"
+                | "ON CO"
+                | "ON CON"
+                | "ON CONF"
+                | "ON CONFL"
+                | "ON CONFLI"
+                | "ON CONFLIC"
+                | "ON CONFLICT"
+                | "ON D"
+                | "ON DU"
+                | "ON DUP"
+                | "ON DUPL"
+                | "ON DUPLI"
+                | "ON DUPLIC"
+                | "ON DUPLICA"
+                | "ON DUPLICAT"
+                | "ON DUPLICATE"
+                | "R"
+                | "RE"
+                | "RET"
+                | "RETU"
+                | "RETUR"
+                | "RETURN"
+                | "RETURNI"
+                | "RETURNIN"
+                | "RETURNING"
+        )
     }
 
     fn latest_predicate_clause(statement_upper: &str) -> Option<(usize, &'static str)> {
@@ -2049,6 +2149,16 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::is_insert_value_context(statement_upper)
+    }
+
+    fn insert_continuation_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let raw_text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&raw_text_upper, raw_text_upper.len());
+        let statement_upper = &raw_text_upper[statement_start..];
+
+        Self::is_insert_continuation_context(statement_upper)
     }
 
     fn expression_value_context_at_position(source: &str, position: Position) -> bool {
@@ -4806,6 +4916,33 @@ mod tests {
                 position_at_end(insert_value_after_comma_sql)
             ),
             CompletionContext::InsertValueClause
+        );
+
+        let insert_continuation_sql = "INSERT INTO app.users (name) VALUES ('app') ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_continuation_sql,
+                position_at_end(insert_continuation_sql)
+            ),
+            CompletionContext::InsertContinuationClause
+        );
+
+        let insert_continuation_prefix_sql = "INSERT INTO app.users (name) VALUES ('app') O";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_continuation_prefix_sql,
+                position_at_end(insert_continuation_prefix_sql)
+            ),
+            CompletionContext::InsertContinuationClause
+        );
+
+        let insert_default_continuation_sql = "INSERT INTO app.users DEFAULT VALUES ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_default_continuation_sql,
+                position_at_end(insert_default_continuation_sql)
+            ),
+            CompletionContext::InsertContinuationClause
         );
 
         let update_value_sql = "UPDATE app.users SET name = ";

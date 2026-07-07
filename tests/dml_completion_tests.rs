@@ -141,6 +141,39 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&insert_values_prefixed, "DEFAULT"));
     assert!(!has_label(&insert_values_prefixed, "owner"));
 
+    let insert_continuation = complete(
+        dialect,
+        &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') "),
+        &schema,
+    )
+    .await;
+    if database == "public" {
+        assert!(has_label(&insert_continuation, "ON CONFLICT"));
+        assert!(has_label(&insert_continuation, "RETURNING"));
+    } else {
+        assert!(has_label(&insert_continuation, "ON DUPLICATE KEY UPDATE"));
+        assert!(!has_label(&insert_continuation, "RETURNING"));
+    }
+    assert!(!has_label(&insert_continuation, "owner"));
+    assert!(!has_operator(&insert_continuation, "="));
+
+    let insert_continuation_prefixed = complete(
+        dialect,
+        &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') O"),
+        &schema,
+    )
+    .await;
+    if database == "public" {
+        assert!(has_label(&insert_continuation_prefixed, "ON CONFLICT"));
+        assert!(!has_label(&insert_continuation_prefixed, "RETURNING"));
+    } else {
+        assert!(has_label(
+            &insert_continuation_prefixed,
+            "ON DUPLICATE KEY UPDATE"
+        ));
+    }
+    assert!(!has_label(&insert_continuation_prefixed, "owner"));
+
     let update_actions = complete(dialect, &format!("UPDATE {qualified_table} "), &schema).await;
     assert!(has_label(&update_actions, "SET"));
     assert!(
