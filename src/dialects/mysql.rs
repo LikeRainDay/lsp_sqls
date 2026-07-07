@@ -564,6 +564,27 @@ impl Dialect for MysqlDialect {
                 }
             }
 
+            crate::parser::CompletionContext::IndexTargetClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["index"]);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    common::add_schema_indexes(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
+                }
+            }
+
             crate::parser::CompletionContext::TableColumn => {
                 // 表名.列名：只补全特定表的列名
                 if let Some(tree) = &parse_result.tree {

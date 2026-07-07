@@ -499,6 +499,27 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::IndexTargetClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["index"]);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    common::add_schema_indexes(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                        true,
+                    );
+                }
+            }
+
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

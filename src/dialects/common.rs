@@ -1,5 +1,5 @@
 use crate::parser::SqlParser;
-use crate::schema::{Column, Constraint, Function, Schema, Table};
+use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
 use std::collections::HashSet;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Position};
 
@@ -351,6 +351,49 @@ pub(crate) fn create_constraint_item(constraint: &Constraint) -> CompletionItem 
     }
 }
 
+pub(crate) fn create_index_item(
+    index: &Index,
+    schema: &Schema,
+    qualify_with_database: bool,
+) -> CompletionItem {
+    let label = if qualify_with_database && !schema.database.is_empty() {
+        format!("{}.{}", schema.database, index.name)
+    } else {
+        index.name.clone()
+    };
+    let index_kind = if index.is_primary {
+        "Primary index"
+    } else if index.is_unique {
+        "Unique index"
+    } else {
+        "Index"
+    };
+
+    CompletionItem {
+        label: label.clone(),
+        kind: Some(CompletionItemKind::REFERENCE),
+        detail: Some(format!("{}: {}", index_kind, index.name)),
+        documentation: index
+            .definition
+            .as_ref()
+            .map(|definition| Documentation::String(definition.clone())),
+        deprecated: None,
+        preselect: None,
+        sort_text: Some(completion_sort_text("1", &index.name)),
+        filter_text: Some(index.name.clone()),
+        insert_text: Some(label),
+        insert_text_format: None,
+        insert_text_mode: None,
+        text_edit: None,
+        additional_text_edits: None,
+        commit_characters: None,
+        command: None,
+        data: None,
+        tags: None,
+        label_details: None,
+    }
+}
+
 pub(crate) fn add_schema_tables(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
@@ -474,6 +517,35 @@ pub(crate) fn add_schema_constraints(
 
             let mut item = create_constraint_item(constraint);
             set_completion_sort_text(&mut item, sort_prefix, &constraint.name);
+            items.push(item);
+        }
+    }
+}
+
+pub(crate) fn add_schema_indexes(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    prefix: &str,
+    sort_prefix: &str,
+    qualify_with_database: bool,
+) {
+    let mut seen = HashSet::new();
+    for table in &schema.tables {
+        if !table_is_referenced(schema, table, referenced_tables) {
+            continue;
+        }
+
+        for index in &table.indexes {
+            if !prefix.is_empty() && !index.name.to_lowercase().starts_with(prefix) {
+                continue;
+            }
+            if !seen.insert(index.name.to_ascii_lowercase()) {
+                continue;
+            }
+
+            let mut item = create_index_item(index, schema, qualify_with_database);
+            set_completion_sort_text(&mut item, sort_prefix, &index.name);
             items.push(item);
         }
     }

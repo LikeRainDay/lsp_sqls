@@ -493,6 +493,21 @@ impl Dialect for HiveDialect {
                     items.push(self.create_keyword_item(keyword));
                 }
             }
+            crate::parser::CompletionContext::IndexTargetClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["index"]);
+                if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+                    let referenced_tables =
+                        common::referenced_table_names_at_position(&parser, tree, sql, position);
+                    common::add_schema_indexes(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                        false,
+                    );
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

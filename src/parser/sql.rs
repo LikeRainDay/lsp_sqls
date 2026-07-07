@@ -40,6 +40,8 @@ pub enum CompletionContext {
     UpdateActionClause,
     /// 在 DELETE FROM 表名之后，应该补全删除动作
     DeleteActionClause,
+    /// 在索引名目标位置，应该补全 schema 或当前表的索引名
+    IndexTargetClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -1191,7 +1193,51 @@ impl SqlParser {
             return Some(CompletionContext::ConstraintTargetClause);
         }
 
+        if Self::is_global_index_target_context(statement_upper)
+            || Self::is_alter_table_target_context(
+                statement_upper,
+                &["DROP INDEX", "RENAME INDEX"],
+                &["TO", "ADD", "ALTER", "DROP", "RENAME"],
+            )
+        {
+            return Some(CompletionContext::IndexTargetClause);
+        }
+
         None
+    }
+
+    fn is_global_index_target_context(statement_upper: &str) -> bool {
+        ["DROP INDEX", "ALTER INDEX", "REINDEX INDEX"]
+            .iter()
+            .any(|phrase| {
+                let Some(position) = Self::previous_keyword_position(statement_upper, phrase)
+                else {
+                    return false;
+                };
+                let after_phrase = position + phrase.len();
+                if Self::statement_has_any_keyword(
+                    statement_upper,
+                    after_phrase,
+                    statement_upper.len(),
+                    &["ON", "TO", "SET", "RESET", "ALTER", "CASCADE", "RESTRICT"],
+                ) {
+                    return false;
+                }
+
+                let target_text = statement_upper[after_phrase..].trim_start();
+                if target_text.is_empty() {
+                    return true;
+                }
+                if target_text
+                    .chars()
+                    .last()
+                    .is_some_and(|ch| ch.is_whitespace())
+                {
+                    return false;
+                }
+
+                Self::statement_words(target_text).len() <= 1
+            })
     }
 
     fn is_alter_table_action_context(statement_upper: &str) -> bool {
@@ -2662,6 +2708,24 @@ mod tests {
             CompletionContext::SelectClause
         );
 
+        let drop_index_sql = "DROP INDEX ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                drop_index_sql,
+                position_at_end(drop_index_sql)
+            ),
+            CompletionContext::IndexTargetClause
+        );
+
+        let drop_index_prefix_sql = "DROP INDEX users_email";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                drop_index_prefix_sql,
+                position_at_end(drop_index_prefix_sql)
+            ),
+            CompletionContext::IndexTargetClause
+        );
+
         let alter_drop_column_sql = "ALTER TABLE app.users DROP COLUMN ";
         assert_eq!(
             parser.analyze_completion_context_fallback(
@@ -2696,6 +2760,15 @@ mod tests {
                 position_at_end(alter_drop_constraint_sql)
             ),
             CompletionContext::ConstraintTargetClause
+        );
+
+        let alter_drop_index_sql = "ALTER TABLE app.users DROP INDEX ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_drop_index_sql,
+                position_at_end(alter_drop_index_sql)
+            ),
+            CompletionContext::IndexTargetClause
         );
     }
 
