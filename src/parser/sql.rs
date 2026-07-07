@@ -757,7 +757,13 @@ impl SqlParser {
         {
             return Some(CompletionContext::JoinClause);
         }
-        if Self::words_end_with(&words, &["ON"]) || Self::words_end_with(&words, &["USING"]) {
+        if Self::words_end_with(&words, &["ON"]) {
+            if Self::ddl_on_relation_target_at_position(source, position) {
+                return Some(CompletionContext::FromClause);
+            }
+            return Some(CompletionContext::WhereClause);
+        }
+        if Self::words_end_with(&words, &["USING"]) {
             return Some(CompletionContext::WhereClause);
         }
         if Self::words_end_with(&words, &["WHERE"])
@@ -811,8 +817,16 @@ impl SqlParser {
             return CompletionContext::SelectClause;
         }
 
+        if Self::is_ddl_on_column_context(statement_upper) {
+            return CompletionContext::SelectClause;
+        }
+
         if Self::is_update_set_context(statement_upper) {
             return CompletionContext::WhereClause;
+        }
+
+        if Self::is_ddl_on_relation_target_context(statement_upper) {
+            return CompletionContext::FromClause;
         }
 
         if Self::is_relation_target_context(statement_upper) {
@@ -911,6 +925,50 @@ impl SqlParser {
                 terminators,
             )
         })
+    }
+
+    pub fn ddl_on_relation_target_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = text_upper[statement_start..].trim_end();
+
+        Self::statement_words(statement_upper)
+            .last()
+            .is_some_and(|word| *word == "ON")
+            && Self::is_ddl_on_relation_target_context(statement_upper)
+    }
+
+    fn is_ddl_on_relation_target_context(statement_upper: &str) -> bool {
+        let Some(on_position) = Self::previous_keyword_position(statement_upper, "ON") else {
+            return false;
+        };
+        if !Self::should_read_on_relation(statement_upper, on_position) {
+            return false;
+        }
+
+        let after_on = on_position + "ON".len();
+        let after_on_text = &statement_upper[after_on..];
+        !after_on_text.contains('(')
+            && !Self::statement_has_any_keyword(
+                statement_upper,
+                after_on,
+                statement_upper.len(),
+                &["WHERE", "EXECUTE", "FOR"],
+            )
+    }
+
+    fn is_ddl_on_column_context(statement_upper: &str) -> bool {
+        let Some(on_position) = Self::previous_keyword_position(statement_upper, "ON") else {
+            return false;
+        };
+        if !Self::should_read_on_relation(statement_upper, on_position) {
+            return false;
+        }
+
+        statement_upper[on_position + "ON".len()..].contains('(')
     }
 
     fn is_insert_column_context(statement_upper: &str) -> bool {
@@ -2110,6 +2168,10 @@ mod tests {
             analyzed_context_at_end("SELECT * FROM users u JOIN orders o ON"),
             CompletionContext::WhereClause
         );
+        assert_eq!(
+            analyzed_context_at_end("CREATE INDEX users_email_idx ON"),
+            CompletionContext::FromClause
+        );
     }
 
     #[test]
@@ -2206,6 +2268,24 @@ mod tests {
                 position_at_end(delete_table_sql)
             ),
             CompletionContext::FromClause
+        );
+
+        let create_index_table_sql = "CREATE INDEX users_email_idx ON app.us";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                create_index_table_sql,
+                position_at_end(create_index_table_sql)
+            ),
+            CompletionContext::FromClause
+        );
+
+        let create_index_column_sql = "CREATE INDEX users_email_idx ON app.users (";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                create_index_column_sql,
+                position_at_end(create_index_column_sql)
+            ),
+            CompletionContext::SelectClause
         );
     }
 

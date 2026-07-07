@@ -271,7 +271,12 @@ fn apply_completed_sql_context_completion_edits(
     let Some(keyword) = completed_sql_context_keyword_at_position(text, position) else {
         return;
     };
-    items.retain(|item| completion_item_allowed_after_completed_keyword(&keyword, item));
+    let byte_position = SqlParser::lsp_position_to_byte_position(text, position);
+    let ddl_on_relation_target =
+        keyword == "on" && SqlParser::ddl_on_relation_target_at_position(text, byte_position);
+    items.retain(|item| {
+        completion_item_allowed_after_completed_keyword(&keyword, item, ddl_on_relation_target)
+    });
 
     let range = Range {
         start: position,
@@ -291,10 +296,15 @@ fn apply_completed_sql_context_completion_edits(
     }
 }
 
-fn completion_item_allowed_after_completed_keyword(keyword: &str, item: &CompletionItem) -> bool {
+fn completion_item_allowed_after_completed_keyword(
+    keyword: &str,
+    item: &CompletionItem,
+    ddl_on_relation_target: bool,
+) -> bool {
     match keyword {
         "from" | "join" | "into" => is_relation_completion_kind(item.kind),
         "select" => !is_relation_completion_kind(item.kind),
+        "on" if ddl_on_relation_target => is_relation_completion_kind(item.kind),
         "where" | "on" | "by" | "having" | "values" | "set" => {
             !is_relation_completion_kind(item.kind)
         }
@@ -1451,6 +1461,35 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| item.filter_text.as_deref() == Some("where")));
+    }
+
+    #[test]
+    fn completion_after_ddl_on_keyword_keeps_relation_items() {
+        let sql = "CREATE INDEX webhook_owner_idx ON";
+        let position = Position {
+            line: 0,
+            character: sql.len() as u32,
+        };
+        let mut items = vec![
+            CompletionItem {
+                label: "public.webhook".to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                insert_text: Some("public.webhook".to_string()),
+                ..Default::default()
+            },
+            CompletionItem {
+                label: "owner".to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                insert_text: Some("owner".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        apply_completed_sql_context_completion_edits(sql, position, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "public.webhook");
+        assert_eq!(items[0].filter_text.as_deref(), Some("on"));
     }
 
     #[test]
