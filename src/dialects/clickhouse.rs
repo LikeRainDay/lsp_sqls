@@ -629,6 +629,46 @@ impl Dialect for ClickHouseDialect {
                     items.push(item);
                 }
             }
+            crate::parser::CompletionContext::CaseResultClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["then", "else"]);
+                if let Some(schema) = schema {
+                    for table in &schema.tables {
+                        for column in &table.columns {
+                            if !prefix.is_empty()
+                                && !column.name.to_lowercase().starts_with(&prefix)
+                            {
+                                continue;
+                            }
+                            let mut item = self.create_column_item(
+                                column,
+                                Some(&format!("{}.{}", schema.database, table.name)),
+                            );
+                            common::set_completion_sort_text(&mut item, "0", &column.name);
+                            items.push(item);
+                        }
+                    }
+                }
+                for keyword in ["NULL", "TRUE", "FALSE", "now()", "today()"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "1", keyword);
+                    items.push(item);
+                }
+            }
+            crate::parser::CompletionContext::CaseContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in common::case_continuation_keywords(sql, position) {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
             crate::parser::CompletionContext::PredicateContinuationClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 for keyword in common::predicate_continuation_keywords(sql, position, false) {

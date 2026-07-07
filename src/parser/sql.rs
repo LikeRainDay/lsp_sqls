@@ -24,6 +24,10 @@ pub enum CompletionContext {
     ExpressionValueClause,
     /// 在完整谓词或赋值之后，应该补全连接词或后续子句
     PredicateContinuationClause,
+    /// 在 CASE THEN/ELSE 之后，应该补全结果表达式
+    CaseResultClause,
+    /// 在 CASE 结果表达式之后，应该补全 WHEN/ELSE/END
+    CaseContinuationClause,
     /// 在表名后（如 table.），应该补全列名
     TableColumn,
     /// 在 JOIN 子句中，应该补全表名
@@ -683,6 +687,14 @@ impl SqlParser {
             return CompletionContext::WhereClause;
         }
 
+        if Self::case_result_context_at_position(source, position) {
+            return CompletionContext::CaseResultClause;
+        }
+
+        if Self::case_continuation_context_at_position(source, position) {
+            return CompletionContext::CaseContinuationClause;
+        }
+
         if Self::select_continuation_context_at_position(source, position) {
             return CompletionContext::SelectContinuationClause;
         }
@@ -901,6 +913,9 @@ impl SqlParser {
         if Self::words_end_with(&words, &["HAVING"]) {
             return Some(CompletionContext::HavingClause);
         }
+        if Self::words_end_with(&words, &["THEN"]) || Self::words_end_with(&words, &["ELSE"]) {
+            return Some(CompletionContext::CaseResultClause);
+        }
 
         None
     }
@@ -992,6 +1007,14 @@ impl SqlParser {
 
         if Self::is_predicate_continuation_context(statement_upper, raw_statement_upper) {
             return CompletionContext::PredicateContinuationClause;
+        }
+
+        if Self::is_case_result_context(raw_statement_upper) {
+            return CompletionContext::CaseResultClause;
+        }
+
+        if Self::is_case_continuation_context(raw_statement_upper) {
+            return CompletionContext::CaseContinuationClause;
         }
 
         if Self::is_update_set_context(statement_upper) {
@@ -1573,6 +1596,161 @@ impl SqlParser {
         )
     }
 
+    fn latest_open_case_segments<'a>(
+        raw_statement_upper: &'a str,
+        searchable_statement_upper: &'a str,
+    ) -> Option<(&'a str, &'a str)> {
+        let case_position = Self::previous_keyword_position(searchable_statement_upper, "CASE")?;
+        let after_case = case_position + "CASE".len();
+        if Self::statement_has_any_keyword(
+            searchable_statement_upper,
+            after_case,
+            searchable_statement_upper.len(),
+            &["END"],
+        ) {
+            return None;
+        }
+
+        Some((
+            raw_statement_upper.get(after_case..)?,
+            searchable_statement_upper.get(after_case..)?,
+        ))
+    }
+
+    fn latest_case_result_marker(searchable_segment_upper: &str) -> Option<(usize, &'static str)> {
+        ["THEN", "ELSE"]
+            .into_iter()
+            .filter_map(|marker| {
+                Self::previous_keyword_position(searchable_segment_upper, marker)
+                    .map(|position| (position, marker))
+            })
+            .max_by_key(|(position, _)| *position)
+    }
+
+    fn is_case_result_context(statement_upper: &str) -> bool {
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some((raw_case_segment, searchable_case_segment)) =
+            Self::latest_open_case_segments(statement_upper, &searchable_statement_upper)
+        else {
+            return false;
+        };
+        let Some((marker_position, marker)) =
+            Self::latest_case_result_marker(searchable_case_segment)
+        else {
+            return false;
+        };
+        let after_marker = marker_position + marker.len();
+        let Some(result_segment) = raw_case_segment.get(after_marker..) else {
+            return false;
+        };
+        let trimmed = result_segment.trim_end();
+        if trimmed.is_empty() || Self::case_result_needs_more_expression(trimmed) {
+            return true;
+        }
+        if result_segment
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+        {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        let Some(prefix_start) = trimmed.rfind(prefix) else {
+            return false;
+        };
+
+        trimmed[..prefix_start].trim_end().is_empty()
+    }
+
+    fn is_case_continuation_context(statement_upper: &str) -> bool {
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some((raw_case_segment, searchable_case_segment)) =
+            Self::latest_open_case_segments(statement_upper, &searchable_statement_upper)
+        else {
+            return false;
+        };
+        let Some((marker_position, marker)) =
+            Self::latest_case_result_marker(searchable_case_segment)
+        else {
+            return false;
+        };
+        let after_marker = marker_position + marker.len();
+        let Some(result_segment) = raw_case_segment.get(after_marker..) else {
+            return false;
+        };
+        let trimmed = result_segment.trim_end();
+        if trimmed.is_empty() || Self::case_result_needs_more_expression(trimmed) {
+            return false;
+        }
+
+        if result_segment
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+        {
+            return Self::is_completed_case_result_expression(trimmed);
+        }
+
+        let words = Self::statement_words(trimmed);
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        if !Self::is_case_continuation_prefix(prefix, marker) {
+            return false;
+        }
+        let Some(prefix_start) = trimmed.rfind(prefix) else {
+            return false;
+        };
+        let before_prefix = trimmed[..prefix_start].trim_end();
+
+        !before_prefix.is_empty() && Self::is_completed_case_result_expression(before_prefix)
+    }
+
+    fn case_result_needs_more_expression(segment: &str) -> bool {
+        segment
+            .chars()
+            .last()
+            .is_some_and(|ch| matches!(ch, '(' | ',' | '.' | '+' | '-' | '*' | '/' | '%' | '='))
+    }
+
+    fn is_completed_case_result_expression(segment: &str) -> bool {
+        let value = segment.trim();
+        if value.is_empty() || Self::case_result_needs_more_expression(value) {
+            return false;
+        }
+        if Self::is_completed_value_expression(value) {
+            return true;
+        }
+
+        let token = value
+            .split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
+            .filter(|token| !token.is_empty())
+            .next_back()
+            .unwrap_or("")
+            .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '[' | ']'));
+        if token.is_empty() {
+            return false;
+        }
+
+        !matches!(
+            token.to_ascii_uppercase().as_str(),
+            "CASE" | "WHEN" | "THEN" | "ELSE" | "END"
+        )
+    }
+
+    fn is_case_continuation_prefix(prefix: &str, marker: &str) -> bool {
+        matches!(
+            (marker, prefix),
+            ("THEN", "W" | "WH" | "WHE" | "WHEN")
+                | ("THEN", "E" | "EL" | "ELS" | "ELSE" | "EN" | "END")
+                | ("ELSE", "E" | "EN" | "END")
+        )
+    }
+
     fn is_value_keyword_prefix(word: &str) -> bool {
         matches!(
             word,
@@ -1675,6 +1853,26 @@ impl SqlParser {
         let words = Self::statement_words(statement_upper);
 
         Self::words_end_with(&words, &["WHEN"])
+    }
+
+    fn case_result_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_case_result_context(statement_upper)
+    }
+
+    fn case_continuation_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_case_continuation_context(statement_upper)
     }
 
     fn analyze_relation_continuation_context_at_position(
@@ -3230,7 +3428,7 @@ impl SqlParser {
         Some(Self::push_masked_range(source, output, index, end))
     }
 
-    fn mask_sql_noise(source: &str) -> String {
+    pub(crate) fn mask_sql_noise(source: &str) -> String {
         let mut output = String::with_capacity(source.len());
         let mut index = 0;
 
@@ -4147,6 +4345,38 @@ mod tests {
         assert_eq!(
             analyzed_context_at_end("SELECT CASE WHEN owner BETWEEN 1 "),
             CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN "),
+            CompletionContext::CaseResultClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN N"),
+            CompletionContext::CaseResultClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'yes' "),
+            CompletionContext::CaseContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'end' "),
+            CompletionContext::CaseContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'yes' E"),
+            CompletionContext::CaseContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'yes' ELSE "),
+            CompletionContext::CaseResultClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'yes' ELSE 'no' "),
+            CompletionContext::CaseContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' THEN 'yes' END "),
+            CompletionContext::SelectContinuationClause
         );
         assert_eq!(
             analyzed_context_at_end("SELECT * FROM users "),

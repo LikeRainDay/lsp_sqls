@@ -248,6 +248,40 @@ pub(crate) fn predicate_continuation_keywords(
     }
 }
 
+pub(crate) fn case_continuation_keywords(sql: &str, position: Position) -> Vec<&'static str> {
+    let text_before = text_before_position(sql, position);
+    let raw_text_upper = text_before.to_ascii_uppercase();
+    let searchable_text_upper = SqlParser::mask_sql_noise(&raw_text_upper);
+    let statement_start = searchable_text_upper
+        .rfind(';')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let searchable_statement = &searchable_text_upper[statement_start..];
+
+    let Some(case_position) = previous_keyword_position(searchable_statement, "CASE") else {
+        return vec!["WHEN", "ELSE", "END"];
+    };
+    let after_case = case_position + "CASE".len();
+    if previous_keyword_position(&searchable_statement[after_case..], "END").is_some() {
+        return Vec::new();
+    }
+
+    let latest_marker = ["THEN", "ELSE"]
+        .into_iter()
+        .filter_map(|marker| {
+            previous_keyword_position(&searchable_statement[after_case..], marker)
+                .map(|position| (position, marker))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, marker)| marker);
+
+    match latest_marker {
+        Some("ELSE") => vec!["END"],
+        Some("THEN") => vec!["WHEN", "ELSE", "END"],
+        _ => vec!["WHEN", "ELSE", "END"],
+    }
+}
+
 fn between_first_value_needs_and(
     statement_upper: &str,
     clause_position: usize,

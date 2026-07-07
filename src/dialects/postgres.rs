@@ -671,6 +671,58 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::CaseResultClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["then", "else"]);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    let use_table_prefix = referenced_tables.len() > 1;
+
+                    self.add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        use_table_prefix,
+                        &prefix,
+                        "0",
+                    );
+                    self.add_schema_functions(
+                        &mut items,
+                        schema,
+                        &prefix,
+                        "1",
+                        Self::cursor_has_identifier_qualifier(sql, position),
+                    );
+                }
+
+                for keyword in ["NULL", "TRUE", "FALSE", "CURRENT_DATE", "CURRENT_TIMESTAMP"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "1", keyword);
+                    items.push(item);
+                }
+            }
+
+            crate::parser::CompletionContext::CaseContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in common::case_continuation_keywords(sql, position) {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::PredicateContinuationClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 for keyword in common::predicate_continuation_keywords(sql, position, true) {

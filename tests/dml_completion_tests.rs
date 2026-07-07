@@ -465,6 +465,63 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&case_when_between_first, "OR"));
     assert!(!has_label(&case_when_between_first, "owner"));
 
+    let case_then_result = complete(dialect, "SELECT CASE WHEN owner = 'app' THEN ", &schema).await;
+    assert!(has_label(&case_then_result, "NULL"));
+    assert!(has_label(&case_then_result, "TRUE"));
+    assert!(has_label(&case_then_result, "owner"));
+    assert!(
+        !has_label(&case_then_result, "FROM"),
+        "CASE THEN result expression should not suggest SELECT continuations: {case_then_result:?}"
+    );
+    assert!(
+        !has_operator(&case_then_result, "="),
+        "CASE THEN result expression should not suggest predicate operators: {case_then_result:?}"
+    );
+
+    let case_then_continuation = complete(
+        dialect,
+        "SELECT CASE WHEN owner = 'app' THEN 'yes' ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&case_then_continuation, "WHEN"));
+    assert!(has_label(&case_then_continuation, "ELSE"));
+    assert!(has_label(&case_then_continuation, "END"));
+    assert!(!has_label(&case_then_continuation, "FROM"));
+    assert!(!has_label(&case_then_continuation, "owner"));
+    assert!(!has_operator(&case_then_continuation, "="));
+
+    let case_then_end_literal = complete(
+        dialect,
+        "SELECT CASE WHEN owner = 'app' THEN 'end' ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&case_then_end_literal, "ELSE"));
+    assert!(has_label(&case_then_end_literal, "END"));
+    assert!(!has_label(&case_then_end_literal, "owner"));
+
+    let case_else_result = complete(
+        dialect,
+        "SELECT CASE WHEN owner = 'app' THEN 'yes' ELSE ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&case_else_result, "NULL"));
+    assert!(has_label(&case_else_result, "owner"));
+    assert!(!has_label(&case_else_result, "END"));
+
+    let case_else_continuation = complete(
+        dialect,
+        "SELECT CASE WHEN owner = 'app' THEN 'yes' ELSE 'no' ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&case_else_continuation, "END"));
+    assert!(!has_label(&case_else_continuation, "ELSE"));
+    assert!(!has_label(&case_else_continuation, "WHEN"));
+    assert!(!has_label(&case_else_continuation, "owner"));
+
     let returning = complete(
         dialect,
         &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') RETURNING "),
