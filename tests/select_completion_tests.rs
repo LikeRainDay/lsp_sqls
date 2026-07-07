@@ -85,3 +85,25 @@ async fn postgres_select_wildcard_continuation_suggests_from_without_alias() {
     assert!(!has_label(&prefixed, "AS"));
     assert!(!has_label(&prefixed, "owner"));
 }
+
+#[tokio::test]
+async fn select_wildcard_from_prefix_excludes_field_matches() {
+    let schema = schema("public");
+
+    for sql in ["SELECT * f", "SELECT * fr", "SELECT * fro"] {
+        let items = complete(&PostgresDialect::new(), sql, &schema).await;
+
+        assert!(has_label(&items, "FROM"), "{sql:?} should suggest FROM");
+        assert!(!has_label(&items, "owner"), "{sql:?} should not suggest fields");
+        assert!(
+            !has_label(&items, "created_time"),
+            "{sql:?} should not suggest fields"
+        );
+        assert!(!has_kind(&items, CompletionItemKind::FIELD));
+    }
+
+    let from_target = complete(&PostgresDialect::new(), "SELECT * from", &schema).await;
+    assert!(has_label(&from_target, "public.webhook"));
+    assert!(has_kind(&from_target, CompletionItemKind::CLASS));
+    assert!(!has_kind(&from_target, CompletionItemKind::FIELD));
+}
