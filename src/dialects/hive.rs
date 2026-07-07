@@ -222,6 +222,41 @@ impl Dialect for HiveDialect {
                     }
                 }
             }
+            crate::parser::CompletionContext::FromContinuationClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [
+                    "AS",
+                    "JOIN",
+                    "INNER JOIN",
+                    "LEFT JOIN",
+                    "RIGHT JOIN",
+                    "WHERE",
+                    "GROUP BY",
+                    "ORDER BY",
+                    "SORT BY",
+                    "CLUSTER BY",
+                    "DISTRIBUTE BY",
+                    "LIMIT",
+                ] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
+            crate::parser::CompletionContext::JoinConditionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["AS", "ON", "USING"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
             crate::parser::CompletionContext::SelectClause => {
                 let select_keywords: Vec<&str> = keywords
                     .iter()

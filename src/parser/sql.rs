@@ -12,6 +12,8 @@ use tree_sitter::{Node, Parser, Tree};
 pub enum CompletionContext {
     /// 在 FROM 子句中，应该补全表名
     FromClause,
+    /// 在 FROM 关系目标之后，应该补全 JOIN/WHERE/GROUP 等后续结构
+    FromContinuationClause,
     /// 在 SELECT 子句中，应该补全列名和关键字
     SelectClause,
     /// 在 WHERE 子句中，应该补全列名、操作符、关键字
@@ -20,6 +22,8 @@ pub enum CompletionContext {
     TableColumn,
     /// 在 JOIN 子句中，应该补全表名
     JoinClause,
+    /// 在 JOIN 关系目标之后，应该补全 ON/USING 条件
+    JoinConditionClause,
     /// 在 ORDER BY 子句中，应该补全列名
     OrderByClause,
     /// 在 ORDER BY 表达式之后，应该补全排序方向和 NULLS 规则
@@ -707,6 +711,12 @@ impl SqlParser {
             return context;
         }
 
+        if let Some(context) =
+            Self::analyze_relation_continuation_context_at_position(source, position)
+        {
+            return context;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -945,6 +955,10 @@ impl SqlParser {
             return context;
         }
 
+        if let Some(context) = Self::analyze_relation_continuation_context(statement_upper) {
+            return context;
+        }
+
         if Self::is_ddl_on_relation_target_context(statement_upper) {
             return CompletionContext::FromClause;
         }
@@ -1165,6 +1179,20 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::is_group_by_continuation_context(statement_upper)
+    }
+
+    fn analyze_relation_continuation_context_at_position(
+        source: &str,
+        position: Position,
+    ) -> Option<CompletionContext> {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::analyze_relation_continuation_context(statement_upper)
     }
 
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
@@ -1464,6 +1492,102 @@ impl SqlParser {
                 | "DISTRIBUT"
                 | "DISTRIBUTE"
         )
+    }
+
+    fn analyze_relation_continuation_context(statement_upper: &str) -> Option<CompletionContext> {
+        if Self::is_join_condition_context(statement_upper) {
+            return Some(CompletionContext::JoinConditionClause);
+        }
+
+        if Self::is_from_continuation_context(statement_upper) {
+            return Some(CompletionContext::FromContinuationClause);
+        }
+
+        None
+    }
+
+    fn is_join_condition_context(statement_upper: &str) -> bool {
+        let Some(join_position) = Self::previous_keyword_position(statement_upper, "JOIN") else {
+            return false;
+        };
+        let after_join = join_position + "JOIN".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_join,
+            statement_upper.len(),
+            &[
+                "ON", "USING", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "UNION",
+            ],
+        ) {
+            return false;
+        }
+
+        Self::relation_target_completed_or_prefixed(
+            &statement_upper[after_join..],
+            &["A", "AS", "O", "ON", "U", "US", "USI", "USIN", "USING"],
+        )
+    }
+
+    fn is_from_continuation_context(statement_upper: &str) -> bool {
+        let Some(from_position) = Self::previous_keyword_position(statement_upper, "FROM") else {
+            return false;
+        };
+        let after_from = from_position + "FROM".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_from,
+            statement_upper.len(),
+            &[
+                "JOIN", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "FETCH",
+                "UNION", "ON", "USING",
+            ],
+        ) {
+            return false;
+        }
+
+        let segment = statement_upper[after_from..]
+            .rsplit(',')
+            .next()
+            .unwrap_or(&statement_upper[after_from..]);
+        Self::relation_target_completed_or_prefixed(
+            segment,
+            &[
+                "A", "AS", "J", "JO", "JOI", "JOIN", "I", "IN", "INN", "INNE", "INNER", "L", "LE",
+                "LEF", "LEFT", "R", "RI", "RIG", "RIGH", "RIGHT", "F", "FU", "FUL", "FULL", "C",
+                "CR", "CRO", "CROS", "CROSS", "W", "WH", "WHE", "WHER", "WHERE", "G", "GR", "GRO",
+                "GROU", "GROUP", "O", "OR", "ORD", "ORDE", "ORDER", "H", "HA", "HAV", "HAVI",
+                "HAVIN", "HAVING", "LI", "LIM", "LIMI", "LIMIT", "OF", "OFF", "OFFS", "OFFSE",
+                "OFFSET", "FE", "FET", "FETC", "FETCH",
+            ],
+        )
+    }
+
+    fn relation_target_completed_or_prefixed(
+        segment: &str,
+        continuation_prefixes: &[&str],
+    ) -> bool {
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() || trimmed.ends_with('.') || trimmed.ends_with('(') {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        if words.is_empty() {
+            return false;
+        }
+
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return words.last().is_some_and(|word| *word != "AS");
+        }
+
+        if words.len() < 2 {
+            return false;
+        }
+
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        continuation_prefixes.contains(&prefix)
     }
 
     fn is_reference_relation_target_context(statement_upper: &str) -> bool {
@@ -3327,6 +3451,26 @@ mod tests {
             CompletionContext::WhereClause
         );
         assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users "),
+            CompletionContext::FromContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users J"),
+            CompletionContext::FromContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users, "),
+            CompletionContext::FromClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users JOIN orders "),
+            CompletionContext::JoinConditionClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * FROM users JOIN orders O"),
+            CompletionContext::JoinConditionClause
+        );
+        assert_eq!(
             analyzed_context_at_end("SELECT * FROM users ORDER BY"),
             CompletionContext::OrderByClause
         );
@@ -3397,7 +3541,7 @@ mod tests {
 
         assert_eq!(
             parser.analyze_completion_context_fallback(sql, position_at_end(sql)),
-            CompletionContext::FromClause
+            CompletionContext::FromContinuationClause
         );
     }
 
