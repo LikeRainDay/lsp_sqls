@@ -1607,8 +1607,14 @@ async fn test_mongodb_dialect() {
     assert!(items.iter().any(|item| item.label == "create"));
     assert!(items.iter().any(|item| item.label == "drop"));
     assert!(items.iter().any(|item| item.label == "dropDatabase"));
-    assert!(items.iter().any(|item| item.label == "users"));
-    assert!(items.iter().any(|item| item.label == "email"));
+    assert!(
+        !items.iter().any(|item| item.label == "users"),
+        "MongoDB top-level key completion should not mix collection values: {items:?}"
+    );
+    assert!(
+        !items.iter().any(|item| item.label == "email"),
+        "MongoDB top-level key completion should not mix field values: {items:?}"
+    );
 
     let collection_prefix_json = r#"{"collection":"us"#;
     let collection_prefix_items = dialect
@@ -1624,11 +1630,48 @@ async fn test_mongodb_dialect() {
     assert!(collection_prefix_items
         .iter()
         .any(|item| item.label == "users"));
+    assert_eq!(
+        collection_prefix_items
+            .iter()
+            .find(|item| item.label == "users")
+            .and_then(|item| item.insert_text.as_deref()),
+        Some("users")
+    );
     assert!(
         !collection_prefix_items
             .iter()
             .any(|item| item.label == "email"),
         "MongoDB collection completion should respect the current prefix"
+    );
+    assert!(
+        !collection_prefix_items
+            .iter()
+            .any(|item| item.label == "updateOne"),
+        "MongoDB collection completion should not mix command fields: {collection_prefix_items:?}"
+    );
+
+    let top_level_key_json = r#"{"collection":"users",""#;
+    let top_level_key_items = dialect
+        .completion(
+            top_level_key_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: top_level_key_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        top_level_key_items.iter().any(|item| item.label == "find"),
+        "MongoDB top-level key completion should include command fields: {top_level_key_items:?}"
+    );
+    assert!(
+        !top_level_key_items.iter().any(|item| item.label == "users"),
+        "MongoDB top-level key completion should not include collection values: {top_level_key_items:?}"
+    );
+    assert!(
+        !top_level_key_items.iter().any(|item| item.label == "email"),
+        "MongoDB top-level key completion should not include document fields: {top_level_key_items:?}"
     );
 
     let field_prefix_json = r#"{"find":{"em"#;
@@ -1653,6 +1696,41 @@ async fn test_mongodb_dialect() {
             .find(|item| item.label == "email")
             .and_then(|item| item.filter_text.as_deref()),
         Some("email")
+    );
+    assert_eq!(
+        field_prefix_items
+            .iter()
+            .find(|item| item.label == "email")
+            .and_then(|item| item.insert_text.as_deref()),
+        Some("email")
+    );
+    assert!(
+        !field_prefix_items.iter().any(|item| item.label == "find"),
+        "MongoDB field completion should not mix command fields: {field_prefix_items:?}"
+    );
+
+    let document_array_field_json = r#"{"collection":"users","documents":[{"em"#;
+    let document_array_field_items = dialect
+        .completion(
+            document_array_field_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: document_array_field_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        document_array_field_items
+            .iter()
+            .any(|item| item.label == "email"),
+        "MongoDB document array completion should include document fields: {document_array_field_items:?}"
+    );
+    assert!(
+        !document_array_field_items
+            .iter()
+            .any(|item| item.label == "users"),
+        "MongoDB document array field completion should not include collection values: {document_array_field_items:?}"
     );
 
     let query = r#"{"collection":"users","find":{"email":"ada@example.com"}}"#;

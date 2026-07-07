@@ -25,6 +25,7 @@ impl MongoDbDialect {
         kind: CompletionItemKind,
         detail: &str,
         sort_prefix: &str,
+        quoted_insert: bool,
     ) -> CompletionItem {
         CompletionItem {
             label: label.to_string(),
@@ -35,7 +36,11 @@ impl MongoDbDialect {
             preselect: None,
             sort_text: Some(format!("{}{}", sort_prefix, label)),
             filter_text: Some(label.to_string()),
-            insert_text: Some(format!("\"{}\"", label)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", label)
+            } else {
+                label.to_string()
+            }),
             insert_text_format: None,
             text_edit: None,
             additional_text_edits: None,
@@ -48,7 +53,7 @@ impl MongoDbDialect {
         }
     }
 
-    fn collection_item(table: &Table) -> CompletionItem {
+    fn collection_item(table: &Table, quoted_insert: bool) -> CompletionItem {
         CompletionItem {
             label: table.name.clone(),
             kind: Some(CompletionItemKind::CLASS),
@@ -61,7 +66,11 @@ impl MongoDbDialect {
             preselect: None,
             sort_text: Some(format!("2{}", table.name)),
             filter_text: Some(table.name.clone()),
-            insert_text: Some(format!("\"{}\"", table.name)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", table.name)
+            } else {
+                table.name.clone()
+            }),
             insert_text_format: None,
             text_edit: None,
             additional_text_edits: None,
@@ -74,7 +83,7 @@ impl MongoDbDialect {
         }
     }
 
-    fn field_item(collection: &Table, column: &Column) -> CompletionItem {
+    fn field_item(collection: &Table, column: &Column, quoted_insert: bool) -> CompletionItem {
         CompletionItem {
             label: column.name.clone(),
             kind: Some(CompletionItemKind::FIELD),
@@ -90,7 +99,11 @@ impl MongoDbDialect {
             preselect: None,
             sort_text: Some(format!("3{}.{}", collection.name, column.name)),
             filter_text: Some(column.name.clone()),
-            insert_text: Some(format!("\"{}\"", column.name)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", column.name)
+            } else {
+                column.name.clone()
+            }),
             insert_text_format: None,
             text_edit: None,
             additional_text_edits: None,
@@ -100,6 +113,72 @@ impl MongoDbDialect {
             tags: None,
             insert_text_mode: None,
             label_details: None,
+        }
+    }
+
+    fn add_top_level_items(items: &mut Vec<CompletionItem>, prefix: &str, quoted_insert: bool) {
+        for field in MONGODB_TOP_LEVEL_FIELDS {
+            if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(Self::completion_item(
+                field,
+                CompletionItemKind::FIELD,
+                "MongoDB command field",
+                "0",
+                quoted_insert,
+            ));
+        }
+
+        for command in MONGODB_COMMANDS {
+            if !prefix.is_empty() && !command.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(Self::completion_item(
+                command,
+                CompletionItemKind::FUNCTION,
+                "MongoDB command",
+                "1",
+                quoted_insert,
+            ));
+        }
+    }
+
+    fn add_collection_items(
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        let Some(schema) = schema else {
+            return;
+        };
+
+        for table in &schema.tables {
+            if prefix.is_empty() || table.name.to_ascii_lowercase().starts_with(prefix) {
+                items.push(Self::collection_item(table, quoted_insert));
+            }
+        }
+    }
+
+    fn add_field_items(
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        let Some(schema) = schema else {
+            return;
+        };
+
+        for table in &schema.tables {
+            for column in &table.columns {
+                if prefix.is_empty() || column.name.to_ascii_lowercase().starts_with(prefix) {
+                    items.push(Self::field_item(table, column, quoted_insert));
+                }
+            }
         }
     }
 }
@@ -131,43 +210,23 @@ impl Dialect for MongoDbDialect {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
         let prefix = crate::position::cursor_token_prefix(json, position, is_token_char);
+        let context = mongodb_completion_context(json, position);
+        let quoted_insert = !context.inside_string;
 
-        for field in MONGODB_TOP_LEVEL_FIELDS {
-            if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
-                continue;
+        match context.kind {
+            MongoCompletionKind::TopLevel => {
+                Self::add_top_level_items(&mut items, &prefix, quoted_insert);
             }
-
-            items.push(Self::completion_item(
-                field,
-                CompletionItemKind::FIELD,
-                "MongoDB command field",
-                "0",
-            ));
-        }
-
-        for command in MONGODB_COMMANDS {
-            if !prefix.is_empty() && !command.to_ascii_lowercase().starts_with(&prefix) {
-                continue;
+            MongoCompletionKind::CollectionValue => {
+                Self::add_collection_items(&mut items, schema, &prefix, quoted_insert);
             }
-
-            items.push(Self::completion_item(
-                command,
-                CompletionItemKind::FUNCTION,
-                "MongoDB command",
-                "1",
-            ));
-        }
-
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if prefix.is_empty() || table.name.to_ascii_lowercase().starts_with(&prefix) {
-                    items.push(Self::collection_item(table));
-                }
-                for column in &table.columns {
-                    if prefix.is_empty() || column.name.to_ascii_lowercase().starts_with(&prefix) {
-                        items.push(Self::field_item(table, column));
-                    }
-                }
+            MongoCompletionKind::FieldName => {
+                Self::add_field_items(&mut items, schema, &prefix, quoted_insert);
+            }
+            MongoCompletionKind::Broad => {
+                Self::add_top_level_items(&mut items, &prefix, quoted_insert);
+                Self::add_collection_items(&mut items, schema, &prefix, quoted_insert);
+                Self::add_field_items(&mut items, schema, &prefix, quoted_insert);
             }
         }
 
@@ -309,6 +368,271 @@ const MONGODB_COMMANDS: &[&str] = &[
     "collStats",
     "dbStats",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MongoCompletionKind {
+    Broad,
+    TopLevel,
+    CollectionValue,
+    FieldName,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MongoCompletionContext {
+    kind: MongoCompletionKind,
+    inside_string: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JsonObjectFrame {
+    owner_key: Option<String>,
+    last_key: Option<String>,
+    after_colon: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JsonScanState {
+    frames: Vec<JsonObjectFrame>,
+    array_owner_keys: Vec<Option<String>>,
+    pending_array_object_owner: Option<String>,
+    previous_significant: Option<char>,
+}
+
+fn mongodb_completion_context(source: &str, position: Position) -> MongoCompletionContext {
+    let byte_offset = byte_offset_at_position(source, position);
+    let before = &source[..byte_offset.min(source.len())];
+    let open_string_start = current_open_string_start(before);
+    let context_source = open_string_start
+        .map(|start| &before[..start])
+        .unwrap_or(before);
+    let state = scan_json_context(context_source);
+    let inside_string = open_string_start.is_some();
+    let previous = state.previous_significant;
+    let current_key = state
+        .frames
+        .last()
+        .and_then(|frame| frame.last_key.as_deref());
+    let owner_key = state
+        .frames
+        .last()
+        .and_then(|frame| frame.owner_key.as_deref());
+
+    let kind = if matches!(previous, Some(':')) {
+        match current_key {
+            Some(key) if is_mongodb_collection_key(key) => MongoCompletionKind::CollectionValue,
+            _ => MongoCompletionKind::Broad,
+        }
+    } else if is_json_key_position(previous) {
+        if owner_key.is_none() {
+            MongoCompletionKind::TopLevel
+        } else if owner_key.map(is_mongodb_field_object_key).unwrap_or(false) {
+            MongoCompletionKind::FieldName
+        } else {
+            MongoCompletionKind::Broad
+        }
+    } else {
+        MongoCompletionKind::Broad
+    };
+
+    MongoCompletionContext {
+        kind,
+        inside_string,
+    }
+}
+
+fn byte_offset_at_position(source: &str, position: Position) -> usize {
+    let position = crate::position::lsp_position_to_byte_position(source, position);
+    let mut offset = 0usize;
+
+    for (line_index, line) in source.split('\n').enumerate() {
+        if line_index == position.line as usize {
+            return offset + (position.character as usize).min(line.len());
+        }
+        offset += line.len() + 1;
+    }
+
+    source.len()
+}
+
+fn current_open_string_start(source: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaping = false;
+    let mut start = 0usize;
+
+    for (index, ch) in source.char_indices() {
+        if in_string {
+            if escaping {
+                escaping = false;
+            } else if ch == '\\' {
+                escaping = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            start = index;
+        }
+    }
+
+    in_string.then_some(start)
+}
+
+fn scan_json_context(source: &str) -> JsonScanState {
+    let mut state = JsonScanState::default();
+    let mut in_string = false;
+    let mut escaping = false;
+    let mut string_start = 0usize;
+    let mut previous_significant = None;
+
+    for (index, ch) in source.char_indices() {
+        if in_string {
+            if escaping {
+                escaping = false;
+            } else if ch == '\\' {
+                escaping = true;
+            } else if ch == '"' {
+                in_string = false;
+                let value = source[string_start..index].to_string();
+                if previous_significant != Some(':') {
+                    if let Some(frame) = state.frames.last_mut() {
+                        frame.last_key = Some(value);
+                    }
+                }
+                previous_significant = Some('"');
+            }
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                escaping = false;
+                string_start = index + ch.len_utf8();
+            }
+            '{' => {
+                let owner_key = if previous_significant == Some(':') {
+                    state.frames.last().and_then(|frame| frame.last_key.clone())
+                } else if previous_significant == Some('[') {
+                    state.array_owner_keys.last().cloned().flatten()
+                } else if previous_significant == Some(',') {
+                    state.pending_array_object_owner.take()
+                } else {
+                    None
+                };
+                if let Some(frame) = state.frames.last_mut() {
+                    if previous_significant == Some(':') {
+                        frame.after_colon = false;
+                    }
+                }
+                state.frames.push(JsonObjectFrame {
+                    owner_key,
+                    last_key: None,
+                    after_colon: false,
+                });
+                previous_significant = Some('{');
+            }
+            '}' => {
+                state.frames.pop();
+                previous_significant = Some('}');
+            }
+            '[' => {
+                let owner_key = if previous_significant == Some(':') {
+                    state.frames.last().and_then(|frame| frame.last_key.clone())
+                } else {
+                    None
+                };
+                if let Some(frame) = state.frames.last_mut() {
+                    if previous_significant == Some(':') {
+                        frame.after_colon = false;
+                    }
+                }
+                state.array_owner_keys.push(owner_key);
+                state.pending_array_object_owner = None;
+                previous_significant = Some('[');
+            }
+            ']' => {
+                state.array_owner_keys.pop();
+                state.pending_array_object_owner = None;
+                previous_significant = Some(']');
+            }
+            ':' => {
+                if let Some(frame) = state.frames.last_mut() {
+                    frame.after_colon = true;
+                }
+                previous_significant = Some(':');
+            }
+            ',' => {
+                let comma_in_array = matches!(previous_significant, Some('}' | ']'))
+                    && !state.array_owner_keys.is_empty();
+                if comma_in_array {
+                    state.pending_array_object_owner =
+                        state.array_owner_keys.last().cloned().flatten();
+                } else if let Some(frame) = state.frames.last_mut() {
+                    frame.last_key = None;
+                    frame.after_colon = false;
+                    state.pending_array_object_owner = None;
+                }
+                previous_significant = Some(',');
+            }
+            _ => {
+                if let Some(frame) = state.frames.last_mut() {
+                    if frame.after_colon {
+                        frame.after_colon = false;
+                    }
+                }
+                previous_significant = Some(ch);
+            }
+        }
+    }
+
+    state.previous_significant = previous_significant;
+    state
+}
+
+fn is_json_key_position(previous: Option<char>) -> bool {
+    matches!(previous, Some('{') | Some(',') | Some('"'))
+}
+
+fn is_mongodb_collection_key(key: &str) -> bool {
+    matches!(
+        key,
+        "collection" | "from" | "to" | "renameCollection" | "drop" | "create"
+    )
+}
+
+fn is_mongodb_field_object_key(key: &str) -> bool {
+    matches!(
+        key,
+        "find"
+            | "filter"
+            | "projection"
+            | "sort"
+            | "update"
+            | "document"
+            | "documents"
+            | "deleteOne"
+            | "deleteMany"
+            | "updateOne"
+            | "updateMany"
+            | "insertOne"
+            | "insertMany"
+            | "$set"
+            | "$unset"
+            | "$inc"
+            | "$mul"
+            | "$min"
+            | "$max"
+            | "$rename"
+            | "$setOnInsert"
+            | "$push"
+            | "$pull"
+            | "$addToSet"
+    )
+}
 
 fn mongodb_command_hints(value: &serde_json::Value, source: &str) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
