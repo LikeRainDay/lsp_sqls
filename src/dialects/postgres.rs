@@ -403,6 +403,23 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::ReferenceColumnClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    if let Some(table_reference) =
+                        SqlParser::reference_table_at_position(sql, position)
+                    {
+                        common::add_reference_table_columns(
+                            &mut items,
+                            schema,
+                            &table_reference,
+                            &prefix,
+                            "0",
+                        );
+                    }
+                }
+            }
+
             crate::parser::CompletionContext::ColumnTargetClause => {
                 let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["column"]);
                 if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {

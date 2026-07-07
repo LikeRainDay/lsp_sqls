@@ -59,6 +59,10 @@ fn has_label(items: &[CompletionItem], label: &str) -> bool {
     items.iter().any(|item| item.label == label)
 }
 
+fn has_kind(items: &[CompletionItem], kind: CompletionItemKind) -> bool {
+    items.iter().any(|item| item.kind == Some(kind))
+}
+
 async fn assert_create_index_completion(
     dialect: &dyn Dialect,
     database: &str,
@@ -93,6 +97,68 @@ async fn assert_create_index_completion(
     );
 }
 
+async fn assert_references_completion(
+    dialect: &dyn Dialect,
+    database: &str,
+    qualified_table_label: &str,
+) {
+    let schema = schema(database);
+
+    let table_target = complete(
+        dialect,
+        &format!("CREATE TABLE {database}.child (owner_id INT REFERENCES "),
+        &schema,
+    )
+    .await;
+    assert!(
+        has_label(&table_target, qualified_table_label),
+        "REFERENCES table target should suggest relation names: {table_target:?}"
+    );
+    assert!(
+        !has_kind(&table_target, CompletionItemKind::FIELD),
+        "REFERENCES table target should not suggest fields: {table_target:?}"
+    );
+
+    let create_columns = complete(
+        dialect,
+        &format!("CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook ("),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&create_columns, "owner"));
+    assert!(has_label(&create_columns, "name"));
+    assert!(
+        !has_label(&create_columns, "form_background_url"),
+        "REFERENCES column list should stay scoped to the referenced table: {create_columns:?}"
+    );
+    assert!(!has_kind(&create_columns, CompletionItemKind::CLASS));
+    assert!(!has_kind(&create_columns, CompletionItemKind::OPERATOR));
+
+    let prefixed_column = complete(
+        dialect,
+        &format!("CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook (ow"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&prefixed_column, "owner"));
+    assert!(!has_label(&prefixed_column, "name"));
+
+    let alter_columns = complete(
+        dialect,
+        &format!(
+            "ALTER TABLE {database}.form ADD CONSTRAINT fk_owner FOREIGN KEY (owner) REFERENCES {database}.webhook ("
+        ),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&alter_columns, "owner"));
+    assert!(has_label(&alter_columns, "name"));
+    assert!(
+        !has_label(&alter_columns, "form_background_url"),
+        "ALTER TABLE REFERENCES column list should use the referenced table, not the altered table: {alter_columns:?}"
+    );
+}
+
 #[tokio::test]
 async fn postgres_create_index_completion_distinguishes_ddl_on_from_join_on() {
     assert_create_index_completion(&PostgresDialect::new(), "public", "public.webhook").await;
@@ -101,4 +167,14 @@ async fn postgres_create_index_completion_distinguishes_ddl_on_from_join_on() {
 #[tokio::test]
 async fn mysql_create_index_completion_distinguishes_ddl_on_from_join_on() {
     assert_create_index_completion(&MysqlDialect::new(), "shop", "webhook").await;
+}
+
+#[tokio::test]
+async fn postgres_references_completion_suggests_target_table_and_columns() {
+    assert_references_completion(&PostgresDialect::new(), "public", "public.webhook").await;
+}
+
+#[tokio::test]
+async fn mysql_references_completion_suggests_target_table_and_columns() {
+    assert_references_completion(&MysqlDialect::new(), "shop", "webhook").await;
 }

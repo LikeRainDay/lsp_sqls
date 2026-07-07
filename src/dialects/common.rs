@@ -498,6 +498,28 @@ pub(crate) fn add_schema_using_columns(
     }
 }
 
+pub(crate) fn add_reference_table_columns(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    table_reference: &str,
+    prefix: &str,
+    sort_prefix: &str,
+) {
+    let Some(table) = find_table_by_reference(schema, table_reference) else {
+        return;
+    };
+
+    for column in &table.columns {
+        if !prefix.is_empty() && !column.name.to_lowercase().starts_with(prefix) {
+            continue;
+        }
+
+        let mut item = create_column_item(column, None);
+        set_completion_sort_text(&mut item, sort_prefix, &column.name);
+        items.push(item);
+    }
+}
+
 pub(crate) fn add_schema_constraints(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
