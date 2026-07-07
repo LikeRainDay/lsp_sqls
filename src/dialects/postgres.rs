@@ -74,7 +74,7 @@ impl PostgresDialect {
             position,
             &[
                 "from", "join", "inner", "left", "right", "full", "outer", "cross", "insert",
-                "into", "update", "delete", "truncate", "alter", "drop", "table", "view",
+                "into", "update", "delete", "truncate", "alter", "drop", "table", "view", "on",
             ],
         )
     }

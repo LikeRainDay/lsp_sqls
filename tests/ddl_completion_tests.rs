@@ -66,17 +66,22 @@ async fn assert_create_index_completion(
 ) {
     let schema = schema(database);
 
-    let on_target = complete(dialect, "CREATE INDEX webhook_owner_idx ON ", &schema).await;
-    assert!(
-        has_label(&on_target, qualified_table_label),
-        "CREATE INDEX ON should suggest relation targets: {on_target:?}"
-    );
-    assert!(
-        !on_target
-            .iter()
-            .any(|item| item.kind == Some(CompletionItemKind::FIELD)),
-        "CREATE INDEX ON should not suggest fields before the table target: {on_target:?}"
-    );
+    for sql in [
+        "CREATE INDEX webhook_owner_idx ON",
+        "CREATE INDEX webhook_owner_idx ON ",
+    ] {
+        let on_target = complete(dialect, sql, &schema).await;
+        assert!(
+            has_label(&on_target, qualified_table_label),
+            "CREATE INDEX ON should suggest relation targets for {sql:?}: {on_target:?}"
+        );
+        assert!(
+            !on_target
+                .iter()
+                .any(|item| item.kind == Some(CompletionItemKind::FIELD)),
+            "CREATE INDEX ON should not suggest fields before the table target for {sql:?}: {on_target:?}"
+        );
+    }
 
     let column_sql = format!("CREATE INDEX webhook_owner_idx ON {database}.webhook (");
     let columns = complete(dialect, &column_sql, &schema).await;
