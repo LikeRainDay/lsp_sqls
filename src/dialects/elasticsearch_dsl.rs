@@ -28,6 +28,15 @@ impl ElasticsearchDslDialect {
 
     /// 创建字段补全项
     fn create_field_item(&self, field: &str, detail_prefix: &str) -> CompletionItem {
+        self.create_field_item_with_insert(field, detail_prefix, true)
+    }
+
+    fn create_field_item_with_insert(
+        &self,
+        field: &str,
+        detail_prefix: &str,
+        quoted_insert: bool,
+    ) -> CompletionItem {
         CompletionItem {
             label: field.to_string(),
             kind: Some(CompletionItemKind::FIELD),
@@ -37,7 +46,11 @@ impl ElasticsearchDslDialect {
             preselect: None,
             sort_text: Some(format!("1{}", field)),
             filter_text: Some(field.to_string()),
-            insert_text: Some(format!("\"{}\"", field)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", field)
+            } else {
+                field.to_string()
+            }),
             insert_text_format: None,
             insert_text_mode: None,
             text_edit: None,
@@ -50,8 +63,11 @@ impl ElasticsearchDslDialect {
         }
     }
 
-    /// 创建查询类型补全项
-    fn create_query_type_item(&self, query_type: &str) -> CompletionItem {
+    fn create_query_type_item_with_insert(
+        &self,
+        query_type: &str,
+        quoted_insert: bool,
+    ) -> CompletionItem {
         CompletionItem {
             label: query_type.to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
@@ -61,7 +77,11 @@ impl ElasticsearchDslDialect {
             preselect: None,
             sort_text: Some(format!("0{}", query_type)),
             filter_text: Some(query_type.to_string()),
-            insert_text: Some(format!("\"{}\"", query_type)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", query_type)
+            } else {
+                query_type.to_string()
+            }),
             insert_text_format: None,
             insert_text_mode: None,
             text_edit: None,
@@ -74,8 +94,11 @@ impl ElasticsearchDslDialect {
         }
     }
 
-    /// 创建聚合类型补全项
-    fn create_agg_type_item(&self, agg_type: &str) -> CompletionItem {
+    fn create_agg_type_item_with_insert(
+        &self,
+        agg_type: &str,
+        quoted_insert: bool,
+    ) -> CompletionItem {
         CompletionItem {
             label: agg_type.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
@@ -85,7 +108,45 @@ impl ElasticsearchDslDialect {
             preselect: None,
             sort_text: Some(format!("2{}", agg_type)),
             filter_text: Some(agg_type.to_string()),
-            insert_text: Some(format!("\"{}\"", agg_type)),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", agg_type)
+            } else {
+                agg_type.to_string()
+            }),
+            insert_text_format: None,
+            insert_text_mode: None,
+            text_edit: None,
+            additional_text_edits: None,
+            commit_characters: None,
+            command: None,
+            data: None,
+            tags: None,
+            label_details: None,
+        }
+    }
+
+    fn create_index_item(
+        &self,
+        table: &crate::schema::Table,
+        quoted_insert: bool,
+    ) -> CompletionItem {
+        CompletionItem {
+            label: table.name.clone(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some(format!("Elasticsearch Index: {}", table.name)),
+            documentation: table
+                .comment
+                .clone()
+                .map(tower_lsp::lsp_types::Documentation::String),
+            deprecated: None,
+            preselect: None,
+            sort_text: Some(format!("3{}", table.name)),
+            filter_text: Some(table.name.clone()),
+            insert_text: Some(if quoted_insert {
+                format!("\"{}\"", table.name)
+            } else {
+                table.name.clone()
+            }),
             insert_text_format: None,
             insert_text_mode: None,
             text_edit: None,
@@ -104,6 +165,16 @@ impl ElasticsearchDslDialect {
         schema: Option<&Schema>,
         prefix: &str,
     ) {
+        self.add_schema_field_items_with_insert(items, schema, prefix, true);
+    }
+
+    fn add_schema_field_items_with_insert(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
         let Some(schema) = schema else {
             return;
         };
@@ -114,11 +185,100 @@ impl ElasticsearchDslDialect {
                     continue;
                 }
 
-                items.push(self.create_field_item(
+                items.push(self.create_field_item_with_insert(
                     &column.name,
                     &format!("Elasticsearch field in {}", table.name),
+                    quoted_insert,
                 ));
             }
+        }
+    }
+
+    fn add_schema_index_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        let Some(schema) = schema else {
+            return;
+        };
+
+        for table in &schema.tables {
+            if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(self.create_index_item(table, quoted_insert));
+        }
+    }
+
+    fn add_top_level_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        for field in ES_TOP_LEVEL_FIELDS {
+            if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(self.create_field_item_with_insert(
+                field,
+                "Elasticsearch DSL field",
+                quoted_insert,
+            ));
+        }
+    }
+
+    fn add_query_type_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        for query_type in ES_QUERY_TYPES {
+            if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(self.create_query_type_item_with_insert(query_type, quoted_insert));
+        }
+    }
+
+    fn add_agg_type_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        for agg_type in ES_AGG_TYPES {
+            if !prefix.is_empty() && !agg_type.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(self.create_agg_type_item_with_insert(agg_type, quoted_insert));
+        }
+    }
+
+    fn add_bool_field_items(
+        &self,
+        items: &mut Vec<CompletionItem>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        for field in ES_BOOL_FIELDS {
+            if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            items.push(self.create_field_item_with_insert(
+                field,
+                "Bool query field",
+                quoted_insert,
+            ));
         }
     }
 
@@ -187,6 +347,38 @@ impl Dialect for ElasticsearchDslDialect {
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
         let prefix = crate::position::cursor_token_prefix(dsl, position, is_token_char);
+        let hint = elasticsearch_completion_context(dsl, position);
+        let quoted_insert = !hint.inside_string;
+        let mut items = Vec::new();
+
+        match hint.kind {
+            EsCompletionKind::TopLevel => {
+                self.add_top_level_items(&mut items, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::QueryType => {
+                self.add_query_type_items(&mut items, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::AggType => {
+                self.add_agg_type_items(&mut items, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::BoolField => {
+                self.add_bool_field_items(&mut items, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::FieldName => {
+                self.add_schema_field_items_with_insert(&mut items, schema, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::IndexValue => {
+                self.add_schema_index_items(&mut items, schema, &prefix, quoted_insert);
+                return items;
+            }
+            EsCompletionKind::Broad => {}
+        }
+
         let byte_position = crate::position::lsp_position_to_byte_position(dsl, position);
         let mut parser = self.dsl_parser.lock().unwrap();
         let (tree, _) = parser.parse_with_tree(dsl);
@@ -202,146 +394,24 @@ impl Dialect for ElasticsearchDslDialect {
             crate::parser::DslCompletionContext::Default
         };
 
-        let mut items = Vec::new();
-
         // 根据上下文提供不同的补全
         match context {
             crate::parser::DslCompletionContext::TopLevel => {
-                // 顶级字段
-                let top_level_fields = vec![
-                    "query",
-                    "aggs",
-                    "aggregations",
-                    "sort",
-                    "from",
-                    "size",
-                    "source",
-                    "_source",
-                    "fields",
-                    "highlight",
-                    "suggest",
-                    "script_fields",
-                    "docvalue_fields",
-                    "stored_fields",
-                    "post_filter",
-                    "min_score",
-                    "timeout",
-                    "terminate_after",
-                ];
-
-                for field in top_level_fields {
-                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_field_item(field, "Elasticsearch DSL field"));
-                }
+                self.add_top_level_items(&mut items, &prefix, true);
             }
 
             crate::parser::DslCompletionContext::QueryObject => {
-                // 查询类型
-                let query_types = vec![
-                    "match",
-                    "match_all",
-                    "match_none",
-                    "match_phrase",
-                    "match_phrase_prefix",
-                    "multi_match",
-                    "common",
-                    "query_string",
-                    "simple_query_string",
-                    "term",
-                    "terms",
-                    "range",
-                    "exists",
-                    "prefix",
-                    "wildcard",
-                    "regexp",
-                    "fuzzy",
-                    "type",
-                    "ids",
-                    "constant_score",
-                    "bool",
-                    "boosting",
-                    "dis_max",
-                    "function_score",
-                    "script_score",
-                    "percolate",
-                ];
-
-                for query_type in query_types {
-                    if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_query_type_item(query_type));
-                }
+                self.add_query_type_items(&mut items, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
             crate::parser::DslCompletionContext::AggsObject => {
-                // 聚合类型
-                let agg_types = vec![
-                    "terms",
-                    "range",
-                    "date_range",
-                    "ip_range",
-                    "histogram",
-                    "date_histogram",
-                    "geo_distance",
-                    "geohash_grid",
-                    "geotile_grid",
-                    "filters",
-                    "adjacency_matrix",
-                    "sampler",
-                    "diversified_sampler",
-                    "global",
-                    "filter",
-                    "missing",
-                    "nested",
-                    "reverse_nested",
-                    "children",
-                    "parent",
-                    "cardinality",
-                    "avg",
-                    "sum",
-                    "min",
-                    "max",
-                    "stats",
-                    "extended_stats",
-                    "percentiles",
-                    "percentile_ranks",
-                    "top_hits",
-                    "scripted_metric",
-                    "matrix_stats",
-                    "bucket_script",
-                    "bucket_selector",
-                    "bucket_sort",
-                    "serial_diff",
-                    "moving_avg",
-                ];
-
-                for agg_type in agg_types {
-                    if !prefix.is_empty() && !agg_type.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_agg_type_item(agg_type));
-                }
+                self.add_agg_type_items(&mut items, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
             crate::parser::DslCompletionContext::BoolQuery => {
-                // bool 查询的子字段
-                let bool_fields = vec!["must", "must_not", "should", "filter"];
-
-                for field in bool_fields {
-                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_field_item(field, "Bool query field"));
-                }
+                self.add_bool_field_items(&mut items, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
@@ -359,101 +429,14 @@ impl Dialect for ElasticsearchDslDialect {
             }
 
             crate::parser::DslCompletionContext::Default => {
-                // 默认：返回所有类型
-                let query_types = vec![
-                    "match",
-                    "match_all",
-                    "match_none",
-                    "match_phrase",
-                    "match_phrase_prefix",
-                    "multi_match",
-                    "common",
-                    "query_string",
-                    "simple_query_string",
-                    "term",
-                    "terms",
-                    "range",
-                    "exists",
-                    "prefix",
-                    "wildcard",
-                    "regexp",
-                    "fuzzy",
-                    "type",
-                    "ids",
-                    "constant_score",
-                    "bool",
-                    "boosting",
-                    "dis_max",
-                    "function_score",
-                    "script_score",
-                    "percolate",
-                ];
-
-                for query_type in query_types {
-                    if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_query_type_item(query_type));
-                }
-
-                let top_level_fields = vec![
-                    "query",
-                    "aggs",
-                    "aggregations",
-                    "sort",
-                    "from",
-                    "size",
-                    "source",
-                    "_source",
-                    "fields",
-                    "highlight",
-                    "suggest",
-                ];
-
-                for field in top_level_fields {
-                    if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(&prefix) {
-                        continue;
-                    }
-
-                    items.push(self.create_field_item(field, "Elasticsearch DSL field"));
-                }
+                self.add_query_type_items(&mut items, &prefix, true);
+                self.add_top_level_items(&mut items, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
         }
 
         // 如果提供了 schema，添加索引名补全
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(&prefix) {
-                    continue;
-                }
-
-                items.push(CompletionItem {
-                    label: table.name.clone(),
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(format!("Elasticsearch Index: {}", table.name)),
-                    documentation: table
-                        .comment
-                        .clone()
-                        .map(tower_lsp::lsp_types::Documentation::String),
-                    deprecated: None,
-                    preselect: None,
-                    sort_text: Some(format!("3{}", table.name)),
-                    filter_text: Some(table.name.clone()),
-                    insert_text: Some(format!("\"{}\"", table.name)),
-                    insert_text_format: None,
-                    insert_text_mode: None,
-                    text_edit: None,
-                    additional_text_edits: None,
-                    commit_characters: None,
-                    command: None,
-                    data: None,
-                    tags: None,
-                    label_details: None,
-                });
-            }
-        }
+        self.add_schema_index_items(&mut items, schema, &prefix, true);
 
         items
     }
@@ -579,6 +562,357 @@ impl Dialect for ElasticsearchDslDialect {
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
         self.parse(sql, schema).await
     }
+}
+
+const ES_TOP_LEVEL_FIELDS: &[&str] = &[
+    "query",
+    "aggs",
+    "aggregations",
+    "sort",
+    "from",
+    "size",
+    "source",
+    "_source",
+    "fields",
+    "highlight",
+    "suggest",
+    "script_fields",
+    "docvalue_fields",
+    "stored_fields",
+    "post_filter",
+    "min_score",
+    "timeout",
+    "terminate_after",
+];
+
+const ES_QUERY_TYPES: &[&str] = &[
+    "match",
+    "match_all",
+    "match_none",
+    "match_phrase",
+    "match_phrase_prefix",
+    "multi_match",
+    "common",
+    "query_string",
+    "simple_query_string",
+    "term",
+    "terms",
+    "range",
+    "exists",
+    "prefix",
+    "wildcard",
+    "regexp",
+    "fuzzy",
+    "type",
+    "ids",
+    "constant_score",
+    "bool",
+    "boosting",
+    "dis_max",
+    "function_score",
+    "script_score",
+    "percolate",
+];
+
+const ES_AGG_TYPES: &[&str] = &[
+    "terms",
+    "range",
+    "date_range",
+    "ip_range",
+    "histogram",
+    "date_histogram",
+    "geo_distance",
+    "geohash_grid",
+    "geotile_grid",
+    "filters",
+    "adjacency_matrix",
+    "sampler",
+    "diversified_sampler",
+    "global",
+    "filter",
+    "missing",
+    "nested",
+    "reverse_nested",
+    "children",
+    "parent",
+    "cardinality",
+    "avg",
+    "sum",
+    "min",
+    "max",
+    "stats",
+    "extended_stats",
+    "percentiles",
+    "percentile_ranks",
+    "top_hits",
+    "scripted_metric",
+    "matrix_stats",
+    "bucket_script",
+    "bucket_selector",
+    "bucket_sort",
+    "serial_diff",
+    "moving_avg",
+];
+
+const ES_BOOL_FIELDS: &[&str] = &["must", "must_not", "should", "filter"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EsCompletionKind {
+    Broad,
+    TopLevel,
+    QueryType,
+    AggType,
+    BoolField,
+    FieldName,
+    IndexValue,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EsCompletionContext {
+    kind: EsCompletionKind,
+    inside_string: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EsJsonObjectFrame {
+    owner_key: Option<String>,
+    last_key: Option<String>,
+    after_colon: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EsJsonScanState {
+    frames: Vec<EsJsonObjectFrame>,
+    array_owner_keys: Vec<Option<String>>,
+    pending_array_object_owner: Option<String>,
+    previous_significant: Option<char>,
+}
+
+fn elasticsearch_completion_context(source: &str, position: Position) -> EsCompletionContext {
+    let byte_offset = byte_offset_at_position(source, position);
+    let before = &source[..byte_offset.min(source.len())];
+    let open_string_start = current_open_string_start(before);
+    let context_source = open_string_start
+        .map(|start| &before[..start])
+        .unwrap_or(before);
+    let state = scan_json_context(context_source);
+    let inside_string = open_string_start.is_some();
+    let previous = state.previous_significant;
+    let current_key = state
+        .frames
+        .last()
+        .and_then(|frame| frame.last_key.as_deref());
+    let owner_key = state
+        .frames
+        .last()
+        .and_then(|frame| frame.owner_key.as_deref());
+
+    let kind = if matches!(previous, Some(':')) {
+        match current_key {
+            Some(key) if is_elasticsearch_index_key(key) => EsCompletionKind::IndexValue,
+            Some(key) if is_elasticsearch_field_value_key(key) => EsCompletionKind::FieldName,
+            _ => EsCompletionKind::Broad,
+        }
+    } else if is_json_key_position(previous) {
+        match owner_key {
+            None => EsCompletionKind::TopLevel,
+            Some("query") => EsCompletionKind::QueryType,
+            Some("aggs" | "aggregations") => EsCompletionKind::AggType,
+            Some("bool") => EsCompletionKind::BoolField,
+            Some(key) if is_elasticsearch_field_object_key(key) => EsCompletionKind::FieldName,
+            _ => EsCompletionKind::Broad,
+        }
+    } else {
+        EsCompletionKind::Broad
+    };
+
+    EsCompletionContext {
+        kind,
+        inside_string,
+    }
+}
+
+fn byte_offset_at_position(source: &str, position: Position) -> usize {
+    let position = crate::position::lsp_position_to_byte_position(source, position);
+    let mut offset = 0usize;
+
+    for (line_index, line) in source.split('\n').enumerate() {
+        if line_index == position.line as usize {
+            return offset + (position.character as usize).min(line.len());
+        }
+        offset += line.len() + 1;
+    }
+
+    source.len()
+}
+
+fn current_open_string_start(source: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut escaping = false;
+    let mut start = 0usize;
+
+    for (index, ch) in source.char_indices() {
+        if in_string {
+            if escaping {
+                escaping = false;
+            } else if ch == '\\' {
+                escaping = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            start = index;
+        }
+    }
+
+    in_string.then_some(start)
+}
+
+fn scan_json_context(source: &str) -> EsJsonScanState {
+    let mut state = EsJsonScanState::default();
+    let mut in_string = false;
+    let mut escaping = false;
+    let mut string_start = 0usize;
+    let mut previous_significant = None;
+
+    for (index, ch) in source.char_indices() {
+        if in_string {
+            if escaping {
+                escaping = false;
+            } else if ch == '\\' {
+                escaping = true;
+            } else if ch == '"' {
+                in_string = false;
+                let value = source[string_start..index].to_string();
+                if previous_significant != Some(':') {
+                    if let Some(frame) = state.frames.last_mut() {
+                        frame.last_key = Some(value);
+                    }
+                }
+                previous_significant = Some('"');
+            }
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                escaping = false;
+                string_start = index + ch.len_utf8();
+            }
+            '{' => {
+                let owner_key = if previous_significant == Some(':') {
+                    state.frames.last().and_then(|frame| frame.last_key.clone())
+                } else if previous_significant == Some('[') {
+                    state.array_owner_keys.last().cloned().flatten()
+                } else if previous_significant == Some(',') {
+                    state.pending_array_object_owner.take()
+                } else {
+                    None
+                };
+                if let Some(frame) = state.frames.last_mut() {
+                    if previous_significant == Some(':') {
+                        frame.after_colon = false;
+                    }
+                }
+                state.frames.push(EsJsonObjectFrame {
+                    owner_key,
+                    last_key: None,
+                    after_colon: false,
+                });
+                previous_significant = Some('{');
+            }
+            '}' => {
+                state.frames.pop();
+                previous_significant = Some('}');
+            }
+            '[' => {
+                let owner_key = if previous_significant == Some(':') {
+                    state.frames.last().and_then(|frame| frame.last_key.clone())
+                } else {
+                    None
+                };
+                if let Some(frame) = state.frames.last_mut() {
+                    if previous_significant == Some(':') {
+                        frame.after_colon = false;
+                    }
+                }
+                state.array_owner_keys.push(owner_key);
+                state.pending_array_object_owner = None;
+                previous_significant = Some('[');
+            }
+            ']' => {
+                state.array_owner_keys.pop();
+                state.pending_array_object_owner = None;
+                previous_significant = Some(']');
+            }
+            ':' => {
+                if let Some(frame) = state.frames.last_mut() {
+                    frame.after_colon = true;
+                }
+                previous_significant = Some(':');
+            }
+            ',' => {
+                let comma_in_array = matches!(previous_significant, Some('}' | ']'))
+                    && !state.array_owner_keys.is_empty();
+                if comma_in_array {
+                    state.pending_array_object_owner =
+                        state.array_owner_keys.last().cloned().flatten();
+                } else if let Some(frame) = state.frames.last_mut() {
+                    frame.last_key = None;
+                    frame.after_colon = false;
+                    state.pending_array_object_owner = None;
+                }
+                previous_significant = Some(',');
+            }
+            _ => {
+                if let Some(frame) = state.frames.last_mut() {
+                    if frame.after_colon {
+                        frame.after_colon = false;
+                    }
+                }
+                previous_significant = Some(ch);
+            }
+        }
+    }
+
+    state.previous_significant = previous_significant;
+    state
+}
+
+fn is_json_key_position(previous: Option<char>) -> bool {
+    matches!(previous, Some('{') | Some(',') | Some('"'))
+}
+
+fn is_elasticsearch_index_key(key: &str) -> bool {
+    matches!(key, "index" | "_index")
+}
+
+fn is_elasticsearch_field_value_key(key: &str) -> bool {
+    matches!(key, "field" | "fields")
+}
+
+fn is_elasticsearch_field_object_key(key: &str) -> bool {
+    matches!(
+        key,
+        "match"
+            | "match_phrase"
+            | "match_phrase_prefix"
+            | "term"
+            | "terms"
+            | "range"
+            | "exists"
+            | "prefix"
+            | "wildcard"
+            | "regexp"
+            | "fuzzy"
+            | "sort"
+    )
 }
 
 fn token_at_position(text: &str, position: Position) -> String {

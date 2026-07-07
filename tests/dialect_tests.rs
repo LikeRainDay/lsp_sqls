@@ -1053,8 +1053,11 @@ async fn test_elasticsearch_dsl_dialect() {
         .await;
     assert!(!items.is_empty());
     assert!(items.iter().any(|item| item.label == "query"));
-    assert!(items.iter().any(|item| item.label == "match"));
     assert!(items.iter().any(|item| item.label == "aggs"));
+    assert!(
+        !items.iter().any(|item| item.label == "match"),
+        "Elasticsearch top-level completion should not include query types: {items:?}"
+    );
 }
 
 #[tokio::test]
@@ -1100,9 +1103,42 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
             Some(&schema),
         )
         .await;
-    assert!(items.iter().any(|item| item.label == "users"));
     assert!(items.iter().any(|item| item.label == "email"));
     assert!(items.iter().any(|item| item.label == "profile.age"));
+    assert!(
+        !items.iter().any(|item| item.label == "users"),
+        "Elasticsearch field completion should not include index names: {items:?}"
+    );
+
+    let query_type_prefix_dsl = r#"{"query":{"m"#;
+    let query_type_prefix_items = dialect
+        .completion(
+            query_type_prefix_dsl,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: query_type_prefix_dsl.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        query_type_prefix_items
+            .iter()
+            .any(|item| item.label == "match"),
+        "Elasticsearch query object completion should include query types: {query_type_prefix_items:?}"
+    );
+    assert!(
+        !query_type_prefix_items
+            .iter()
+            .any(|item| item.label == "email"),
+        "Elasticsearch query object completion should not include fields: {query_type_prefix_items:?}"
+    );
+    assert!(
+        !query_type_prefix_items
+            .iter()
+            .any(|item| item.label == "users"),
+        "Elasticsearch query object completion should not include index names: {query_type_prefix_items:?}"
+    );
 
     let field_prefix_dsl = r#"{"query":{"term":{"em"#;
     let field_prefix_items = dialect
@@ -1129,6 +1165,21 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
             .and_then(|item| item.filter_text.as_deref()),
         Some("email")
     );
+    assert_eq!(
+        field_prefix_items
+            .iter()
+            .find(|item| item.label == "email")
+            .and_then(|item| item.insert_text.as_deref()),
+        Some("email")
+    );
+    assert!(
+        !field_prefix_items.iter().any(|item| item.label == "match"),
+        "Elasticsearch field completion should not include query types: {field_prefix_items:?}"
+    );
+    assert!(
+        !field_prefix_items.iter().any(|item| item.label == "users"),
+        "Elasticsearch field completion should not include index names: {field_prefix_items:?}"
+    );
 
     let index_prefix_dsl = r#"{"index":"us"#;
     let index_prefix_items = dialect
@@ -1142,6 +1193,21 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
         )
         .await;
     assert!(index_prefix_items.iter().any(|item| item.label == "users"));
+    assert_eq!(
+        index_prefix_items
+            .iter()
+            .find(|item| item.label == "users")
+            .and_then(|item| item.insert_text.as_deref()),
+        Some("users")
+    );
+    assert!(
+        !index_prefix_items.iter().any(|item| item.label == "email"),
+        "Elasticsearch index completion should not include fields: {index_prefix_items:?}"
+    );
+    assert!(
+        !index_prefix_items.iter().any(|item| item.label == "match"),
+        "Elasticsearch index completion should not include query types: {index_prefix_items:?}"
+    );
 
     let query = r#"{"index":"users","query":{"term":{"email":"ada@example.com"}}}"#;
     let index_position = query.find("users").unwrap() + 1;
