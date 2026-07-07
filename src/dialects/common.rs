@@ -90,6 +90,20 @@ pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool
     )
 }
 
+pub(crate) fn latest_predicate_clause(sql: &str, position: Position) -> Option<&'static str> {
+    let text_before = text_before_position(sql, position).to_ascii_uppercase();
+    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement = &text_before[statement_start..];
+
+    ["WHERE", "HAVING", "ON", "WHEN", "SET"]
+        .into_iter()
+        .filter_map(|clause| {
+            previous_keyword_position(statement, clause).map(|position| (position, clause))
+        })
+        .max_by_key(|(position, _)| *position)
+        .map(|(_, clause)| clause)
+}
+
 pub(crate) fn order_direction_keywords(
     sql: &str,
     position: Position,

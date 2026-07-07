@@ -3116,7 +3116,9 @@ impl SqlParser {
         if Self::is_relation_action_context(statement_upper, "INSERT INTO") {
             return Some(CompletionContext::InsertActionClause);
         }
-        if Self::is_relation_action_context(statement_upper, "UPDATE") {
+        if !Self::is_insert_scoped_update_context(statement_upper)
+            && Self::is_relation_action_context(statement_upper, "UPDATE")
+        {
             return Some(CompletionContext::UpdateActionClause);
         }
         if Self::is_relation_action_context(statement_upper, "DELETE FROM") {
@@ -3124,6 +3126,24 @@ impl SqlParser {
         }
 
         None
+    }
+
+    fn is_insert_scoped_update_context(statement_upper: &str) -> bool {
+        let Some(update_position) = Self::previous_keyword_position(statement_upper, "UPDATE")
+        else {
+            return false;
+        };
+        let Some(insert_position) = Self::previous_keyword_position(statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+        if insert_position > update_position {
+            return false;
+        }
+
+        let before_update = &statement_upper[..update_position];
+        Self::previous_keyword_position(before_update, "ON CONFLICT").is_some()
+            || Self::previous_keyword_position(before_update, "ON DUPLICATE KEY").is_some()
     }
 
     fn is_data_type_context(statement_upper: &str) -> bool {
@@ -5233,6 +5253,36 @@ mod tests {
                 position_at_end(insert_conflict_constraint_action_sql)
             ),
             CompletionContext::InsertConflictActionClause
+        );
+
+        let insert_conflict_update_set_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT (name) DO UPDATE SET ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_update_set_sql,
+                position_at_end(insert_conflict_update_set_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_conflict_update_set_operator_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT (name) DO UPDATE SET name ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_update_set_operator_sql,
+                position_at_end(insert_conflict_update_set_operator_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_conflict_update_set_value_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT (name) DO UPDATE SET name = ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_update_set_value_sql,
+                position_at_end(insert_conflict_update_set_value_sql)
+            ),
+            CompletionContext::ExpressionValueClause
         );
 
         let update_value_sql = "UPDATE app.users SET name = ";

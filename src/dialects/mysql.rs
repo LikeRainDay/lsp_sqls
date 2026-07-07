@@ -312,13 +312,15 @@ impl Dialect for MysqlDialect {
                 );
                 let predicate_operator_expected =
                     common::predicate_operator_expected(sql, position);
+                let latest_predicate_clause = common::latest_predicate_clause(sql, position);
                 if !predicate_operator_expected {
                     if let Some(schema) = schema {
                         if let Some(tree) = &parse_result.tree {
                             let referenced_tables = Self::referenced_table_names_at_position(
                                 &parser, tree, sql, position,
                             );
-                            let use_table_prefix = referenced_tables.len() > 1;
+                            let use_table_prefix = latest_predicate_clause != Some("SET")
+                                && referenced_tables.len() > 1;
                             self.add_schema_columns(
                                 &mut items,
                                 schema,
