@@ -42,6 +42,8 @@ pub enum CompletionContext {
     DeleteActionClause,
     /// 在索引名目标位置，应该补全 schema 或当前表的索引名
     IndexTargetClause,
+    /// 在列定义的数据类型位置，应该补全当前方言的数据类型
+    DataTypeClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -667,6 +669,10 @@ impl SqlParser {
             return context;
         }
 
+        if Self::data_type_context_at_position(source, position) {
+            return CompletionContext::DataTypeClause;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -875,6 +881,10 @@ impl SqlParser {
 
         if let Some(context) = Self::analyze_dml_action_context(statement_upper) {
             return context;
+        }
+
+        if Self::is_data_type_context(statement_upper) {
+            return CompletionContext::DataTypeClause;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1157,6 +1167,17 @@ impl SqlParser {
         Self::analyze_dml_action_context(statement_upper)
     }
 
+    fn data_type_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_data_type_context(statement_upper)
+    }
+
     fn analyze_dml_action_context(statement_upper: &str) -> Option<CompletionContext> {
         if Self::is_relation_action_context(statement_upper, "INSERT INTO") {
             return Some(CompletionContext::InsertActionClause);
@@ -1169,6 +1190,106 @@ impl SqlParser {
         }
 
         None
+    }
+
+    fn is_data_type_context(statement_upper: &str) -> bool {
+        Self::is_create_table_column_type_context(statement_upper)
+            || Self::is_alter_table_add_column_type_context(statement_upper)
+    }
+
+    fn is_create_table_column_type_context(statement_upper: &str) -> bool {
+        let Some(create_table_position) =
+            Self::previous_keyword_position(statement_upper, "CREATE TABLE")
+        else {
+            return false;
+        };
+        let Some(open_position) = statement_upper[create_table_position..]
+            .find('(')
+            .map(|position| create_table_position + position)
+        else {
+            return false;
+        };
+
+        if Self::matching_paren_end(statement_upper, open_position).is_some() {
+            return false;
+        }
+
+        let segment_start = statement_upper[open_position + 1..]
+            .rfind(',')
+            .map(|position| open_position + 1 + position + 1)
+            .unwrap_or(open_position + 1);
+        Self::is_column_definition_type_segment(&statement_upper[segment_start..])
+    }
+
+    fn is_alter_table_add_column_type_context(statement_upper: &str) -> bool {
+        let Some(alter_table_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER TABLE")
+        else {
+            return false;
+        };
+        let Some(add_column_position) =
+            Self::previous_keyword_position(statement_upper, "ADD COLUMN")
+        else {
+            return false;
+        };
+        if add_column_position < alter_table_position {
+            return false;
+        }
+
+        let after_add_column = add_column_position + "ADD COLUMN".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_add_column,
+            statement_upper.len(),
+            &[
+                "NOT NULL",
+                "NULL",
+                "DEFAULT",
+                "PRIMARY KEY",
+                "UNIQUE",
+                "CHECK",
+                "REFERENCES",
+                "CONSTRAINT",
+            ],
+        ) {
+            return false;
+        }
+
+        Self::is_column_definition_type_segment(&statement_upper[after_add_column..])
+    }
+
+    fn is_column_definition_type_segment(segment: &str) -> bool {
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let first_word = Self::statement_words(trimmed)
+            .first()
+            .copied()
+            .unwrap_or("");
+        if matches!(
+            first_word,
+            "PRIMARY" | "FOREIGN" | "UNIQUE" | "CHECK" | "CONSTRAINT" | "KEY" | "EXCLUDE" | "LIKE"
+        ) {
+            return false;
+        }
+
+        let has_separator_after_column_name = trimmed
+            .split_once(|ch: char| ch.is_whitespace())
+            .is_some_and(|(_, rest)| {
+                !rest.is_empty() || segment.chars().last().is_some_and(|ch| ch.is_whitespace())
+            });
+        if !has_separator_after_column_name {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return words.len() == 1;
+        }
+
+        words.len() == 2
     }
 
     fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
@@ -2769,6 +2890,51 @@ mod tests {
                 position_at_end(alter_drop_index_sql)
             ),
             CompletionContext::IndexTargetClause
+        );
+
+        let create_table_type_sql = "CREATE TABLE app.users (name ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                create_table_type_sql,
+                position_at_end(create_table_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let create_table_type_prefix_sql = "CREATE TABLE app.users (name var";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                create_table_type_prefix_sql,
+                position_at_end(create_table_type_prefix_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_add_column_type_sql = "ALTER TABLE app.users ADD COLUMN status ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_add_column_type_sql,
+                position_at_end(alter_add_column_type_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let alter_add_column_type_prefix_sql = "ALTER TABLE app.users ADD COLUMN status var";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_add_column_type_prefix_sql,
+                position_at_end(alter_add_column_type_prefix_sql)
+            ),
+            CompletionContext::DataTypeClause
+        );
+
+        let create_table_constraint_sql = "CREATE TABLE app.users (PRIMARY ";
+        assert_ne!(
+            parser.analyze_completion_context_fallback(
+                create_table_constraint_sql,
+                position_at_end(create_table_constraint_sql)
+            ),
+            CompletionContext::DataTypeClause
         );
     }
 

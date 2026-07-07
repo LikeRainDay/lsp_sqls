@@ -508,6 +508,28 @@ impl Dialect for HiveDialect {
                     );
                 }
             }
+            crate::parser::CompletionContext::DataTypeClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for data_type in [
+                    "STRING",
+                    "VARCHAR",
+                    "INT",
+                    "BIGINT",
+                    "BOOLEAN",
+                    "TIMESTAMP",
+                    "DATE",
+                    "DECIMAL",
+                    "DOUBLE",
+                    "ARRAY<>",
+                    "MAP<>",
+                    "STRUCT<>",
+                ] {
+                    if !prefix.is_empty() && !data_type.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(data_type));
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

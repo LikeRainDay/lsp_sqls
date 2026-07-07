@@ -510,6 +510,18 @@ impl Dialect for ClickHouseDialect {
                     );
                 }
             }
+            crate::parser::CompletionContext::DataTypeClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for data_type in [
+                    "String", "Int32", "Int64", "UInt32", "UInt64", "Float32", "Float64", "Bool",
+                    "Date", "DateTime", "Decimal", "Array()", "Map()", "Tuple()",
+                ] {
+                    if !prefix.is_empty() && !data_type.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(data_type));
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

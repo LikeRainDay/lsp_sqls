@@ -520,6 +520,31 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::DataTypeClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for data_type in [
+                    "VARCHAR",
+                    "TEXT",
+                    "INTEGER",
+                    "BIGINT",
+                    "BOOLEAN",
+                    "TIMESTAMP",
+                    "TIMESTAMPTZ",
+                    "DATE",
+                    "NUMERIC",
+                    "UUID",
+                    "JSONB",
+                    "BYTEA",
+                ] {
+                    if !prefix.is_empty() && !data_type.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(data_type);
+                    common::set_completion_sort_text(&mut item, "0", data_type);
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =
