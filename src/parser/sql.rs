@@ -16,6 +16,8 @@ pub enum CompletionContext {
     FromContinuationClause,
     /// 在 SELECT 子句中，应该补全列名和关键字
     SelectClause,
+    /// 在 SELECT 表达式之后，应该补全 FROM/AS/逗号
+    SelectContinuationClause,
     /// 在 WHERE 子句中，应该补全列名、操作符、关键字
     WhereClause,
     /// 在表名后（如 table.），应该补全列名
@@ -663,6 +665,10 @@ impl SqlParser {
         source: &str,
         position: Position,
     ) -> CompletionContext {
+        if Self::select_continuation_context_at_position(source, position) {
+            return CompletionContext::SelectContinuationClause;
+        }
+
         if let Some(context) = Self::analyze_completed_keyword_context(source, position) {
             return context;
         }
@@ -891,8 +897,10 @@ impl SqlParser {
         };
         let searchable_text_before = Self::mask_sql_noise(text_before);
         let text_upper = searchable_text_before.to_ascii_uppercase();
+        let raw_text_upper = text_before.to_ascii_uppercase();
         let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
         let statement_upper = &text_upper[statement_start..];
+        let raw_statement_upper = &raw_text_upper[statement_start..];
 
         // Priority 1: Check for table/alias column access (ends with .)
         if text_before.trim_end().ends_with('.') {
@@ -957,6 +965,10 @@ impl SqlParser {
 
         if let Some(context) = Self::analyze_relation_continuation_context(statement_upper) {
             return context;
+        }
+
+        if Self::is_select_continuation_context(raw_statement_upper) {
+            return CompletionContext::SelectContinuationClause;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1193,6 +1205,16 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::analyze_relation_continuation_context(statement_upper)
+    }
+
+    fn select_continuation_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_select_continuation_context(statement_upper)
     }
 
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
@@ -1567,11 +1589,12 @@ impl SqlParser {
         continuation_prefixes: &[&str],
     ) -> bool {
         let trimmed = segment.trim_start();
-        if trimmed.is_empty() || trimmed.ends_with('.') || trimmed.ends_with('(') {
+        let trimmed_end = trimmed.trim_end();
+        if trimmed_end.is_empty() || trimmed_end.ends_with('.') || trimmed_end.ends_with('(') {
             return false;
         }
 
-        let words = Self::statement_words(trimmed);
+        let words = Self::statement_words(trimmed_end);
         if words.is_empty() {
             return false;
         }
@@ -1588,6 +1611,72 @@ impl SqlParser {
             return false;
         };
         continuation_prefixes.contains(&prefix)
+    }
+
+    fn is_select_continuation_context(statement_upper: &str) -> bool {
+        let Some(select_position) = Self::previous_keyword_position(statement_upper, "SELECT")
+        else {
+            return false;
+        };
+        let after_select = select_position + "SELECT".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_select,
+            statement_upper.len(),
+            &[
+                "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "UNION",
+            ],
+        ) {
+            return false;
+        }
+
+        let segment = statement_upper[after_select..]
+            .rsplit(',')
+            .next()
+            .unwrap_or(&statement_upper[after_select..]);
+        Self::select_item_completed_or_prefixed(segment, &["A", "AS", "F", "FR", "FRO", "FROM"])
+    }
+
+    fn select_item_completed_or_prefixed(segment: &str, continuation_prefixes: &[&str]) -> bool {
+        let trimmed = segment.trim_start();
+        let trimmed_end = trimmed.trim_end();
+        if trimmed_end.is_empty() || trimmed_end.ends_with('.') || trimmed_end.ends_with('(') {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed_end);
+        let meaningful_words = words
+            .iter()
+            .filter(|word| **word != "DISTINCT")
+            .copied()
+            .collect::<Vec<_>>();
+        let has_wildcard = trimmed_end.contains('*');
+
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            if words.last().is_some_and(|word| *word == "AS") {
+                return false;
+            }
+            return has_wildcard || !meaningful_words.is_empty();
+        }
+
+        let Some(prefix) = words.last().copied() else {
+            return false;
+        };
+        if !continuation_prefixes.contains(&prefix) {
+            return false;
+        }
+
+        if words.len() >= 2 {
+            return true;
+        }
+
+        let Some((before_prefix, _)) = trimmed.rsplit_once(prefix) else {
+            return false;
+        };
+        has_wildcard
+            || Self::statement_words(before_prefix)
+                .iter()
+                .any(|word| *word != "DISTINCT")
     }
 
     fn is_reference_relation_target_context(statement_upper: &str) -> bool {
@@ -3440,6 +3529,22 @@ mod tests {
     fn completion_context_prefers_completed_clause_keywords_over_ast_noise() {
         assert_eq!(
             analyzed_context_at_end("SELECT"),
+            CompletionContext::SelectClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT owner "),
+            CompletionContext::SelectContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT * "),
+            CompletionContext::SelectContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT owner F"),
+            CompletionContext::SelectContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT owner, "),
             CompletionContext::SelectClause
         );
         assert_eq!(

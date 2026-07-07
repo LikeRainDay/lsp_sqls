@@ -175,6 +175,28 @@ pub(crate) fn group_by_continuation_sort_prefix(keyword: &str) -> &'static str {
     }
 }
 
+pub(crate) fn select_continuation_keywords(sql: &str, position: Position) -> Vec<&'static str> {
+    let text_before = text_before_position(sql, position);
+    let text_upper = text_before.to_ascii_uppercase();
+    let statement_start = text_upper.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_upper = &text_upper[statement_start..];
+
+    let Some(select_position) = statement_upper.rfind("SELECT") else {
+        return vec![",", "AS", "FROM"];
+    };
+
+    let after_select_start = statement_start + select_position + "SELECT".len();
+    let after_select = text_before.get(after_select_start..).unwrap_or("");
+    let segment = after_select.rsplit(',').next().unwrap_or(after_select);
+    let select_item = segment.trim();
+
+    if select_item == "*" || select_item.ends_with(".*") {
+        vec![",", "FROM"]
+    } else {
+        vec![",", "AS", "FROM"]
+    }
+}
+
 fn normalize_order_token(token: &str) -> String {
     token
         .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '[' | ']' | '(' | ')' | ';'))
