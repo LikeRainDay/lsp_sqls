@@ -150,3 +150,31 @@ async fn postgres_alter_table_completion_uses_table_scoped_targets() {
 async fn mysql_alter_table_completion_uses_table_scoped_targets() {
     assert_alter_table_completion(&MysqlDialect::new(), "shop").await;
 }
+
+#[tokio::test]
+async fn mysql_modify_and_change_column_completion_uses_table_scoped_targets() {
+    let schema = schema("shop");
+
+    for sql in [
+        "ALTER TABLE shop.webhook MODIFY COLUMN ",
+        "ALTER TABLE shop.webhook MODIFY ",
+        "ALTER TABLE shop.webhook CHANGE COLUMN ",
+        "ALTER TABLE shop.webhook CHANGE ",
+    ] {
+        let columns = complete(&MysqlDialect::new(), sql, &schema).await;
+        assert!(has_label(&columns, "owner"));
+        assert!(has_label(&columns, "name"));
+        assert!(!has_label(&columns, "form_background_url"));
+        assert!(!has_kind(&columns, CompletionItemKind::CLASS));
+        assert!(!has_kind(&columns, CompletionItemKind::OPERATOR));
+    }
+
+    let prefixed = complete(
+        &MysqlDialect::new(),
+        "ALTER TABLE shop.webhook CHANGE COLUMN ow",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&prefixed, "owner"));
+    assert!(!has_label(&prefixed, "name"));
+}

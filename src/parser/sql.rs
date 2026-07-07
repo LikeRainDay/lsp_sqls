@@ -657,6 +657,10 @@ impl SqlParser {
             return CompletionContext::UsingClause;
         }
 
+        if Self::data_type_context_at_position(source, position) {
+            return CompletionContext::DataTypeClause;
+        }
+
         if let Some(context) = Self::analyze_ddl_target_context_at_position(source, position) {
             return context;
         }
@@ -667,10 +671,6 @@ impl SqlParser {
 
         if let Some(context) = Self::analyze_dml_action_context_at_position(source, position) {
             return context;
-        }
-
-        if Self::data_type_context_at_position(source, position) {
-            return CompletionContext::DataTypeClause;
         }
 
         let mut current_node = Some(node);
@@ -871,6 +871,10 @@ impl SqlParser {
             return CompletionContext::UsingClause;
         }
 
+        if Self::is_data_type_context(statement_upper) {
+            return CompletionContext::DataTypeClause;
+        }
+
         if let Some(context) = Self::analyze_ddl_target_context(statement_upper) {
             return context;
         }
@@ -881,10 +885,6 @@ impl SqlParser {
 
         if let Some(context) = Self::analyze_dml_action_context(statement_upper) {
             return context;
-        }
-
-        if Self::is_data_type_context(statement_upper) {
-            return CompletionContext::DataTypeClause;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1386,6 +1386,7 @@ impl SqlParser {
                 | "UNIQUE"
                 | "CHECK"
                 | "CONSTRAINT"
+                | "COLUMN"
                 | "KEY"
                 | "INDEX"
                 | "FULLTEXT"
@@ -1443,10 +1444,33 @@ impl SqlParser {
     fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
         if Self::is_alter_table_target_context(
             statement_upper,
-            &["DROP COLUMN", "ALTER COLUMN", "RENAME COLUMN"],
             &[
-                "TYPE", "SET", "DROP", "RESTART", "TO", "CASCADE", "RESTRICT", "ADD", "ALTER",
+                "DROP COLUMN",
+                "ALTER COLUMN",
+                "RENAME COLUMN",
+                "MODIFY COLUMN",
+                "MODIFY",
+                "CHANGE COLUMN",
+                "CHANGE",
+            ],
+            &[
+                "TYPE",
+                "SET",
+                "DROP",
+                "RESTART",
+                "TO",
+                "CASCADE",
+                "RESTRICT",
+                "ADD",
+                "ALTER",
                 "RENAME",
+                "NOT NULL",
+                "NULL",
+                "DEFAULT",
+                "PRIMARY KEY",
+                "UNIQUE",
+                "CHECK",
+                "REFERENCES",
             ],
         ) {
             return Some(CompletionContext::ColumnTargetClause);
@@ -3000,6 +3024,42 @@ mod tests {
             parser.analyze_completion_context_fallback(
                 alter_drop_column_sql,
                 position_at_end(alter_drop_column_sql)
+            ),
+            CompletionContext::ColumnTargetClause
+        );
+
+        let alter_modify_column_sql = "ALTER TABLE app.users MODIFY COLUMN ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_modify_column_sql,
+                position_at_end(alter_modify_column_sql)
+            ),
+            CompletionContext::ColumnTargetClause
+        );
+
+        let alter_modify_column_prefix_sql = "ALTER TABLE app.users MODIFY ow";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_modify_column_prefix_sql,
+                position_at_end(alter_modify_column_prefix_sql)
+            ),
+            CompletionContext::ColumnTargetClause
+        );
+
+        let alter_change_column_sql = "ALTER TABLE app.users CHANGE COLUMN ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_change_column_sql,
+                position_at_end(alter_change_column_sql)
+            ),
+            CompletionContext::ColumnTargetClause
+        );
+
+        let alter_change_column_prefix_sql = "ALTER TABLE app.users CHANGE ow";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_change_column_prefix_sql,
+                position_at_end(alter_change_column_prefix_sql)
             ),
             CompletionContext::ColumnTargetClause
         );
