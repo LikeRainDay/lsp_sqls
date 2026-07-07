@@ -503,6 +503,31 @@ impl Dialect for MysqlDialect {
                 }
             }
 
+            crate::parser::CompletionContext::AlterTableActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [
+                    "ADD COLUMN",
+                    "DROP COLUMN",
+                    "MODIFY COLUMN",
+                    "CHANGE COLUMN",
+                    "RENAME COLUMN",
+                    "ADD CONSTRAINT",
+                    "DROP CONSTRAINT",
+                    "DROP FOREIGN KEY",
+                    "ADD INDEX",
+                    "DROP INDEX",
+                    "RENAME INDEX",
+                    "RENAME TO",
+                ] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    let mut item = self.create_keyword_item(keyword);
+                    common::set_completion_sort_text(&mut item, "0", keyword);
+                    items.push(item);
+                }
+            }
+
             crate::parser::CompletionContext::TableColumn => {
                 // 表名.列名：只补全特定表的列名
                 if let Some(tree) = &parse_result.tree {

@@ -453,6 +453,21 @@ impl Dialect for ClickHouseDialect {
                     );
                 }
             }
+            crate::parser::CompletionContext::AlterTableActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in [
+                    "ADD COLUMN",
+                    "DROP COLUMN",
+                    "MODIFY COLUMN",
+                    "RENAME COLUMN",
+                    "RENAME TO",
+                ] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
             crate::parser::CompletionContext::TableColumn => {
                 if let Some(tree) = &parse_result.tree {
                     if let Some(table_name) =

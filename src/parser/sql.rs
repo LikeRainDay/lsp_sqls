@@ -32,6 +32,8 @@ pub enum CompletionContext {
     ColumnTargetClause,
     /// 在 ALTER TABLE 的约束目标位置，应该补全当前表约束名
     ConstraintTargetClause,
+    /// 在 ALTER TABLE 表名之后，应该补全结构操作
+    AlterTableActionClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -649,6 +651,10 @@ impl SqlParser {
             return context;
         }
 
+        if Self::alter_table_action_context_at_position(source, position) {
+            return CompletionContext::AlterTableActionClause;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -849,6 +855,10 @@ impl SqlParser {
 
         if let Some(context) = Self::analyze_ddl_target_context(statement_upper) {
             return context;
+        }
+
+        if Self::is_alter_table_action_context(statement_upper) {
+            return CompletionContext::AlterTableActionClause;
         }
 
         if Self::is_ddl_on_relation_target_context(statement_upper) {
@@ -1106,6 +1116,17 @@ impl SqlParser {
         Self::analyze_ddl_target_context(statement_upper)
     }
 
+    fn alter_table_action_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_alter_table_action_context(statement_upper)
+    }
+
     fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
         if Self::is_alter_table_target_context(
             statement_upper,
@@ -1129,6 +1150,32 @@ impl SqlParser {
         }
 
         None
+    }
+
+    fn is_alter_table_action_context(statement_upper: &str) -> bool {
+        let Some(alter_table_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER TABLE")
+        else {
+            return false;
+        };
+        let after_alter_table = alter_table_position + "ALTER TABLE".len();
+        let Some((_, after_table)) = Self::read_relation_reference_after_preserving_trailing(
+            statement_upper,
+            after_alter_table,
+        ) else {
+            return false;
+        };
+
+        let trailing = &statement_upper[after_table..];
+        let trimmed = trailing.trim_start();
+        if trimmed.is_empty() {
+            return !trailing.is_empty();
+        }
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return false;
+        }
+
+        Self::statement_words(trimmed).len() == 1
     }
 
     fn is_alter_table_target_context(
@@ -1965,6 +2012,37 @@ impl SqlParser {
         Self::read_identifier_path(source, index)
     }
 
+    fn read_relation_reference_after_preserving_trailing(
+        source: &str,
+        index: usize,
+    ) -> Option<(String, usize)> {
+        let index = Self::skip_relation_modifiers(source, index);
+        Self::read_identifier_path_preserving_trailing(source, index)
+    }
+
+    fn read_identifier_path_preserving_trailing(
+        source: &str,
+        index: usize,
+    ) -> Option<(String, usize)> {
+        let mut parts = Vec::new();
+        let (first_part, mut index) = Self::read_identifier_part(source, index)?;
+        parts.push(first_part);
+
+        loop {
+            let after_part = index;
+            let dot_index = Self::skip_whitespace(source, index);
+            if !source[dot_index..].starts_with('.') {
+                return Some((parts.join("."), after_part));
+            }
+            index = dot_index + 1;
+            let Some((part, next_index)) = Self::read_identifier_part(source, index) else {
+                return Some((parts.join("."), after_part));
+            };
+            parts.push(part);
+            index = next_index;
+        }
+    }
+
     fn read_relation_alias_after(source: &str, index: usize) -> Option<(String, usize)> {
         let mut index = Self::skip_whitespace(source, index);
         if let Some(after_as) = Self::consume_word(source, index, "AS") {
@@ -2472,6 +2550,24 @@ mod tests {
                 position_at_end(alter_drop_column_sql)
             ),
             CompletionContext::ColumnTargetClause
+        );
+
+        let alter_action_sql = "ALTER TABLE app.users ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_action_sql,
+                position_at_end(alter_action_sql)
+            ),
+            CompletionContext::AlterTableActionClause
+        );
+
+        let alter_action_prefix_sql = "ALTER TABLE app.users DR";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_action_prefix_sql,
+                position_at_end(alter_action_prefix_sql)
+            ),
+            CompletionContext::AlterTableActionClause
         );
 
         let alter_drop_constraint_sql = "ALTER TABLE app.users DROP CONSTRAINT ";

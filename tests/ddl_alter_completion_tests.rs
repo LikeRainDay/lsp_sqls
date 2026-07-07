@@ -78,6 +78,33 @@ async fn assert_alter_table_completion(dialect: &dyn Dialect, database: &str) {
     let schema = schema(database);
     let table = format!("{database}.webhook");
 
+    let actions = complete(dialect, &format!("ALTER TABLE {table} "), &schema).await;
+    assert!(
+        has_label(&actions, "ADD COLUMN"),
+        "missing ADD COLUMN action: {actions:?}"
+    );
+    assert!(
+        has_label(&actions, "DROP COLUMN"),
+        "missing DROP COLUMN action: {actions:?}"
+    );
+    assert!(
+        has_label(&actions, "ADD CONSTRAINT"),
+        "missing ADD CONSTRAINT action: {actions:?}"
+    );
+    assert!(
+        !has_label(&actions, "owner"),
+        "ALTER TABLE action position should not suggest columns: {actions:?}"
+    );
+    assert!(
+        !has_kind(&actions, CompletionItemKind::CLASS),
+        "ALTER TABLE action position should not suggest relation targets: {actions:?}"
+    );
+
+    let prefixed_actions = complete(dialect, &format!("ALTER TABLE {table} DR"), &schema).await;
+    assert!(has_label(&prefixed_actions, "DROP COLUMN"));
+    assert!(has_label(&prefixed_actions, "DROP CONSTRAINT"));
+    assert!(!has_label(&prefixed_actions, "ADD COLUMN"));
+
     for sql in [
         format!("ALTER TABLE {table} DROP COLUMN "),
         format!("ALTER TABLE {table} ALTER COLUMN "),
