@@ -22,6 +22,8 @@ pub enum CompletionContext {
     JoinClause,
     /// 在 ORDER BY 子句中，应该补全列名
     OrderByClause,
+    /// 在 ORDER BY 表达式之后，应该补全排序方向和 NULLS 规则
+    OrderDirectionClause,
     /// 在 GROUP BY 子句中，应该补全列名
     GroupByClause,
     /// 在 HAVING 子句中，应该补全列名和关键字
@@ -663,6 +665,10 @@ impl SqlParser {
             return CompletionContext::UsingClause;
         }
 
+        if Self::order_direction_context_at_position(source, position) {
+            return CompletionContext::OrderDirectionClause;
+        }
+
         if Self::reference_column_context_at_position(source, position) {
             return CompletionContext::ReferenceColumnClause;
         }
@@ -891,6 +897,10 @@ impl SqlParser {
 
         if Self::is_join_using_column_context(statement_upper) {
             return CompletionContext::UsingClause;
+        }
+
+        if Self::is_order_direction_context(statement_upper) {
+            return CompletionContext::OrderDirectionClause;
         }
 
         if Self::is_reference_column_context(statement_upper) {
@@ -1125,6 +1135,17 @@ impl SqlParser {
         Self::is_join_using_column_context(statement_upper)
     }
 
+    fn order_direction_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_order_direction_context(statement_upper)
+    }
+
     fn reference_column_context_at_position(source: &str, position: Position) -> bool {
         let cursor_offset = Self::byte_offset_for_position(source, position);
         let text_before = source.get(..cursor_offset).unwrap_or(source);
@@ -1208,6 +1229,72 @@ impl SqlParser {
         }
 
         depth > 0 || text_after_open.trim_end().ends_with(',')
+    }
+
+    fn is_order_direction_context(statement_upper: &str) -> bool {
+        let Some(order_position) = Self::previous_keyword_position(statement_upper, "ORDER BY")
+        else {
+            return false;
+        };
+        let after_order = order_position + "ORDER BY".len();
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_order,
+            statement_upper.len(),
+            &["LIMIT", "OFFSET", "FETCH", "UNION", "HAVING"],
+        ) {
+            return false;
+        }
+
+        let segment_start = statement_upper[after_order..]
+            .rfind(',')
+            .map(|position| after_order + position + 1)
+            .unwrap_or(after_order);
+        let segment = &statement_upper[segment_start..];
+        let trimmed = segment.trim_start();
+        if trimmed.is_empty() || trimmed.ends_with('.') || trimmed.ends_with('(') {
+            return false;
+        }
+
+        let words = Self::statement_words(trimmed);
+        if words.is_empty() {
+            return false;
+        }
+
+        if trimmed.chars().last().is_some_and(|ch| ch.is_whitespace()) {
+            return words
+                .last()
+                .is_some_and(|word| !matches!(*word, "FIRST" | "LAST"));
+        }
+
+        match words.as_slice() {
+            [_expression, prefix] => matches!(
+                *prefix,
+                "A" | "AS"
+                    | "ASC"
+                    | "D"
+                    | "DE"
+                    | "DES"
+                    | "DESC"
+                    | "N"
+                    | "NU"
+                    | "NUL"
+                    | "NULL"
+                    | "NULLS"
+            ),
+            [_expression, direction, prefix] if matches!(*direction, "ASC" | "DESC") => {
+                matches!(*prefix, "N" | "NU" | "NUL" | "NULL" | "NULLS")
+                    || matches!(
+                        *prefix,
+                        "F" | "FI" | "FIR" | "FIRS" | "FIRST" | "L" | "LA" | "LAS" | "LAST"
+                    )
+            }
+            [_expression, "NULLS", prefix] => matches!(
+                *prefix,
+                "F" | "FI" | "FIR" | "FIRS" | "FIRST" | "L" | "LA" | "LAS" | "LAST"
+            ),
+            _ => false,
+        }
     }
 
     fn is_reference_relation_target_context(statement_upper: &str) -> bool {
@@ -3160,6 +3247,33 @@ mod tests {
         assert_eq!(
             parser.analyze_completion_context_fallback(order_sql, position_at_end(order_sql)),
             CompletionContext::OrderByClause
+        );
+
+        let order_direction_sql = "SELECT * FROM users ORDER BY name ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                order_direction_sql,
+                position_at_end(order_direction_sql)
+            ),
+            CompletionContext::OrderDirectionClause
+        );
+
+        let order_direction_prefix_sql = "SELECT * FROM users ORDER BY name D";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                order_direction_prefix_sql,
+                position_at_end(order_direction_prefix_sql)
+            ),
+            CompletionContext::OrderDirectionClause
+        );
+
+        let order_nulls_prefix_sql = "SELECT * FROM users ORDER BY name DESC N";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                order_nulls_prefix_sql,
+                position_at_end(order_nulls_prefix_sql)
+            ),
+            CompletionContext::OrderDirectionClause
         );
     }
 

@@ -239,6 +239,28 @@ async fn test_comprehensive_completion_scenarios() {
         );
     }
 
+    let sql2_direction = "SELECT * FROM users ORDER BY name ";
+    let items2_direction = test_completion_with_log(
+        &dialect,
+        "Single-table ORDER BY direction",
+        sql2_direction,
+        0,
+        sql2_direction.len() as u32,
+        Some(&schema),
+    )
+    .await;
+    assert!(
+        items2_direction.iter().any(|item| item.label == "ASC")
+            && items2_direction.iter().any(|item| item.label == "DESC"),
+        "ORDER BY expression should suggest sort directions"
+    );
+    assert!(
+        !items2_direction
+            .iter()
+            .any(|item| item.kind == Some(CompletionItemKind::FIELD)),
+        "ORDER BY direction position should not keep suggesting fields: {items2_direction:?}"
+    );
+
     // ==================== 场景3: 多表 JOIN 的 ORDER BY 子句 ====================
     println!("\n=== Test 3: Multi-table JOIN - ORDER BY ===");
     let sql3 = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id ORDER BY ";

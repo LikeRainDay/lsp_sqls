@@ -338,6 +338,15 @@ impl Dialect for HiveDialect {
                     }
                 }
             }
+            crate::parser::CompletionContext::OrderDirectionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["ASC", "DESC"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
             crate::parser::CompletionContext::HavingClause => {
                 let prefix = common::cursor_prefix_excluding_keywords(
                     sql,
