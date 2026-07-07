@@ -307,6 +307,7 @@ fn completion_item_allowed_after_completed_keyword(
         "on" if ddl_on_relation_target => is_relation_completion_kind(item.kind),
         "where" | "on" | "by" | "having" | "values" | "set" => {
             !is_relation_completion_kind(item.kind)
+                && item.kind != Some(CompletionItemKind::OPERATOR)
         }
         "limit" | "offset" => true,
         _ => true,
@@ -1422,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_after_where_keyword_drops_relation_items() {
+    fn completion_after_where_keyword_drops_relation_and_operator_items() {
         let sql = "SELECT * FROM public.webhook where";
         let position = Position {
             line: 0,
@@ -1456,7 +1457,7 @@ mod tests {
                 .iter()
                 .map(|item| item.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["owner", "LIKE"]
+            vec!["owner"]
         );
         assert!(items
             .iter()
