@@ -688,6 +688,27 @@ impl Dialect for PostgresDialect {
                 }
             }
 
+            crate::parser::CompletionContext::InsertConflictConstraintClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["constraint"]);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    common::add_schema_conflict_constraints(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                    );
+                }
+            }
+
             crate::parser::CompletionContext::InsertConflictActionClause => {
                 let prefix = common::cursor_prefix(sql, position);
                 let text_before = common::text_before_position(sql, position).to_ascii_uppercase();

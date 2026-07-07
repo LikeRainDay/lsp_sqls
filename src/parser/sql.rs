@@ -68,6 +68,8 @@ pub enum CompletionContext {
     InsertContinuationClause,
     /// 在 PostgreSQL ON CONFLICT (...) 中，应该补全冲突目标列
     InsertConflictTargetClause,
+    /// 在 PostgreSQL ON CONFLICT ON CONSTRAINT 后，应该补全冲突约束
+    InsertConflictConstraintClause,
     /// 在 PostgreSQL ON CONFLICT 之后，应该补全冲突处理动作
     InsertConflictActionClause,
     /// 在 UPDATE 表名之后，应该补全更新动作
@@ -771,6 +773,10 @@ impl SqlParser {
             return CompletionContext::InsertConflictTargetClause;
         }
 
+        if Self::insert_conflict_constraint_context_at_position(source, position) {
+            return CompletionContext::InsertConflictConstraintClause;
+        }
+
         if Self::insert_conflict_action_context_at_position(source, position) {
             return CompletionContext::InsertConflictActionClause;
         }
@@ -1040,6 +1046,10 @@ impl SqlParser {
 
         if Self::is_insert_conflict_target_context(raw_statement_upper) {
             return CompletionContext::InsertConflictTargetClause;
+        }
+
+        if Self::is_insert_conflict_constraint_context(raw_statement_upper) {
+            return CompletionContext::InsertConflictConstraintClause;
         }
 
         if Self::is_insert_conflict_action_context(raw_statement_upper) {
@@ -1441,8 +1451,41 @@ impl SqlParser {
         !searchable_segment[last_open + 1..].contains(')')
     }
 
+    fn is_insert_conflict_constraint_context(statement_upper: &str) -> bool {
+        let searchable_statement_upper = Self::mask_sql_noise(statement_upper);
+        let Some((raw_segment, searchable_segment)) =
+            Self::latest_insert_conflict_segments(statement_upper, &searchable_statement_upper)
+        else {
+            return false;
+        };
+        if Self::previous_keyword_position(searchable_segment, "DO").is_some() {
+            return false;
+        }
+
+        let Some(on_constraint_position) =
+            Self::previous_keyword_position(searchable_segment, "ON CONSTRAINT")
+        else {
+            return false;
+        };
+        let after_on_constraint = on_constraint_position + "ON CONSTRAINT".len();
+        let Some(raw_tail) = raw_segment.get(after_on_constraint..) else {
+            return false;
+        };
+        let trimmed = raw_tail.trim_start();
+        let trimmed_end = trimmed.trim_end();
+        if trimmed_end.is_empty() {
+            return true;
+        }
+
+        !trimmed.chars().last().is_some_and(|ch| ch.is_whitespace())
+            && Self::statement_words(trimmed_end).len() == 1
+    }
+
     fn is_insert_conflict_action_context(statement_upper: &str) -> bool {
         if Self::is_insert_conflict_target_context(statement_upper) {
+            return false;
+        }
+        if Self::is_insert_conflict_constraint_context(statement_upper) {
             return false;
         }
 
@@ -1477,6 +1520,25 @@ impl SqlParser {
         if after_start.starts_with('(') {
             if let Some(close_relative) = after_start.find(')') {
                 return trimmed_start_len + close_relative + 1;
+            }
+        }
+        if after_start.starts_with("ON CONSTRAINT") {
+            let after_phrase = trimmed_start_len + "ON CONSTRAINT".len();
+            let Some(tail) = searchable_segment.get(after_phrase..) else {
+                return trimmed_start_len;
+            };
+            let leading_whitespace = tail.len() - tail.trim_start().len();
+            let name_start = after_phrase + leading_whitespace;
+            let Some(name_tail) = searchable_segment.get(name_start..) else {
+                return trimmed_start_len;
+            };
+            let name_len = name_tail
+                .chars()
+                .take_while(|ch| Self::is_identifier_char(*ch))
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if name_len > 0 {
+                return name_start + name_len;
             }
         }
 
@@ -2289,6 +2351,16 @@ impl SqlParser {
         let statement_upper = &raw_text_upper[statement_start..];
 
         Self::is_insert_conflict_target_context(statement_upper)
+    }
+
+    fn insert_conflict_constraint_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let raw_text_upper = text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&raw_text_upper, raw_text_upper.len());
+        let statement_upper = &raw_text_upper[statement_start..];
+
+        Self::is_insert_conflict_constraint_context(statement_upper)
     }
 
     fn insert_conflict_action_context_at_position(source: &str, position: Position) -> bool {
@@ -5129,6 +5201,36 @@ mod tests {
             parser.analyze_completion_context_fallback(
                 insert_conflict_do_prefix_sql,
                 position_at_end(insert_conflict_do_prefix_sql)
+            ),
+            CompletionContext::InsertConflictActionClause
+        );
+
+        let insert_conflict_constraint_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT ON CONSTRAINT ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_constraint_sql,
+                position_at_end(insert_conflict_constraint_sql)
+            ),
+            CompletionContext::InsertConflictConstraintClause
+        );
+
+        let insert_conflict_constraint_prefix_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT ON CONSTRAINT users";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_constraint_prefix_sql,
+                position_at_end(insert_conflict_constraint_prefix_sql)
+            ),
+            CompletionContext::InsertConflictConstraintClause
+        );
+
+        let insert_conflict_constraint_action_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT ON CONSTRAINT users_pkey ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_conflict_constraint_action_sql,
+                position_at_end(insert_conflict_constraint_action_sql)
             ),
             CompletionContext::InsertConflictActionClause
         );

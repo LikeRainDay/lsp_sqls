@@ -1,6 +1,6 @@
 use sql_lsp::dialect::Dialect;
 use sql_lsp::dialects::{MysqlDialect, PostgresDialect};
-use sql_lsp::schema::{Column, Schema, SchemaId, Table};
+use sql_lsp::schema::{Column, Constraint, Schema, SchemaId, Table};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 
 fn schema(database: &str) -> Schema {
@@ -27,6 +27,26 @@ fn schema(database: &str) -> Schema {
                         name: "created_time".to_string(),
                         data_type: "timestamp".to_string(),
                         nullable: true,
+                        ..Default::default()
+                    },
+                ],
+                constraints: vec![
+                    Constraint {
+                        name: "webhook_pkey".to_string(),
+                        constraint_type: "PRIMARY KEY".to_string(),
+                        columns: vec!["owner".to_string()],
+                        ..Default::default()
+                    },
+                    Constraint {
+                        name: "webhook_name_key".to_string(),
+                        constraint_type: "UNIQUE".to_string(),
+                        columns: vec!["name".to_string()],
+                        ..Default::default()
+                    },
+                    Constraint {
+                        name: "webhook_owner_check".to_string(),
+                        constraint_type: "CHECK".to_string(),
+                        columns: vec!["owner".to_string()],
                         ..Default::default()
                     },
                 ],
@@ -208,6 +228,34 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         assert!(has_label(&conflict_do_tail, "UPDATE SET"));
         assert!(!has_label(&conflict_do_tail, "DO NOTHING"));
         assert!(!has_label(&conflict_do_tail, "owner"));
+
+        let conflict_constraint = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&conflict_constraint, "webhook_pkey"));
+        assert!(has_label(&conflict_constraint, "webhook_name_key"));
+        assert!(!has_label(&conflict_constraint, "webhook_owner_check"));
+        assert!(!has_label(&conflict_constraint, "form_pkey"));
+        assert!(!has_label(&conflict_constraint, "DO NOTHING"));
+        assert!(!has_operator(&conflict_constraint, "="));
+
+        let conflict_constraint_action = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON CONFLICT ON CONSTRAINT webhook_pkey "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&conflict_constraint_action, "DO NOTHING"));
+        assert!(has_label(&conflict_constraint_action, "DO UPDATE SET"));
+        assert!(!has_label(&conflict_constraint_action, "webhook_pkey"));
+        assert!(!has_label(&conflict_constraint_action, "owner"));
     }
 
     let update_actions = complete(dialect, &format!("UPDATE {qualified_table} "), &schema).await;

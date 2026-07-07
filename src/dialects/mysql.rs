@@ -706,6 +706,7 @@ impl Dialect for MysqlDialect {
             }
 
             crate::parser::CompletionContext::InsertConflictTargetClause
+            | crate::parser::CompletionContext::InsertConflictConstraintClause
             | crate::parser::CompletionContext::InsertConflictActionClause => {}
 
             crate::parser::CompletionContext::ExpressionValueClause => {

@@ -808,6 +808,37 @@ pub(crate) fn add_schema_constraints(
     }
 }
 
+pub(crate) fn add_schema_conflict_constraints(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    prefix: &str,
+    sort_prefix: &str,
+) {
+    for table in &schema.tables {
+        if !table_is_referenced(schema, table, referenced_tables) {
+            continue;
+        }
+
+        for constraint in &table.constraints {
+            let constraint_type = constraint.constraint_type.to_ascii_uppercase();
+            if !constraint_type.contains("PRIMARY")
+                && !constraint_type.contains("UNIQUE")
+                && !constraint_type.contains("EXCLUSION")
+            {
+                continue;
+            }
+            if !prefix.is_empty() && !constraint.name.to_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            let mut item = create_constraint_item(constraint);
+            set_completion_sort_text(&mut item, sort_prefix, &constraint.name);
+            items.push(item);
+        }
+    }
+}
+
 pub(crate) fn add_schema_indexes(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
