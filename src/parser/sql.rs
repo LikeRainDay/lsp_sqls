@@ -897,6 +897,11 @@ impl SqlParser {
         if Self::words_end_with(&words, &["FROM"]) {
             return Some(CompletionContext::FromClause);
         }
+        if Self::words_end_with(&words, &["ON", "DUPLICATE", "KEY", "UPDATE"])
+            && Self::is_insert_duplicate_update_assignment_context(statement)
+        {
+            return Some(CompletionContext::WhereClause);
+        }
         if Self::words_end_with(&words, &["INSERT", "INTO"])
             || Self::words_end_with(&words, &["UPDATE"])
             || Self::words_end_with(&words, &["DELETE", "FROM"])
@@ -1054,6 +1059,10 @@ impl SqlParser {
 
         if Self::is_insert_conflict_action_context(raw_statement_upper) {
             return CompletionContext::InsertConflictActionClause;
+        }
+
+        if Self::is_insert_duplicate_update_assignment_context(raw_statement_upper) {
+            return CompletionContext::WhereClause;
         }
 
         if Self::is_expression_value_context(statement_upper, raw_statement_upper) {
@@ -1558,6 +1567,36 @@ impl SqlParser {
         .any(|keyword| keyword.starts_with(prefix))
     }
 
+    fn is_insert_duplicate_update_assignment_context(statement_upper: &str) -> bool {
+        let Some(insert_position) = Self::previous_keyword_position(statement_upper, "INSERT INTO")
+        else {
+            return false;
+        };
+        let Some(duplicate_update_position) =
+            Self::previous_keyword_position(statement_upper, "ON DUPLICATE KEY UPDATE")
+        else {
+            return false;
+        };
+        if duplicate_update_position < insert_position {
+            return false;
+        }
+
+        let after_duplicate_update = duplicate_update_position + "ON DUPLICATE KEY UPDATE".len();
+        let Some(tail) = statement_upper.get(after_duplicate_update..) else {
+            return false;
+        };
+        let segment = tail.rsplit(',').next().unwrap_or(tail);
+        let trimmed = segment.trim_end();
+        if trimmed.trim_start().is_empty() {
+            return true;
+        }
+        if Self::latest_value_operator_end(trimmed).is_some() {
+            return false;
+        }
+
+        Self::statement_words(trimmed).len() <= 1
+    }
+
     fn latest_predicate_clause(statement_upper: &str) -> Option<(usize, &'static str)> {
         [
             (
@@ -1576,6 +1615,10 @@ impl SqlParser {
             (
                 "SET",
                 Self::previous_keyword_position(statement_upper, "SET"),
+            ),
+            (
+                "UPDATE",
+                Self::previous_keyword_position(statement_upper, "UPDATE"),
             ),
         ]
         .into_iter()
@@ -5175,6 +5218,46 @@ mod tests {
                 position_at_end(insert_default_continuation_sql)
             ),
             CompletionContext::InsertContinuationClause
+        );
+
+        let insert_duplicate_update_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON DUPLICATE KEY UPDATE ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_duplicate_update_sql,
+                position_at_end(insert_duplicate_update_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_duplicate_update_operator_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON DUPLICATE KEY UPDATE name ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_duplicate_update_operator_sql,
+                position_at_end(insert_duplicate_update_operator_sql)
+            ),
+            CompletionContext::WhereClause
+        );
+
+        let insert_duplicate_update_value_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON DUPLICATE KEY UPDATE name = ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_duplicate_update_value_sql,
+                position_at_end(insert_duplicate_update_value_sql)
+            ),
+            CompletionContext::ExpressionValueClause
+        );
+
+        let insert_duplicate_update_continuation_sql =
+            "INSERT INTO app.users (name) VALUES ('app') ON DUPLICATE KEY UPDATE name = 'app' ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                insert_duplicate_update_continuation_sql,
+                position_at_end(insert_duplicate_update_continuation_sql)
+            ),
+            CompletionContext::PredicateContinuationClause
         );
 
         let insert_conflict_action_sql = "INSERT INTO app.users (name) VALUES ('app') ON CONFLICT ";

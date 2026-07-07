@@ -79,6 +79,7 @@ pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool
             | "OR"
             | "NOT"
             | "SET"
+            | "UPDATE"
             | "WHEN"
             | "THEN"
             | "ELSE"
@@ -95,7 +96,7 @@ pub(crate) fn latest_predicate_clause(sql: &str, position: Position) -> Option<&
     let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
     let statement = &text_before[statement_start..];
 
-    ["WHERE", "HAVING", "ON", "WHEN", "SET"]
+    ["WHERE", "HAVING", "ON", "WHEN", "SET", "UPDATE"]
         .into_iter()
         .filter_map(|clause| {
             previous_keyword_position(statement, clause).map(|position| (position, clause))
@@ -216,6 +217,11 @@ pub(crate) fn expression_value_allows_default(sql: &str, position: Position) -> 
     let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
     let statement = &text_before[statement_start..];
 
+    if let Some(duplicate_update_position) = statement.rfind("ON DUPLICATE KEY UPDATE") {
+        let after_duplicate_update = duplicate_update_position + "ON DUPLICATE KEY UPDATE".len();
+        return !statement[after_duplicate_update..].contains("WHERE");
+    }
+
     let Some(update_position) = statement.rfind("UPDATE") else {
         return false;
     };
@@ -238,7 +244,7 @@ pub(crate) fn predicate_continuation_keywords(
     let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
     let statement = &text_before[statement_start..];
 
-    let latest_clause = ["WHERE", "HAVING", "ON", "WHEN", "SET"]
+    let latest_clause = ["WHERE", "HAVING", "ON", "WHEN", "SET", "UPDATE"]
         .into_iter()
         .filter_map(|clause| {
             previous_keyword_position(statement, clause).map(|position| (position, clause))
@@ -254,6 +260,7 @@ pub(crate) fn predicate_continuation_keywords(
         }
         Some((_, "SET")) if supports_returning => vec![",", "WHERE", "RETURNING"],
         Some((_, "SET")) => vec![",", "WHERE"],
+        Some((_, "UPDATE")) => vec![","],
         Some((_, "HAVING")) => vec!["AND", "OR", "ORDER BY", "LIMIT"],
         Some((_, "ON")) => vec!["AND", "OR", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
         Some((_, "WHEN")) => vec!["AND", "OR", "THEN"],

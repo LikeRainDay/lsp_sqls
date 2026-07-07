@@ -310,6 +310,56 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
         assert!(has_label(&conflict_update_value_continuation, "RETURNING"));
         assert!(!has_label(&conflict_update_value_continuation, "owner"));
         assert!(!has_operator(&conflict_update_value_continuation, "="));
+    } else {
+        let duplicate_update_set = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON DUPLICATE KEY UPDATE "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&duplicate_update_set, "owner"));
+        assert!(has_label(&duplicate_update_set, "name"));
+        assert!(!has_label(&duplicate_update_set, "form_background_url"));
+        assert!(!has_operator(&duplicate_update_set, "="));
+
+        let duplicate_update_operator = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_operator(&duplicate_update_operator, "="));
+        assert!(!has_label(&duplicate_update_operator, "owner"));
+
+        let duplicate_update_value = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&duplicate_update_value, "DEFAULT"));
+        assert!(has_label(&duplicate_update_value, "NULL"));
+        assert!(!has_label(&duplicate_update_value, "owner"));
+        assert!(!has_operator(&duplicate_update_value, "="));
+
+        let duplicate_update_value_continuation = complete(
+            dialect,
+            &format!(
+                "INSERT INTO {qualified_table} (owner) VALUES ('app') ON DUPLICATE KEY UPDATE owner = 'app' "
+            ),
+            &schema,
+        )
+        .await;
+        assert!(has_label(&duplicate_update_value_continuation, ","));
+        assert!(!has_label(&duplicate_update_value_continuation, "WHERE"));
+        assert!(!has_label(&duplicate_update_value_continuation, "owner"));
+        assert!(!has_operator(&duplicate_update_value_continuation, "="));
     }
 
     let update_actions = complete(dialect, &format!("UPDATE {qualified_table} "), &schema).await;

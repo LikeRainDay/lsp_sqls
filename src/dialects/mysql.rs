@@ -319,8 +319,9 @@ impl Dialect for MysqlDialect {
                             let referenced_tables = Self::referenced_table_names_at_position(
                                 &parser, tree, sql, position,
                             );
-                            let use_table_prefix = latest_predicate_clause != Some("SET")
-                                && referenced_tables.len() > 1;
+                            let use_table_prefix =
+                                !matches!(latest_predicate_clause, Some("SET" | "UPDATE"))
+                                    && referenced_tables.len() > 1;
                             self.add_schema_columns(
                                 &mut items,
                                 schema,
