@@ -425,6 +425,46 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&where_in_continuation, "owner"));
     assert!(!has_operator(&where_in_continuation, "="));
 
+    let case_when_value = complete(dialect, "SELECT CASE WHEN owner = ", &schema).await;
+    assert!(has_label(&case_when_value, "NULL"));
+    assert!(has_label(&case_when_value, "TRUE"));
+    assert!(
+        !has_label(&case_when_value, "owner"),
+        "CASE WHEN right-hand value should not return fields: {case_when_value:?}"
+    );
+    assert!(
+        !has_operator(&case_when_value, "="),
+        "CASE WHEN right-hand value should not return operators: {case_when_value:?}"
+    );
+
+    let case_when_continuation =
+        complete(dialect, "SELECT CASE WHEN owner = 'app' ", &schema).await;
+    assert!(has_label(&case_when_continuation, "THEN"));
+    assert!(has_label(&case_when_continuation, "AND"));
+    assert!(has_label(&case_when_continuation, "OR"));
+    assert!(
+        !has_label(&case_when_continuation, "ORDER BY"),
+        "CASE WHEN completed predicate should suggest THEN or boolean continuations only: {case_when_continuation:?}"
+    );
+    assert!(!has_label(&case_when_continuation, "owner"));
+    assert!(!has_operator(&case_when_continuation, "="));
+
+    let case_when_then_prefix =
+        complete(dialect, "SELECT CASE WHEN owner = 'app' T", &schema).await;
+    assert!(has_label(&case_when_then_prefix, "THEN"));
+    assert!(!has_label(&case_when_then_prefix, "AND"));
+    assert!(!has_label(&case_when_then_prefix, "owner"));
+
+    let case_when_between_first =
+        complete(dialect, "SELECT CASE WHEN owner BETWEEN 1 ", &schema).await;
+    assert!(has_label(&case_when_between_first, "AND"));
+    assert!(
+        !has_label(&case_when_between_first, "THEN"),
+        "CASE WHEN BETWEEN first bound must require AND before THEN: {case_when_between_first:?}"
+    );
+    assert!(!has_label(&case_when_between_first, "OR"));
+    assert!(!has_label(&case_when_between_first, "owner"));
+
     let returning = complete(
         dialect,
         &format!("INSERT INTO {qualified_table} (owner) VALUES ('app') RETURNING "),

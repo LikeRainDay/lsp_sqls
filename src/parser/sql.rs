@@ -671,16 +671,20 @@ impl SqlParser {
         source: &str,
         position: Position,
     ) -> CompletionContext {
-        if Self::select_continuation_context_at_position(source, position) {
-            return CompletionContext::SelectContinuationClause;
-        }
-
         if Self::expression_value_context_at_position(source, position) {
             return CompletionContext::ExpressionValueClause;
         }
 
         if Self::predicate_continuation_context_at_position(source, position) {
             return CompletionContext::PredicateContinuationClause;
+        }
+
+        if Self::case_when_condition_context_at_position(source, position) {
+            return CompletionContext::WhereClause;
+        }
+
+        if Self::select_continuation_context_at_position(source, position) {
+            return CompletionContext::SelectContinuationClause;
         }
 
         if let Some(context) = Self::analyze_completed_keyword_context(source, position) {
@@ -880,6 +884,7 @@ impl SqlParser {
             || Self::words_end_with(&words, &["AND"])
             || Self::words_end_with(&words, &["OR"])
             || Self::words_end_with(&words, &["NOT"])
+            || Self::words_end_with(&words, &["WHEN"])
             || Self::words_end_with(&words, &["SET"])
         {
             return Some(CompletionContext::WhereClause);
@@ -1237,6 +1242,10 @@ impl SqlParser {
             ),
             ("ON", Self::previous_keyword_position(statement_upper, "ON")),
             (
+                "WHEN",
+                Self::previous_keyword_position(statement_upper, "WHEN"),
+            ),
+            (
                 "SET",
                 Self::previous_keyword_position(statement_upper, "SET"),
             ),
@@ -1262,6 +1271,7 @@ impl SqlParser {
                 "UNION",
             ][..],
             "HAVING" => &["ORDER BY", "LIMIT", "UNION"][..],
+            "WHEN" => &["THEN", "ELSE", "END"][..],
             _ => &[][..],
         };
 
@@ -1547,6 +1557,7 @@ impl SqlParser {
                     | "ORDE"
                     | "ORDER"
             ) | ("HAVING", "ORD" | "ORDE" | "ORDER")
+                | ("WHEN", "T" | "TH" | "THE" | "THEN")
                 | ("ON" | "SET", "W" | "WH" | "WHE" | "WHER" | "WHERE")
                 | (
                     "SET",
@@ -1652,6 +1663,18 @@ impl SqlParser {
         let statement_upper = &text_upper[statement_start..];
 
         Self::is_group_by_continuation_context(statement_upper)
+    }
+
+    fn case_when_condition_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = text_upper[statement_start..].trim_end();
+        let words = Self::statement_words(statement_upper);
+
+        Self::words_end_with(&words, &["WHEN"])
     }
 
     fn analyze_relation_continuation_context_at_position(
@@ -4103,6 +4126,26 @@ mod tests {
         );
         assert_eq!(
             analyzed_context_at_end("SELECT * FROM users where owner IN ('app') "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN "),
+            CompletionContext::WhereClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = "),
+            CompletionContext::ExpressionValueClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' "),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner = 'app' T"),
+            CompletionContext::PredicateContinuationClause
+        );
+        assert_eq!(
+            analyzed_context_at_end("SELECT CASE WHEN owner BETWEEN 1 "),
             CompletionContext::PredicateContinuationClause
         );
         assert_eq!(

@@ -224,7 +224,7 @@ pub(crate) fn predicate_continuation_keywords(
     let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
     let statement = &text_before[statement_start..];
 
-    let latest_clause = ["WHERE", "HAVING", "ON", "SET"]
+    let latest_clause = ["WHERE", "HAVING", "ON", "WHEN", "SET"]
         .into_iter()
         .filter_map(|clause| {
             previous_keyword_position(statement, clause).map(|position| (position, clause))
@@ -242,6 +242,7 @@ pub(crate) fn predicate_continuation_keywords(
         Some((_, "SET")) => vec![",", "WHERE"],
         Some((_, "HAVING")) => vec!["AND", "OR", "ORDER BY", "LIMIT"],
         Some((_, "ON")) => vec!["AND", "OR", "WHERE", "GROUP BY", "ORDER BY", "LIMIT"],
+        Some((_, "WHEN")) => vec!["AND", "OR", "THEN"],
         Some((_, "WHERE")) => vec!["AND", "OR", "GROUP BY", "HAVING", "ORDER BY", "LIMIT"],
         _ => vec!["AND", "OR"],
     }
@@ -252,7 +253,7 @@ fn between_first_value_needs_and(
     clause_position: usize,
     clause: &str,
 ) -> bool {
-    if !matches!(clause, "WHERE" | "HAVING" | "ON") {
+    if !matches!(clause, "WHERE" | "HAVING" | "ON" | "WHEN") {
         return false;
     }
 
