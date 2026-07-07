@@ -70,6 +70,7 @@ impl Dialect for RedisDialect {
     ) -> Vec<CompletionItem> {
         let mut items = Vec::new();
         let prefix = crate::position::cursor_token_prefix(sql, position, is_token_char);
+        let context = redis_completion_context(sql, position);
 
         // Redis 基础命令
         let basic_commands = vec![
@@ -156,41 +157,43 @@ impl Dialect for RedisDialect {
             .copied()
             .collect();
 
-        for cmd in commands {
-            if !prefix.is_empty() && !cmd.to_ascii_lowercase().starts_with(&prefix) {
-                continue;
+        if context.include_commands() {
+            for cmd in commands {
+                if !prefix.is_empty() && !cmd.to_ascii_lowercase().starts_with(&prefix) {
+                    continue;
+                }
+
+                let (kind, detail_prefix) = if cmd.starts_with("FT.") {
+                    (CompletionItemKind::FUNCTION, "RediSearch command")
+                } else if cmd.starts_with("GRAPH.") {
+                    (CompletionItemKind::FUNCTION, "RedisGraph command")
+                } else if cmd.starts_with("JSON.") {
+                    (CompletionItemKind::FUNCTION, "RedisJSON command")
+                } else {
+                    (CompletionItemKind::FUNCTION, "Redis command")
+                };
+
+                items.push(CompletionItem {
+                    label: cmd.to_string(),
+                    kind: Some(kind),
+                    detail: Some(format!("{}: {}", detail_prefix, cmd)),
+                    documentation: None,
+                    deprecated: None,
+                    preselect: None,
+                    sort_text: Some(format!("0{}", cmd)),
+                    filter_text: Some(cmd.to_string()),
+                    insert_text: Some(cmd.to_string()),
+                    insert_text_format: None,
+                    text_edit: None,
+                    additional_text_edits: None,
+                    commit_characters: None,
+                    command: None,
+                    data: None,
+                    tags: None,
+                    insert_text_mode: None,
+                    label_details: None,
+                });
             }
-
-            let (kind, detail_prefix) = if cmd.starts_with("FT.") {
-                (CompletionItemKind::FUNCTION, "RediSearch command")
-            } else if cmd.starts_with("GRAPH.") {
-                (CompletionItemKind::FUNCTION, "RedisGraph command")
-            } else if cmd.starts_with("JSON.") {
-                (CompletionItemKind::FUNCTION, "RedisJSON command")
-            } else {
-                (CompletionItemKind::FUNCTION, "Redis command")
-            };
-
-            items.push(CompletionItem {
-                label: cmd.to_string(),
-                kind: Some(kind),
-                detail: Some(format!("{}: {}", detail_prefix, cmd)),
-                documentation: None,
-                deprecated: None,
-                preselect: None,
-                sort_text: Some(format!("0{}", cmd)),
-                filter_text: Some(cmd.to_string()),
-                insert_text: Some(cmd.to_string()),
-                insert_text_format: None,
-                text_edit: None,
-                additional_text_edits: None,
-                commit_characters: None,
-                command: None,
-                data: None,
-                tags: None,
-                insert_text_mode: None,
-                label_details: None,
-            });
         }
 
         // RediSearch 查询语法关键字和操作符
@@ -212,67 +215,37 @@ impl Dialect for RedisDialect {
             "]",   // 范围查询结束（包含）
         ];
 
-        for keyword in keywords {
-            if !prefix.is_empty() && !keyword.to_ascii_lowercase().starts_with(&prefix) {
-                continue;
-            }
-
-            let detail = match keyword {
-                "@" => "Field prefix for RediSearch queries (e.g., @field:value)",
-                "AND" => "Logical AND operator",
-                "OR" => "Logical OR operator",
-                "NOT" => "Logical NOT operator",
-                "-" => "Exclude operator (must not contain)",
-                "+" => "Must contain operator",
-                "~" => "Fuzzy match operator",
-                "|" => "OR operator (used in aggregations)",
-                "(" | ")" => "Grouping parentheses",
-                "{" | "}" => "Range query braces (exclusive)",
-                "[" | "]" => "Range query brackets (inclusive)",
-                _ => "RediSearch query operator",
-            };
-
-            items.push(CompletionItem {
-                label: keyword.to_string(),
-                kind: Some(CompletionItemKind::OPERATOR),
-                detail: Some(detail.to_string()),
-                documentation: None,
-                deprecated: None,
-                preselect: None,
-                sort_text: Some(format!("1{}", keyword)),
-                filter_text: Some(keyword.to_string()),
-                insert_text: Some(keyword.to_string()),
-                insert_text_format: None,
-                insert_text_mode: None,
-                text_edit: None,
-                additional_text_edits: None,
-                commit_characters: None,
-                command: None,
-                data: None,
-                tags: None,
-                label_details: None,
-            });
-        }
-
-        if let Some(schema) = schema {
-            for table in &schema.tables {
-                if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(&prefix) {
+        if context.include_query_operators() {
+            for keyword in keywords {
+                if !prefix.is_empty() && !keyword.to_ascii_lowercase().starts_with(&prefix) {
                     continue;
                 }
 
+                let detail = match keyword {
+                    "@" => "Field prefix for RediSearch queries (e.g., @field:value)",
+                    "AND" => "Logical AND operator",
+                    "OR" => "Logical OR operator",
+                    "NOT" => "Logical NOT operator",
+                    "-" => "Exclude operator (must not contain)",
+                    "+" => "Must contain operator",
+                    "~" => "Fuzzy match operator",
+                    "|" => "OR operator (used in aggregations)",
+                    "(" | ")" => "Grouping parentheses",
+                    "{" | "}" => "Range query braces (exclusive)",
+                    "[" | "]" => "Range query brackets (inclusive)",
+                    _ => "RediSearch query operator",
+                };
+
                 items.push(CompletionItem {
-                    label: table.name.clone(),
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(format!("Redis Index/Key: {}", table.name)),
-                    documentation: table
-                        .comment
-                        .clone()
-                        .map(tower_lsp::lsp_types::Documentation::String),
+                    label: keyword.to_string(),
+                    kind: Some(CompletionItemKind::OPERATOR),
+                    detail: Some(detail.to_string()),
+                    documentation: None,
                     deprecated: None,
                     preselect: None,
-                    sort_text: Some(format!("2{}", table.name)),
-                    filter_text: Some(table.name.clone()),
-                    insert_text: Some(table.name.clone()),
+                    sort_text: Some(format!("1{}", keyword)),
+                    filter_text: Some(keyword.to_string()),
+                    insert_text: Some(keyword.to_string()),
                     insert_text_format: None,
                     insert_text_mode: None,
                     text_edit: None,
@@ -283,6 +256,40 @@ impl Dialect for RedisDialect {
                     tags: None,
                     label_details: None,
                 });
+            }
+        }
+
+        if context.include_keys() {
+            if let Some(schema) = schema {
+                for table in &schema.tables {
+                    if !prefix.is_empty() && !table.name.to_ascii_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+
+                    items.push(CompletionItem {
+                        label: table.name.clone(),
+                        kind: Some(CompletionItemKind::CLASS),
+                        detail: Some(format!("Redis Index/Key: {}", table.name)),
+                        documentation: table
+                            .comment
+                            .clone()
+                            .map(tower_lsp::lsp_types::Documentation::String),
+                        deprecated: None,
+                        preselect: None,
+                        sort_text: Some(format!("2{}", table.name)),
+                        filter_text: Some(table.name.clone()),
+                        insert_text: Some(table.name.clone()),
+                        insert_text_format: None,
+                        insert_text_mode: None,
+                        text_edit: None,
+                        additional_text_edits: None,
+                        commit_characters: None,
+                        command: None,
+                        data: None,
+                        tags: None,
+                        label_details: None,
+                    });
+                }
             }
         }
 
@@ -338,6 +345,116 @@ impl Dialect for RedisDialect {
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
         self.parse(sql, schema).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedisCompletionContext {
+    Broad,
+    CommandName,
+    KeyArgument,
+    QueryOperator,
+}
+
+impl RedisCompletionContext {
+    fn include_commands(self) -> bool {
+        matches!(self, Self::Broad | Self::CommandName)
+    }
+
+    fn include_query_operators(self) -> bool {
+        matches!(self, Self::Broad | Self::QueryOperator)
+    }
+
+    fn include_keys(self) -> bool {
+        matches!(self, Self::Broad | Self::KeyArgument)
+    }
+}
+
+fn redis_completion_context(source: &str, position: Position) -> RedisCompletionContext {
+    let byte_offset = byte_offset_at_position(source, position);
+    let before = &source[..byte_offset.min(source.len())];
+    let current_line = before
+        .rsplit_once('\n')
+        .map(|(_, line)| line)
+        .unwrap_or(before);
+    let trimmed = current_line.trim_start();
+
+    if trimmed.is_empty() {
+        return RedisCompletionContext::Broad;
+    }
+
+    let ends_with_whitespace = current_line
+        .chars()
+        .last()
+        .map(char::is_whitespace)
+        .unwrap_or(false);
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return RedisCompletionContext::Broad;
+    }
+
+    if tokens.len() == 1 && !ends_with_whitespace {
+        return RedisCompletionContext::CommandName;
+    }
+
+    let command = tokens[0].to_ascii_uppercase();
+    let arg_index = if ends_with_whitespace {
+        tokens.len()
+    } else {
+        tokens.len().saturating_sub(1)
+    };
+
+    if is_redis_key_argument(&command, arg_index) {
+        return RedisCompletionContext::KeyArgument;
+    }
+
+    if matches!(command.as_str(), "FT.SEARCH" | "FT.AGGREGATE") && arg_index >= 2 {
+        return RedisCompletionContext::QueryOperator;
+    }
+
+    RedisCompletionContext::Broad
+}
+
+fn byte_offset_at_position(source: &str, position: Position) -> usize {
+    let position = crate::position::lsp_position_to_byte_position(source, position);
+    let mut offset = 0usize;
+
+    for (line_index, line) in source.split('\n').enumerate() {
+        if line_index == position.line as usize {
+            return offset + (position.character as usize).min(line.len());
+        }
+        offset += line.len() + 1;
+    }
+
+    source.len()
+}
+
+fn is_redis_key_argument(command: &str, arg_index: usize) -> bool {
+    if arg_index == 0 {
+        return false;
+    }
+
+    match command {
+        "DEL" | "EXISTS" | "UNLINK" => true,
+        "GET" | "SET" | "SETEX" | "PSETEX" | "SETNX" | "GETDEL" | "GETEX" | "EXPIRE"
+        | "PEXPIRE" | "TTL" | "PTTL" | "PERSIST" | "TYPE" | "DUMP" | "RESTORE" | "RENAME"
+        | "RENAMENX" => arg_index == 1,
+        "HSET" | "HGET" | "HGETALL" | "HDEL" | "HKEYS" | "HVALS" | "HLEN" | "HEXISTS"
+        | "HINCRBY" | "HINCRBYFLOAT" | "HMGET" | "HMSET" => arg_index == 1,
+        "LPUSH" | "RPUSH" | "LPOP" | "RPOP" | "LLEN" | "LRANGE" | "LINDEX" | "LSET" | "LTRIM"
+        | "LREM" => arg_index == 1,
+        "SADD" | "SMEMBERS" | "SREM" | "SCARD" | "SISMEMBER" | "SINTER" | "SUNION" | "SDIFF" => {
+            arg_index >= 1
+        }
+        "ZADD" | "ZRANGE" | "ZREM" | "ZCARD" | "ZSCORE" | "ZRANK" | "ZREVRANK" | "ZCOUNT" => {
+            arg_index == 1
+        }
+        "JSON.GET" | "JSON.SET" | "JSON.DEL" | "JSON.MGET" | "JSON.KEYS" | "JSON.ARRAPPEND"
+        | "JSON.ARRINDEX" | "JSON.ARRINSERT" | "JSON.ARRLEN" | "JSON.ARRPOP" | "JSON.OBJKEYS"
+        | "JSON.OBJLEN" => arg_index == 1,
+        "FT.SEARCH" | "FT.AGGREGATE" | "FT.INFO" | "FT.DROPINDEX" => arg_index == 1,
+        _ => false,
     }
 }
 

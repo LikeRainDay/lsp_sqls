@@ -1572,6 +1572,14 @@ async fn test_redis_schema_aware_key_completion_and_hover() {
         .expect("Redis completion should include schema keys");
     assert_eq!(key.insert_text.as_deref(), Some("user:1"));
     assert_eq!(key.filter_text.as_deref(), Some("user:1"));
+    assert!(
+        !items.iter().any(|item| item.label == "GET"),
+        "Redis key argument completion should not include command names: {items:?}"
+    );
+    assert!(
+        !items.iter().any(|item| item.label == "AND"),
+        "Redis key argument completion should not include RediSearch operators: {items:?}"
+    );
 
     let filtered_items = dialect
         .completion(
