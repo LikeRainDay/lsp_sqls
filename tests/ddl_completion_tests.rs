@@ -143,6 +143,35 @@ async fn assert_references_completion(
     assert!(has_label(&prefixed_column, "owner"));
     assert!(!has_label(&prefixed_column, "name"));
 
+    let reference_actions = complete(
+        dialect,
+        &format!("CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook "),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&reference_actions, "("));
+    assert!(has_label(&reference_actions, "ON DELETE"));
+    assert!(has_label(&reference_actions, "ON UPDATE"));
+    assert!(
+        !has_label(&reference_actions, qualified_table_label),
+        "REFERENCES action position should not continue suggesting relation names: {reference_actions:?}"
+    );
+    assert!(
+        !has_label(&reference_actions, "owner"),
+        "REFERENCES action position should not suggest columns: {reference_actions:?}"
+    );
+    assert!(!has_kind(&reference_actions, CompletionItemKind::CLASS));
+    assert!(!has_kind(&reference_actions, CompletionItemKind::FIELD));
+
+    let prefixed_action = complete(
+        dialect,
+        &format!("CREATE TABLE {database}.child (owner_id INT REFERENCES {database}.webhook O"),
+        &schema,
+    )
+    .await;
+    assert!(has_label(&prefixed_action, "ON DELETE"));
+    assert!(has_label(&prefixed_action, "ON UPDATE"));
+
     let alter_columns = complete(
         dialect,
         &format!(

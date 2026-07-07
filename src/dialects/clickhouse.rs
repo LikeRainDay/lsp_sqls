@@ -439,6 +439,15 @@ impl Dialect for ClickHouseDialect {
                     }
                 }
             }
+            crate::parser::CompletionContext::ReferenceActionClause => {
+                let prefix = common::cursor_prefix(sql, position);
+                for keyword in ["(", "ON DELETE", "ON UPDATE"] {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
+                    items.push(self.create_keyword_item(keyword));
+                }
+            }
             crate::parser::CompletionContext::ColumnTargetClause => {
                 let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["column"]);
                 if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {

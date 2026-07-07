@@ -30,6 +30,8 @@ pub enum CompletionContext {
     UsingClause,
     /// 在 REFERENCES table (...) 子句中，应该补全被引用表的列名
     ReferenceColumnClause,
+    /// 在 REFERENCES table 之后，应该补全外键引用动作
+    ReferenceActionClause,
     /// 在 ALTER TABLE 的列目标位置，应该补全当前表列名
     ColumnTargetClause,
     /// 在 ALTER TABLE 的约束目标位置，应该补全当前表约束名
@@ -663,6 +665,10 @@ impl SqlParser {
             return CompletionContext::ReferenceColumnClause;
         }
 
+        if Self::reference_action_context_at_position(source, position) {
+            return CompletionContext::ReferenceActionClause;
+        }
+
         if Self::reference_relation_target_context_at_position(source, position) {
             return CompletionContext::FromClause;
         }
@@ -883,6 +889,10 @@ impl SqlParser {
 
         if Self::is_reference_column_context(statement_upper) {
             return CompletionContext::ReferenceColumnClause;
+        }
+
+        if Self::is_reference_action_context(statement_upper) {
+            return CompletionContext::ReferenceActionClause;
         }
 
         if Self::is_reference_relation_target_context(statement_upper) {
@@ -1122,9 +1132,20 @@ impl SqlParser {
         let searchable_text_before = Self::mask_sql_noise(text_before);
         let text_upper = searchable_text_before.to_ascii_uppercase();
         let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
-        let statement_upper = text_upper[statement_start..].trim_end();
+        let statement_upper = &text_upper[statement_start..];
 
         Self::is_reference_relation_target_context(statement_upper)
+    }
+
+    fn reference_action_context_at_position(source: &str, position: Position) -> bool {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = &text_upper[statement_start..];
+
+        Self::is_reference_action_context(statement_upper)
     }
 
     fn is_join_using_column_context(statement_upper: &str) -> bool {
@@ -1216,6 +1237,51 @@ impl SqlParser {
         }
 
         remainder.trim_start().starts_with('.')
+    }
+
+    fn is_reference_action_context(statement_upper: &str) -> bool {
+        let Some(references_position) =
+            Self::previous_keyword_position(statement_upper, "REFERENCES")
+        else {
+            return false;
+        };
+        let after_references = references_position + "REFERENCES".len();
+        let Some((_, after_relation)) = Self::read_relation_reference_after_preserving_trailing(
+            statement_upper,
+            after_references,
+        ) else {
+            return false;
+        };
+        let after_relation_text = &statement_upper[after_relation..];
+        if after_relation_text.contains('(') {
+            return false;
+        }
+        if after_relation_text.trim_start().is_empty() {
+            return !after_relation_text.is_empty();
+        }
+
+        if Self::statement_has_any_keyword(
+            statement_upper,
+            after_relation,
+            statement_upper.len(),
+            &[
+                "MATCH",
+                "ON DELETE",
+                "ON UPDATE",
+                "DEFERRABLE",
+                "NOT DEFERRABLE",
+                "INITIALLY",
+            ],
+        ) {
+            return false;
+        }
+
+        let words = Self::statement_words(after_relation_text);
+        !after_relation_text
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace())
+            && words.len() <= 2
     }
 
     fn is_reference_column_context(statement_upper: &str) -> bool {
@@ -3170,12 +3236,32 @@ mod tests {
 
         let references_completed_table_sql =
             "CREATE TABLE app.orders (user_id INT REFERENCES app.users ";
-        assert_ne!(
+        assert_eq!(
             parser.analyze_completion_context_fallback(
                 references_completed_table_sql,
                 position_at_end(references_completed_table_sql)
             ),
-            CompletionContext::FromClause
+            CompletionContext::ReferenceActionClause
+        );
+
+        let references_action_prefix_sql =
+            "CREATE TABLE app.orders (user_id INT REFERENCES app.users O";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                references_action_prefix_sql,
+                position_at_end(references_action_prefix_sql)
+            ),
+            CompletionContext::ReferenceActionClause
+        );
+
+        let references_on_delete_sql =
+            "CREATE TABLE app.orders (user_id INT REFERENCES app.users ON DELETE ";
+        assert_ne!(
+            parser.analyze_completion_context_fallback(
+                references_on_delete_sql,
+                position_at_end(references_on_delete_sql)
+            ),
+            CompletionContext::ReferenceActionClause
         );
 
         let references_completed_column_sql =
