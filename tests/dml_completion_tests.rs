@@ -465,6 +465,44 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     assert!(!has_label(&case_when_between_first, "OR"));
     assert!(!has_label(&case_when_between_first, "owner"));
 
+    let simple_case_value = complete(dialect, "SELECT CASE owner WHEN ", &schema).await;
+    assert!(has_label(&simple_case_value, "NULL"));
+    assert!(has_label(&simple_case_value, "TRUE"));
+    assert!(has_label(&simple_case_value, "owner"));
+    assert!(
+        !has_label(&simple_case_value, "FROM"),
+        "Simple CASE WHEN value should not suggest SELECT continuations: {simple_case_value:?}"
+    );
+    assert!(
+        !has_operator(&simple_case_value, "="),
+        "Simple CASE WHEN value should not suggest predicate operators: {simple_case_value:?}"
+    );
+
+    let simple_case_value_continuation =
+        complete(dialect, "SELECT CASE owner WHEN 'app' ", &schema).await;
+    assert!(has_label(&simple_case_value_continuation, "THEN"));
+    assert!(!has_label(&simple_case_value_continuation, "AND"));
+    assert!(!has_label(&simple_case_value_continuation, "OR"));
+    assert!(!has_label(&simple_case_value_continuation, "owner"));
+    assert!(!has_operator(&simple_case_value_continuation, "="));
+
+    let simple_case_then_prefix =
+        complete(dialect, "SELECT CASE owner WHEN 'app' T", &schema).await;
+    assert!(has_label(&simple_case_then_prefix, "THEN"));
+    assert!(!has_label(&simple_case_then_prefix, "TRUE"));
+    assert!(!has_label(&simple_case_then_prefix, "owner"));
+
+    let simple_case_second_value = complete(
+        dialect,
+        "SELECT CASE owner WHEN 'app' THEN 'yes' WHEN ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&simple_case_second_value, "NULL"));
+    assert!(has_label(&simple_case_second_value, "owner"));
+    assert!(!has_label(&simple_case_second_value, "THEN"));
+    assert!(!has_operator(&simple_case_second_value, "="));
+
     let case_then_result = complete(dialect, "SELECT CASE WHEN owner = 'app' THEN ", &schema).await;
     assert!(has_label(&case_then_result, "NULL"));
     assert!(has_label(&case_then_result, "TRUE"));
