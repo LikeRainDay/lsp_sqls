@@ -28,6 +28,10 @@ pub enum CompletionContext {
     HavingClause,
     /// 在 JOIN ... USING (...) 子句中，应该补全可共享的列名
     UsingClause,
+    /// 在 ALTER TABLE 的列目标位置，应该补全当前表列名
+    ColumnTargetClause,
+    /// 在 ALTER TABLE 的约束目标位置，应该补全当前表约束名
+    ConstraintTargetClause,
     /// 默认上下文，返回所有关键字
     Default,
 }
@@ -641,6 +645,10 @@ impl SqlParser {
             return CompletionContext::UsingClause;
         }
 
+        if let Some(context) = Self::analyze_ddl_target_context_at_position(source, position) {
+            return context;
+        }
+
         let mut current_node = Some(node);
 
         // First, check if we are inside a specific node type that dictates context directly
@@ -839,6 +847,10 @@ impl SqlParser {
             return CompletionContext::UsingClause;
         }
 
+        if let Some(context) = Self::analyze_ddl_target_context(statement_upper) {
+            return context;
+        }
+
         if Self::is_ddl_on_relation_target_context(statement_upper) {
             return CompletionContext::FromClause;
         }
@@ -922,7 +934,13 @@ impl SqlParser {
             ("UPDATE", &["SET", "WHERE", "RETURNING"][..]),
             ("DELETE FROM", &["WHERE", "RETURNING", "USING"][..]),
             ("TRUNCATE TABLE", &[][..]),
-            ("ALTER TABLE", &[][..]),
+            (
+                "ALTER TABLE",
+                &[
+                    "ADD", "ALTER", "DROP", "RENAME", "OWNER", "SET", "RESET", "VALIDATE",
+                    "ENABLE", "DISABLE",
+                ][..],
+            ),
             ("DROP TABLE", &[][..]),
             ("DROP VIEW", &[][..]),
         ];
@@ -1072,6 +1090,91 @@ impl SqlParser {
         }
 
         depth > 0 || text_after_open.trim_end().ends_with(',')
+    }
+
+    fn analyze_ddl_target_context_at_position(
+        source: &str,
+        position: Position,
+    ) -> Option<CompletionContext> {
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let text_before = source.get(..cursor_offset).unwrap_or(source);
+        let searchable_text_before = Self::mask_sql_noise(text_before);
+        let text_upper = searchable_text_before.to_ascii_uppercase();
+        let statement_start = Self::previous_statement_start(&text_upper, text_upper.len());
+        let statement_upper = text_upper[statement_start..].trim_end();
+
+        Self::analyze_ddl_target_context(statement_upper)
+    }
+
+    fn analyze_ddl_target_context(statement_upper: &str) -> Option<CompletionContext> {
+        if Self::is_alter_table_target_context(
+            statement_upper,
+            &["DROP COLUMN", "ALTER COLUMN", "RENAME COLUMN"],
+            &[
+                "TYPE", "SET", "DROP", "RESTART", "TO", "CASCADE", "RESTRICT", "ADD", "ALTER",
+                "RENAME",
+            ],
+        ) {
+            return Some(CompletionContext::ColumnTargetClause);
+        }
+
+        if Self::is_alter_table_target_context(
+            statement_upper,
+            &["DROP CONSTRAINT", "RENAME CONSTRAINT"],
+            &[
+                "TO", "CASCADE", "RESTRICT", "ADD", "ALTER", "DROP", "RENAME",
+            ],
+        ) {
+            return Some(CompletionContext::ConstraintTargetClause);
+        }
+
+        None
+    }
+
+    fn is_alter_table_target_context(
+        statement_upper: &str,
+        target_phrases: &[&str],
+        terminators: &[&str],
+    ) -> bool {
+        let Some(alter_table_position) =
+            Self::previous_keyword_position(statement_upper, "ALTER TABLE")
+        else {
+            return false;
+        };
+
+        target_phrases.iter().any(|phrase| {
+            let Some(target_position) = Self::previous_keyword_position(statement_upper, phrase)
+            else {
+                return false;
+            };
+            if target_position < alter_table_position {
+                return false;
+            }
+
+            let after_phrase = target_position + phrase.len();
+            if Self::statement_has_any_keyword(
+                statement_upper,
+                after_phrase,
+                statement_upper.len(),
+                terminators,
+            ) {
+                return false;
+            }
+
+            let target_text = statement_upper[after_phrase..].trim_start();
+            if target_text.is_empty() {
+                return true;
+            }
+            if target_text
+                .chars()
+                .last()
+                .is_some_and(|ch| ch.is_whitespace())
+            {
+                return false;
+            }
+
+            Self::statement_words(target_text).len() <= 1
+        })
     }
 
     /// 获取表名（用于 TableColumn 上下文）
@@ -2360,6 +2463,24 @@ mod tests {
                 position_at_end(create_index_column_sql)
             ),
             CompletionContext::SelectClause
+        );
+
+        let alter_drop_column_sql = "ALTER TABLE app.users DROP COLUMN ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_drop_column_sql,
+                position_at_end(alter_drop_column_sql)
+            ),
+            CompletionContext::ColumnTargetClause
+        );
+
+        let alter_drop_constraint_sql = "ALTER TABLE app.users DROP CONSTRAINT ";
+        assert_eq!(
+            parser.analyze_completion_context_fallback(
+                alter_drop_constraint_sql,
+                position_at_end(alter_drop_constraint_sql)
+            ),
+            CompletionContext::ConstraintTargetClause
         );
     }
 

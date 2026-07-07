@@ -471,6 +471,38 @@ impl Dialect for MysqlDialect {
                 }
             }
 
+            crate::parser::CompletionContext::ColumnTargetClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(sql, position, &["column"]);
+                if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+                    let referenced_tables =
+                        Self::referenced_table_names_at_position(&parser, tree, sql, position);
+                    common::add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        false,
+                        &prefix,
+                        "0",
+                    );
+                }
+            }
+
+            crate::parser::CompletionContext::ConstraintTargetClause => {
+                let prefix =
+                    common::cursor_prefix_excluding_keywords(sql, position, &["constraint"]);
+                if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+                    let referenced_tables =
+                        Self::referenced_table_names_at_position(&parser, tree, sql, position);
+                    common::add_schema_constraints(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        &prefix,
+                        "0",
+                    );
+                }
+            }
+
             crate::parser::CompletionContext::TableColumn => {
                 // 表名.列名：只补全特定表的列名
                 if let Some(tree) = &parse_result.tree {

@@ -1,5 +1,5 @@
 use crate::parser::SqlParser;
-use crate::schema::{Column, Function, Schema, Table};
+use crate::schema::{Column, Constraint, Function, Schema, Table};
 use std::collections::HashSet;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Position};
 
@@ -325,6 +325,32 @@ pub(crate) fn create_function_item(
     }
 }
 
+pub(crate) fn create_constraint_item(constraint: &Constraint) -> CompletionItem {
+    CompletionItem {
+        label: constraint.name.clone(),
+        kind: Some(CompletionItemKind::REFERENCE),
+        detail: Some(format!("Constraint: {}", constraint.constraint_type)),
+        documentation: constraint
+            .definition
+            .as_ref()
+            .map(|definition| Documentation::String(definition.clone())),
+        deprecated: None,
+        preselect: None,
+        sort_text: Some(completion_sort_text("1", &constraint.name)),
+        filter_text: Some(constraint.name.clone()),
+        insert_text: Some(constraint.name.clone()),
+        insert_text_format: None,
+        insert_text_mode: None,
+        text_edit: None,
+        additional_text_edits: None,
+        commit_characters: None,
+        command: None,
+        data: None,
+        tags: None,
+        label_details: None,
+    }
+}
+
 pub(crate) fn add_schema_tables(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
@@ -426,6 +452,30 @@ pub(crate) fn add_schema_using_columns(
         let mut item = create_column_item(column, None);
         set_completion_sort_text(&mut item, sort_prefix, &column.name);
         items.push(item);
+    }
+}
+
+pub(crate) fn add_schema_constraints(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    prefix: &str,
+    sort_prefix: &str,
+) {
+    for table in &schema.tables {
+        if !table_is_referenced(schema, table, referenced_tables) {
+            continue;
+        }
+
+        for constraint in &table.constraints {
+            if !prefix.is_empty() && !constraint.name.to_lowercase().starts_with(prefix) {
+                continue;
+            }
+
+            let mut item = create_constraint_item(constraint);
+            set_completion_sort_text(&mut item, sort_prefix, &constraint.name);
+            items.push(item);
+        }
     }
 }
 
