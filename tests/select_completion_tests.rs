@@ -94,7 +94,10 @@ async fn select_wildcard_from_prefix_excludes_field_matches() {
         let items = complete(&PostgresDialect::new(), sql, &schema).await;
 
         assert!(has_label(&items, "FROM"), "{sql:?} should suggest FROM");
-        assert!(!has_label(&items, "owner"), "{sql:?} should not suggest fields");
+        assert!(
+            !has_label(&items, "owner"),
+            "{sql:?} should not suggest fields"
+        );
         assert!(
             !has_label(&items, "created_time"),
             "{sql:?} should not suggest fields"
