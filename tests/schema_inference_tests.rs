@@ -476,8 +476,8 @@ mod schema_isolation_tests {
         assert_eq!(manager.list_ids().len(), 5);
 
         // 验证每个 schema 都是独立的
-        for i in 0..5 {
-            let schema = manager.get(schema_ids[i]).unwrap();
+        for (i, schema_id) in schema_ids.iter().enumerate() {
+            let schema = manager.get(*schema_id).unwrap();
             assert_eq!(schema.database, format!("db_{}", i));
             assert_eq!(schema.tables[0].name, format!("table_{}", i));
         }
@@ -629,7 +629,7 @@ mod schema_matching_tests {
         manager.register(schema);
 
         // 测试匹配多个表名
-        let table_names = vec!["users", "orders"];
+        let table_names = ["users", "orders"];
         let matching_schemas: Vec<_> = manager
             .list_ids()
             .iter()
@@ -679,7 +679,7 @@ mod schema_matching_tests {
         manager.register(schema);
 
         // 测试部分匹配（SQL 中只有部分表在 schema 中）
-        let sql_tables = vec!["users"]; // 只有 users，没有 orders
+        let sql_tables = ["users"]; // 只有 users，没有 orders
         let matching_schemas: Vec<_> = manager
             .list_ids()
             .iter()
@@ -844,8 +844,7 @@ mod schema_inference_integration_tests {
                     .max_by_key(|(_, match_count, _)| *match_count);
 
                 // 如果提取到了表名，应该能找到匹配的 schema
-                if best_match.is_some() {
-                    let (schema_id, _, _) = best_match.unwrap();
+                if let Some((schema_id, _, _)) = best_match {
                     let matched_schema = manager.get(schema_id).unwrap();
                     // 验证匹配的 schema 包含 SQL 中的表
                     assert!(

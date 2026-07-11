@@ -9,7 +9,7 @@ use std::time::Duration;
 async fn test_lsp_server_basic() {
     // 启动 LSP 服务器进程
     let mut server_process = Command::new("cargo")
-        .args(&["run", "--release"])
+        .args(["run", "--release"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -42,5 +42,4 @@ async fn test_lsp_server_basic() {
 async fn test_lsp_initialize() {
     // 这里可以添加更详细的初始化测试
     // 需要模拟 LSP 协议通信
-    assert!(true, "LSP server should initialize successfully");
 }

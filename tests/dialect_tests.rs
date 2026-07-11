@@ -2487,7 +2487,7 @@ async fn test_intelligent_completion_logging() {
     .await;
 
     // 验证是否包含 schema 中的列名
-    assert!(items2.len() > 0);
+    assert!(!items2.is_empty());
     // Should suggest columns from orders table (e.g., order_id)
     assert!(
         items2

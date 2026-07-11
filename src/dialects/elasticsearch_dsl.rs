@@ -979,7 +979,7 @@ fn extract_http_request_bodies(input: &str) -> HttpRequestBodies {
                 current_body.push(trimmed.to_string());
             }
             Ok(None) => return HttpRequestBodies::NotHttp,
-            Err(diagnostic) => return HttpRequestBodies::Diagnostics(vec![diagnostic]),
+            Err(diagnostic) => return HttpRequestBodies::Diagnostics(vec![*diagnostic]),
         }
     }
 
@@ -994,7 +994,7 @@ fn extract_http_request_bodies(input: &str) -> HttpRequestBodies {
 fn parse_http_request_line(
     line: &str,
     line_index: u32,
-) -> Result<Option<Option<String>>, Diagnostic> {
+) -> Result<Option<Option<String>>, Box<Diagnostic>> {
     let Some((method, rest)) = line.split_once(char::is_whitespace) else {
         return Ok(None);
     };
@@ -1007,21 +1007,21 @@ fn parse_http_request_line(
 
     let rest = rest.trim();
     if rest.is_empty() {
-        return Err(http_request_diagnostic(
+        return Err(Box::new(http_request_diagnostic(
             line_index,
             line,
             "Elasticsearch request path is required",
-        ));
+        )));
     }
 
     let mut split = rest.splitn(2, char::is_whitespace);
     let path = split.next().unwrap_or("").trim();
     if !path.starts_with('/') {
-        return Err(http_request_diagnostic(
+        return Err(Box::new(http_request_diagnostic(
             line_index,
             line,
             "Elasticsearch request path must start with '/'",
-        ));
+        )));
     }
 
     Ok(Some(

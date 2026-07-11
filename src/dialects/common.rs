@@ -257,8 +257,7 @@ pub(crate) fn predicate_continuation_keywords(
         .filter_map(|clause| {
             previous_keyword_position(statement, clause).map(|position| (position, clause))
         })
-        .max_by_key(|(position, _)| *position)
-        .map(|(position, clause)| (position, clause));
+        .max_by_key(|(position, _)| *position);
 
     match latest_clause {
         Some((clause_position, clause))
