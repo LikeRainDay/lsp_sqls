@@ -2,10 +2,14 @@
 //! 参考 sqls-server/sqls 的实现
 //! https://github.com/sqls-server/sqls/tree/master/parser
 
+use crate::placeholder::{
+    normalize_sql_placeholders, normalize_sql_placeholders_for_dialect, placeholder_at,
+    SqlPlaceholderDialect, PLACEHOLDER_IDENTIFIER,
+};
 use crate::token::{Delimiters, Keywords, Operators, Token, TokenType};
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
-use tree_sitter::{Node, Parser, Tree};
+use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 /// 补全上下文类型
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,11 +105,66 @@ pub struct ParseResult {
 pub struct SqlParser {
     parser: Parser,
     source: String, // 存储当前解析的 SQL 文本
+    placeholder_dialect: SqlPlaceholderDialect,
+}
+
+fn point_at_byte(source: &str, byte_offset: usize) -> Point {
+    let byte_offset = byte_offset.min(source.len());
+    let before = &source.as_bytes()[..byte_offset];
+    let row = before.iter().filter(|byte| **byte == b'\n').count();
+    let column = before
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(byte_offset, |line_break| byte_offset - line_break - 1);
+    Point::new(row, column)
+}
+
+fn minimal_input_edit(previous: &str, next: &str) -> InputEdit {
+    let mut start = previous
+        .as_bytes()
+        .iter()
+        .zip(next.as_bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    while start > 0 && (!previous.is_char_boundary(start) || !next.is_char_boundary(start)) {
+        start -= 1;
+    }
+
+    let max_suffix = previous.len().min(next.len()).saturating_sub(start);
+    let mut suffix = previous
+        .as_bytes()
+        .iter()
+        .rev()
+        .zip(next.as_bytes().iter().rev())
+        .take(max_suffix)
+        .take_while(|(left, right)| left == right)
+        .count();
+    while suffix > 0
+        && (!previous.is_char_boundary(previous.len() - suffix)
+            || !next.is_char_boundary(next.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    let old_end = previous.len() - suffix;
+    let new_end = next.len() - suffix;
+    InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: point_at_byte(previous, start),
+        old_end_position: point_at_byte(previous, old_end),
+        new_end_position: point_at_byte(next, new_end),
+    }
 }
 
 impl SqlParser {
     /// 创建 SQL 解析器
     pub fn new() -> Self {
+        Self::new_with_placeholder_dialect(SqlPlaceholderDialect::Generic)
+    }
+
+    pub(crate) fn new_with_placeholder_dialect(dialect: SqlPlaceholderDialect) -> Self {
         let language = tree_sitter::Language::from(tree_sitter_sequel::LANGUAGE);
         let mut parser = Parser::new();
         parser
@@ -115,6 +174,7 @@ impl SqlParser {
         Self {
             parser,
             source: String::new(),
+            placeholder_dialect: dialect,
         }
     }
 
@@ -122,7 +182,8 @@ impl SqlParser {
     pub fn parse(&mut self, sql: &str) -> ParseResult {
         // 存储 source 以便后续使用
         self.source = sql.to_string();
-        let tree = self.parser.parse(sql, None);
+        let normalized_sql = normalize_sql_placeholders_for_dialect(sql, self.placeholder_dialect);
+        let tree = self.parser.parse(&normalized_sql, None);
 
         let mut diagnostics = Vec::new();
 
@@ -139,10 +200,7 @@ impl SqlParser {
                         line: 0,
                         character: 0,
                     },
-                    end: Position {
-                        line: 0,
-                        character: sql.len() as u32,
-                    },
+                    end: crate::position::lsp_position_at_end(sql),
                 },
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: Some(NumberOrString::String("PARSE_ERROR".to_string())),
@@ -165,6 +223,47 @@ impl SqlParser {
 
     /// 收集错误节点
     /// 参考 sqls 的错误处理逻辑：过滤误报，只报告真正的语法错误
+    pub fn parse_incremental(
+        &mut self,
+        sql: &str,
+        previous_source: &str,
+        previous_tree: &Tree,
+    ) -> ParseResult {
+        self.source = sql.to_string();
+        let normalized_sql = normalize_sql_placeholders_for_dialect(sql, self.placeholder_dialect);
+        let previous_normalized =
+            normalize_sql_placeholders_for_dialect(previous_source, self.placeholder_dialect);
+        let mut edited_tree = previous_tree.clone();
+        edited_tree.edit(&minimal_input_edit(&previous_normalized, &normalized_sql));
+        let tree = self.parser.parse(&normalized_sql, Some(&edited_tree));
+        let mut diagnostics = Vec::new();
+        if let Some(tree) = &tree {
+            self.collect_errors(tree.root_node(), sql, &mut diagnostics);
+            Self::filter_trailing_incomplete_diagnostics(sql, &mut diagnostics);
+        } else {
+            diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: crate::position::lsp_position_at_end(sql),
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String("PARSE_ERROR".to_string())),
+                code_description: None,
+                source: Some("tree-sitter-sql".to_string()),
+                message: "Failed to parse SQL".to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+        ParseResult {
+            tree,
+            diagnostics,
+            success: true,
+            source: sql.to_string(),
+        }
+    }
+
     fn collect_errors(&self, node: Node, source: &str, diagnostics: &mut Vec<Diagnostic>) {
         // 检查是否是错误节点
         if node.is_error() || node.is_missing() {
@@ -213,14 +312,8 @@ impl SqlParser {
 
             diagnostics.push(Diagnostic {
                 range: Range {
-                    start: Position {
-                        line: start_point.row as u32,
-                        character: start_point.column as u32,
-                    },
-                    end: Position {
-                        line: end_point.row as u32,
-                        character: end_point.column as u32,
-                    },
+                    start: Self::tree_sitter_point_to_lsp_position(source, start_point),
+                    end: Self::tree_sitter_point_to_lsp_position(source, end_point),
                 },
                 severity: Some(if node.is_error() {
                     DiagnosticSeverity::ERROR
@@ -253,6 +346,16 @@ impl SqlParser {
         crate::position::lsp_position_to_byte_position(source, position)
     }
 
+    fn tree_sitter_point_to_lsp_position(source: &str, point: tree_sitter::Point) -> Position {
+        crate::position::byte_position_to_lsp_position(
+            source,
+            Position {
+                line: point.row as u32,
+                character: point.column as u32,
+            },
+        )
+    }
+
     fn filter_trailing_incomplete_diagnostics(source: &str, diagnostics: &mut Vec<Diagnostic>) {
         if !Self::is_trailing_incomplete_statement(source) {
             return;
@@ -263,19 +366,7 @@ impl SqlParser {
     }
 
     fn position_at_end(source: &str) -> Position {
-        let mut line = 0;
-        let mut character = 0;
-
-        for ch in source.chars() {
-            if ch == '\n' {
-                line += 1;
-                character = 0;
-            } else {
-                character += ch.len_utf8() as u32;
-            }
-        }
-
-        Position { line, character }
+        crate::position::lsp_position_at_end(source)
     }
 
     fn diagnostic_reaches_position(diagnostic: &Diagnostic, position: Position) -> bool {
@@ -447,10 +538,7 @@ impl SqlParser {
             let text = text.trim();
             if !text.is_empty() {
                 let token_type = self.classify_token(node_kind, text);
-                let position = Position {
-                    line: start_point.row as u32,
-                    character: start_point.column as u32,
-                };
+                let position = Self::tree_sitter_point_to_lsp_position(source, start_point);
                 tokens.push(Token::new(token_type, text.to_string(), position));
             }
         }
@@ -665,14 +753,8 @@ impl SqlParser {
         let start = node.start_position();
         let end = node.end_position();
         Range {
-            start: Position {
-                line: start.row as u32,
-                character: start.column as u32,
-            },
-            end: Position {
-                line: end.row as u32,
-                character: end.column as u32,
-            },
+            start: Self::tree_sitter_point_to_lsp_position(&self.source, start),
+            end: Self::tree_sitter_point_to_lsp_position(&self.source, end),
         }
     }
 
@@ -1990,8 +2072,7 @@ impl SqlParser {
 
         let token = value
             .split(|ch: char| ch.is_whitespace() || ch == ',')
-            .filter(|token| !token.is_empty())
-            .next_back()
+            .rfind(|token| !token.is_empty())
             .unwrap_or("")
             .trim_matches(|ch| matches!(ch, '\'' | '"' | '`' | '[' | ']' | ';'));
         if token.is_empty() {
@@ -2282,8 +2363,7 @@ impl SqlParser {
 
         let token = value
             .split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
-            .filter(|token| !token.is_empty())
-            .next_back()
+            .rfind(|token| !token.is_empty())
             .unwrap_or("")
             .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '[' | ']'));
         if token.is_empty() {
@@ -3213,7 +3293,8 @@ impl SqlParser {
         let (table_name, _) =
             Self::read_relation_reference_after(statement_source, after_references)?;
 
-        Some(table_name)
+        let table_name = Self::normalize_relation_reference(&table_name);
+        (!table_name.is_empty()).then_some(table_name)
     }
 
     fn analyze_ddl_target_context_at_position(
@@ -3847,6 +3928,20 @@ impl SqlParser {
         }
     }
 
+    fn normalize_relation_reference(identifier: &str) -> String {
+        let parts = Self::identifier_parts(identifier);
+        let Some(last) = parts.last() else {
+            return String::new();
+        };
+        if last == PLACEHOLDER_IDENTIFIER {
+            return String::new();
+        }
+        if parts.iter().any(|part| part == PLACEHOLDER_IDENTIFIER) {
+            return last.clone();
+        }
+        parts.join(".")
+    }
+
     fn identifier_parts(identifier: &str) -> Vec<String> {
         identifier
             .trim()
@@ -3971,6 +4066,10 @@ impl SqlParser {
             return false;
         }
 
+        if source[index..].starts_with("#>") || source[index..].starts_with("#-") {
+            return false;
+        }
+
         index == 0
             || source[..index]
                 .chars()
@@ -4066,6 +4165,8 @@ impl SqlParser {
     }
 
     pub(crate) fn mask_sql_noise(source: &str) -> String {
+        let normalized_source = normalize_sql_placeholders(source);
+        let source = normalized_source.as_str();
         let mut output = String::with_capacity(source.len());
         let mut index = 0;
 
@@ -4347,7 +4448,7 @@ impl SqlParser {
     }
 
     fn push_table_reference(tables: &mut Vec<String>, table_name: &str) {
-        let table_name = Self::normalize_identifier(table_name);
+        let table_name = Self::normalize_relation_reference(table_name);
         if !table_name.is_empty() && !tables.contains(&table_name) {
             tables.push(table_name);
         }
@@ -4417,6 +4518,9 @@ impl SqlParser {
 
     fn read_identifier_part(source: &str, index: usize) -> Option<(String, usize)> {
         let index = Self::skip_whitespace(source, index);
+        if let Some(span) = placeholder_at(source, index) {
+            return Some((PLACEHOLDER_IDENTIFIER.to_string(), span.end));
+        }
         let first = source[index..].chars().next()?;
 
         if matches!(first, '"' | '`' | '\'') {
@@ -4677,7 +4781,7 @@ impl SqlParser {
                     if let Some((alias, _)) = Self::read_relation_alias_after(source, after_table) {
                         aliases.insert(
                             Self::normalize_identifier(&alias),
-                            Self::normalize_identifier(&table_name),
+                            Self::normalize_relation_reference(&table_name),
                         );
                     }
                 }
@@ -4692,6 +4796,16 @@ impl SqlParser {
     /// 提取SQL中引用的表名（从FROM和JOIN子句）
     pub fn extract_referenced_tables(&self, _tree: &Tree, source: &str) -> Vec<String> {
         Self::extract_referenced_tables_from_source(source)
+    }
+
+    pub fn extract_common_table_expressions(&self, source: &str) -> Vec<String> {
+        let searchable_source = Self::mask_sql_noise(source);
+        let source_upper = searchable_source.to_ascii_uppercase();
+        let mut names = Self::extract_cte_names(source, &searchable_source, &source_upper)
+            .into_iter()
+            .collect::<Vec<_>>();
+        names.sort();
+        names
     }
 
     pub fn extract_referenced_tables_at_position(
@@ -4748,8 +4862,8 @@ impl SqlParser {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionContext, SqlParser};
-    use tower_lsp::lsp_types::{DiagnosticSeverity, Position};
+    use super::{minimal_input_edit, CompletionContext, SqlParser};
+    use tower_lsp::lsp_types::{DiagnosticSeverity, Position, Range};
 
     fn position_at_end(source: &str) -> Position {
         let mut line = 0;
@@ -4777,6 +4891,31 @@ mod tests {
             .expect("cursor should map to an AST node");
 
         parser.analyze_completion_context(node, sql, position)
+    }
+
+    #[test]
+    fn incremental_parse_reuses_an_edited_tree_without_shifting_placeholders() {
+        let original = "SELECT * FROM users WHERE id = $1";
+        let updated = "SELECT email FROM users WHERE id = $1 AND active = true";
+        let mut parser = SqlParser::new_with_placeholder_dialect(
+            crate::placeholder::SqlPlaceholderDialect::Postgres,
+        );
+        let original_result = parser.parse(original);
+        let updated_result = parser.parse_incremental(
+            updated,
+            original,
+            original_result.tree.as_ref().expect("initial tree"),
+        );
+        let tree = updated_result.tree.as_ref().expect("updated tree");
+        assert_eq!(
+            parser.extract_referenced_tables(tree, updated),
+            vec!["users"]
+        );
+        assert!(updated_result.diagnostics.is_empty());
+
+        let edit = minimal_input_edit("SELECT 😀", "SELECT 😀, id");
+        assert_eq!(edit.start_byte, "SELECT 😀".len());
+        assert_eq!(edit.old_end_position.column, "SELECT 😀".len());
     }
 
     #[test]
@@ -5971,6 +6110,74 @@ mod tests {
     }
 
     #[test]
+    fn reports_multiline_non_ascii_diagnostics_in_utf16_columns() {
+        let invalid_line = "SELECT '😀中文' AS label FROM users WHERE id = )";
+        let sql = format!("SELECT 1;\n{invalid_line}");
+        let error_byte_column = invalid_line.rfind("= )").expect("error marker");
+        let expected_start = Position {
+            line: 1,
+            character: invalid_line[..error_byte_column].encode_utf16().count() as u32,
+        };
+
+        let mut parser = SqlParser::new();
+        let result = parser.parse(&sql);
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.range.start.line == 1 && diagnostic.message.contains(')'))
+            .unwrap_or_else(|| panic!("expected a diagnostic for ')': {:?}", result.diagnostics));
+
+        assert_eq!(diagnostic.range.start, expected_start);
+        assert_eq!(
+            diagnostic.range.end,
+            Position {
+                line: 1,
+                character: invalid_line.encode_utf16().count() as u32,
+            }
+        );
+        assert_ne!(
+            diagnostic.range.start.character, error_byte_column as u32,
+            "the fixture must catch a byte-column implementation"
+        );
+    }
+
+    #[test]
+    fn exposes_node_and_token_positions_as_utf16_after_non_ascii_text() {
+        let target_line = "SELECT '😀中文' AS label FROM users;";
+        let sql = format!("SELECT 1;\n{target_line}");
+        let target_byte_column = target_line.find("users").expect("users column");
+        let target_byte_offset = sql.find("users").expect("users offset");
+        let expected_start = Position {
+            line: 1,
+            character: target_line[..target_byte_column].encode_utf16().count() as u32,
+        };
+
+        let mut parser = SqlParser::new();
+        let result = parser.parse(&sql);
+        let tree = result.tree.as_ref().expect("SQL should produce a tree");
+        let node = tree
+            .root_node()
+            .descendant_for_byte_range(target_byte_offset, target_byte_offset + "users".len())
+            .expect("users node");
+
+        assert_eq!(parser.node_text(node, &sql), "users");
+        assert_eq!(
+            parser.node_range(node),
+            Range {
+                start: expected_start,
+                end: Position {
+                    line: 1,
+                    character: expected_start.character + "users".encode_utf16().count() as u32,
+                },
+            }
+        );
+        assert!(parser
+            .tokenize(tree, &sql)
+            .iter()
+            .any(|token| { token.text == "users" && token.position == expected_start }));
+    }
+
+    #[test]
     fn suppresses_diagnostics_for_interactive_trailing_sql() {
         let samples = [
             "SELECT",
@@ -6107,6 +6314,72 @@ mod tests {
 
         let references = parser.extract_referenced_tables(tree, sql);
         assert_eq!(references, vec!["public.users".to_string()]);
+    }
+
+    #[test]
+    fn accepts_bind_and_template_placeholders_without_syntax_noise() {
+        let statements = [
+            "SELECT * FROM users WHERE id = $1;",
+            "SELECT * FROM users WHERE id = ?;",
+            "SELECT * FROM users WHERE id = ?1;",
+            "SELECT * FROM users WHERE id = @id;",
+            "SELECT * FROM users WHERE id = :id;",
+            "SELECT * FROM users WHERE id = {{id}};",
+            "SELECT * FROM users WHERE id = ${id};",
+            "SELECT * FROM users WHERE id = %(id)s;",
+            "SELECT {{column}} FROM {{schema}}.users;",
+            "SELECT * FROM {{table}};",
+        ];
+
+        for sql in statements {
+            let mut parser = SqlParser::new();
+            let result = parser.parse(sql);
+            assert!(
+                result.diagnostics.is_empty(),
+                "placeholder SQL should not produce diagnostics for {sql:?}: {:?}",
+                result.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_qualified_relations_keep_static_table_inference() {
+        let sql = "SELECT {{column}} FROM {{schema}}.users u WHERE u.id = :id";
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.expect("placeholder SQL should produce a tree");
+
+        assert_eq!(parser.extract_referenced_tables(&tree, sql), vec!["users"]);
+        assert_eq!(
+            parser
+                .extract_aliases(&tree, sql)
+                .get("u")
+                .map(String::as_str),
+            Some("users")
+        );
+    }
+
+    #[test]
+    fn placeholders_inside_protected_regions_are_not_treated_as_sql_templates() {
+        let sql = r#"
+            SELECT ':id', "{{column}}", payload ?| array['${value}'];
+            -- {{comment}}
+            /* %(comment)s */
+            DO $body$ BEGIN RAISE NOTICE '@inside'; END $body$;
+        "#;
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| !diagnostic.message.contains("{{")
+                    && !diagnostic.message.contains("${")
+                    && !diagnostic.message.contains("%(")),
+            "protected placeholder-like text must not be rewritten: {:?}",
+            result.diagnostics
+        );
     }
 
     #[test]

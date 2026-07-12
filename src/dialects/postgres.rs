@@ -1,6 +1,7 @@
 use crate::dialect::Dialect;
 use crate::dialects::common;
 use crate::parser::SqlParser;
+use crate::placeholder::SqlPlaceholderDialect;
 use crate::schema::{Function, Schema};
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
@@ -20,7 +21,9 @@ impl Default for PostgresDialect {
 impl PostgresDialect {
     pub fn new() -> Self {
         Self {
-            parser: std::sync::Mutex::new(SqlParser::new()),
+            parser: std::sync::Mutex::new(SqlParser::new_with_placeholder_dialect(
+                SqlPlaceholderDialect::Postgres,
+            )),
         }
     }
 
@@ -1237,7 +1240,7 @@ impl Dialect for PostgresDialect {
                                     end: tower_lsp::lsp_types::Position {
                                         line: token.position.line,
                                         character: token.position.character
-                                            + token.text.len() as u32,
+                                            + token.text.encode_utf16().count() as u32,
                                     },
                                 },
                             });
@@ -1251,7 +1254,7 @@ impl Dialect for PostgresDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        common::compact_sql_whitespace(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

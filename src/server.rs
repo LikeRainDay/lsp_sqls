@@ -1,17 +1,82 @@
 use crate::dialect::Dialect;
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
+use crate::placeholder::SqlPlaceholderDialect;
+use crate::position::lsp_position_at_end;
 use crate::schema::{Schema, SchemaId, SchemaManager};
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
+const CURRENT_SQL_DOCUMENT_URI: &str = "file:///current.sql";
+const CURRENT_JSON_DOCUMENT_URI: &str = "file:///current.json";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineCompletionCandidate {
+    label: String,
+    insert_text: Option<String>,
+    kind: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineCompletionDiagnostic {
+    severity: Option<u32>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineCompletionContextResponse {
+    dialect: String,
+    clause: String,
+    statement_range: Option<Range>,
+    ctes: Vec<String>,
+    referenced_objects: Vec<String>,
+    aliases: HashMap<String, String>,
+    expected_kinds: Vec<String>,
+    candidates: Vec<InlineCompletionCandidate>,
+    diagnostics: Vec<InlineCompletionDiagnostic>,
+    error_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineCompletionValidationParams {
+    text_document: TextDocumentIdentifier,
+    text: String,
+}
+
+fn rewrite_current_document_location_uri(location: &mut Location, document_uri: &Url) {
+    if matches!(
+        location.uri.as_str(),
+        CURRENT_SQL_DOCUMENT_URI | CURRENT_JSON_DOCUMENT_URI
+    ) {
+        location.uri = document_uri.clone();
+    }
+}
+
+fn rewrite_current_document_location_uris(locations: &mut [Location], document_uri: &Url) {
+    for location in locations {
+        rewrite_current_document_location_uri(location, document_uri);
+    }
+}
+
 /// 文档管理器，用于存储和管理打开的文档内容
 #[derive(Clone)]
 struct DocumentManager {
     documents: Arc<DashMap<String, String>>,
+}
+
+#[derive(Clone)]
+struct CachedSqlAnalysis {
+    source: String,
+    tree: tree_sitter::Tree,
 }
 
 impl DocumentManager {
@@ -62,6 +127,7 @@ pub struct SqlLspServer {
     document_languages: Arc<DashMap<String, String>>,
     /// 文档管理器
     document_manager: DocumentManager,
+    analysis_cache: Arc<DashMap<String, CachedSqlAnalysis>>,
 }
 
 impl SqlLspServer {
@@ -78,6 +144,7 @@ impl SqlLspServer {
             default_dialect: Arc::new(RwLock::new("postgres".to_string())),
             document_languages: Arc::new(DashMap::new()),
             document_manager: DocumentManager::new(),
+            analysis_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -164,6 +231,199 @@ impl SqlLspServer {
             }
         }
     }
+
+    fn analysis_tree_for_document(
+        &self,
+        uri: &str,
+        text: &str,
+        dialect: &str,
+    ) -> Option<tree_sitter::Tree> {
+        if !matches!(dialect, "postgres" | "mysql" | "clickhouse" | "hive") {
+            self.analysis_cache.remove(uri);
+            return None;
+        }
+        if let Some(cached) = self.analysis_cache.get(uri) {
+            if cached.source == text {
+                return Some(cached.tree.clone());
+            }
+        }
+        let placeholder_dialect = match dialect {
+            "postgres" => SqlPlaceholderDialect::Postgres,
+            "mysql" => SqlPlaceholderDialect::Mysql,
+            _ => SqlPlaceholderDialect::Generic,
+        };
+        let mut parser = SqlParser::new_with_placeholder_dialect(placeholder_dialect);
+        let result = if let Some(cached) = self.analysis_cache.get(uri) {
+            parser.parse_incremental(text, &cached.source, &cached.tree)
+        } else {
+            parser.parse(text)
+        };
+        let tree = result.tree?;
+        self.analysis_cache.insert(
+            uri.to_string(),
+            CachedSqlAnalysis {
+                source: text.to_string(),
+                tree: tree.clone(),
+            },
+        );
+        Some(tree)
+    }
+
+    pub async fn inline_completion_context(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<InlineCompletionContextResponse> {
+        let uri = params.text_document.uri.to_string();
+        let position = params.position;
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some(dialect) = self.get_dialect_for_file(&uri) else {
+            return Ok(empty_inline_completion_context());
+        };
+        let schema = self.get_schema_for_position(&uri, &text, position);
+        let mut raw_candidates = dialect.completion(&text, position, schema.as_ref()).await;
+        raw_candidates.sort_by(|left, right| {
+            left.sort_text
+                .as_deref()
+                .unwrap_or(&left.label)
+                .cmp(right.sort_text.as_deref().unwrap_or(&right.label))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+        let candidates = raw_candidates
+            .into_iter()
+            .take(32)
+            .map(|item| InlineCompletionCandidate {
+                label: item.label.clone(),
+                insert_text: item.insert_text.or(Some(item.label)),
+                kind: item.kind.and_then(serialized_lsp_number),
+            })
+            .collect();
+        let raw_diagnostics = dialect.parse(&text, schema.as_ref()).await;
+        let error_count = raw_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+            .count();
+        let diagnostics = raw_diagnostics
+            .into_iter()
+            .take(16)
+            .map(|diagnostic| InlineCompletionDiagnostic {
+                severity: diagnostic.severity.and_then(serialized_lsp_number),
+                message: diagnostic.message,
+            })
+            .collect();
+
+        let parser = SqlParser::new();
+        let byte_position = SqlParser::lsp_position_to_byte_position(&text, position);
+        let (clause, statement_range, referenced_objects, aliases, ctes) =
+            if let Some(tree) = self.analysis_tree_for_document(&uri, &text, dialect.name()) {
+                let node = parser.get_node_at_position(&tree, byte_position);
+                let context =
+                    node.map(|node| parser.analyze_completion_context(node, &text, byte_position));
+                (
+                    context
+                        .as_ref()
+                        .map(|context| format!("{context:?}"))
+                        .unwrap_or_else(|| "Default".to_string()),
+                    node.and_then(|node| statement_range_for_node(&text, node)),
+                    parser.extract_referenced_tables_at_position(&tree, &text, byte_position),
+                    parser.extract_aliases_at_position(&tree, &text, byte_position),
+                    parser.extract_common_table_expressions(&text),
+                )
+            } else {
+                (
+                    "Default".to_string(),
+                    None,
+                    Vec::new(),
+                    HashMap::new(),
+                    Vec::new(),
+                )
+            };
+        let expected_kinds = expected_kinds_for_clause(&clause);
+        let statement_range = statement_range.or_else(|| {
+            (!text.is_empty()).then_some(Range {
+                start: Position::new(0, 0),
+                end: lsp_position_at_end(&text),
+            })
+        });
+
+        Ok(InlineCompletionContextResponse {
+            dialect: dialect.name().to_string(),
+            clause,
+            statement_range,
+            ctes,
+            referenced_objects,
+            aliases,
+            expected_kinds,
+            candidates,
+            diagnostics,
+            error_count,
+        })
+    }
+
+    pub async fn validate_inline_completion(
+        &self,
+        params: InlineCompletionValidationParams,
+    ) -> Result<Vec<Diagnostic>> {
+        let uri = params.text_document.uri.to_string();
+        let Some(dialect) = self.get_dialect_for_file(&uri) else {
+            return Ok(Vec::new());
+        };
+        let schema = self.get_schema_for_file(&uri);
+        Ok(dialect.parse(&params.text, schema.as_ref()).await)
+    }
+}
+
+fn empty_inline_completion_context() -> InlineCompletionContextResponse {
+    InlineCompletionContextResponse {
+        dialect: "unknown".to_string(),
+        clause: "Default".to_string(),
+        statement_range: None,
+        ctes: Vec::new(),
+        referenced_objects: Vec::new(),
+        aliases: HashMap::new(),
+        expected_kinds: Vec::new(),
+        candidates: Vec::new(),
+        diagnostics: Vec::new(),
+        error_count: 0,
+    }
+}
+
+fn serialized_lsp_number(value: impl Serialize) -> Option<u32> {
+    serde_json::to_value(value).ok()?.as_u64()?.try_into().ok()
+}
+
+fn statement_range_for_node(source: &str, mut node: tree_sitter::Node<'_>) -> Option<Range> {
+    loop {
+        let kind = node.kind();
+        if kind == "statement" || kind.ends_with("_statement") {
+            let start = node.start_position();
+            let end = node.end_position();
+            return Some(Range {
+                start: crate::position::byte_position_to_lsp_position(
+                    source,
+                    Position::new(start.row as u32, start.column as u32),
+                ),
+                end: crate::position::byte_position_to_lsp_position(
+                    source,
+                    Position::new(end.row as u32, end.column as u32),
+                ),
+            });
+        }
+        node = node.parent()?;
+    }
+}
+
+fn expected_kinds_for_clause(clause: &str) -> Vec<String> {
+    let values: &[&str] = match clause {
+        "FromClause" | "JoinClause" => &["relation", "schema"],
+        "TableColumn" | "SelectClause" | "WhereClause" | "HavingClause" | "OrderByClause"
+        | "GroupByClause" | "UsingClause" => &["column", "function", "keyword"],
+        "DataTypeClause" => &["data-type"],
+        "ExpressionValueClause" | "InsertValueClause" | "CaseResultClause" => {
+            &["value", "function", "placeholder"]
+        }
+        _ => &["keyword", "relation", "column"],
+    };
+    values.iter().map(|value| (*value).to_string()).collect()
 }
 
 fn position_to_byte_offset(text: &str, position: Position) -> usize {
@@ -765,6 +1025,7 @@ impl LanguageServer for SqlLspServer {
         self.document_languages.remove(&uri);
         self.inferred_file_dialects.remove(&uri);
         self.inferred_file_schemas.remove(&uri);
+        self.analysis_cache.remove(&uri);
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -808,21 +1069,19 @@ impl LanguageServer for SqlLspServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params
-            .text_document_position_params
-            .text_document
-            .uri
-            .to_string();
+        let document_uri = params.text_document_position_params.text_document.uri;
+        let uri = document_uri.to_string();
         let position = params.text_document_position_params.position;
 
         let text = self.document_manager.get(&uri).unwrap_or_default();
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_position(&uri, &text, position);
-            if let Some(location) = dialect
+            if let Some(mut location) = dialect
                 .goto_definition(&text, position, schema.as_ref())
                 .await
             {
+                rewrite_current_document_location_uri(&mut location, &document_uri);
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
         }
@@ -831,14 +1090,16 @@ impl LanguageServer for SqlLspServer {
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let uri = params.text_document_position.text_document.uri.to_string();
+        let document_uri = params.text_document_position.text_document.uri;
+        let uri = document_uri.to_string();
         let position = params.text_document_position.position;
 
         let text = self.document_manager.get(&uri).unwrap_or_default();
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_position(&uri, &text, position);
-            let locations = dialect.references(&text, position, schema.as_ref()).await;
+            let mut locations = dialect.references(&text, position, schema.as_ref()).await;
+            rewrite_current_document_location_uris(&mut locations, &document_uri);
             return Ok(Some(locations));
         }
 
@@ -851,25 +1112,12 @@ impl LanguageServer for SqlLspServer {
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let formatted = dialect.format(&text).await;
-            let mut end_line = 0u32;
-            let mut end_character = 0u32;
-            for ch in text.chars() {
-                if ch == '\n' {
-                    end_line += 1;
-                    end_character = 0;
-                } else {
-                    end_character += 1;
-                }
-            }
             let range = Range {
                 start: Position {
                     line: 0,
                     character: 0,
                 },
-                end: Position {
-                    line: end_line,
-                    character: end_character,
-                },
+                end: lsp_position_at_end(&text),
             };
             return Ok(Some(vec![TextEdit {
                 range,
@@ -1028,11 +1276,14 @@ mod tests {
         calculate_schema_match_score, completed_sql_context_keyword_at_position,
         find_schema_by_qualifier, find_schema_by_table_reference,
         infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
     };
     use crate::schema::{Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
-    use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, CompletionTextEdit, Position};
+    use tower_lsp::lsp_types::{
+        CompletionItem, CompletionItemKind, CompletionTextEdit, Location, Position, Range, Url,
+    };
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
         Schema {
@@ -1048,6 +1299,45 @@ mod tests {
             functions: Vec::new(),
             source_uri: None,
         }
+    }
+
+    fn test_location(uri: &str) -> Location {
+        Location {
+            uri: Url::parse(uri).expect("valid test URI"),
+            range: Range::default(),
+        }
+    }
+
+    #[test]
+    fn rewrites_sql_and_json_current_document_sentinels() {
+        let document_uri = Url::parse("untitled:OxideStudio/%E6%9F%A5%E8%AF%A2-1").unwrap();
+        let mut locations = vec![
+            test_location("file:///current.sql"),
+            test_location("file:///current.json"),
+        ];
+
+        rewrite_current_document_location_uris(&mut locations, &document_uri);
+
+        assert!(locations
+            .iter()
+            .all(|location| location.uri == document_uri));
+    }
+
+    #[test]
+    fn preserves_schema_and_other_source_uris() {
+        let document_uri = Url::parse("file:///workspace/query.sql").unwrap();
+        let source_uri = Url::parse("file:///schemas/app.sql").unwrap();
+        let mut schema_fallback = test_location("file:///schema.sql");
+        let mut schema_source = Location {
+            uri: source_uri.clone(),
+            range: Range::default(),
+        };
+
+        rewrite_current_document_location_uri(&mut schema_fallback, &document_uri);
+        rewrite_current_document_location_uri(&mut schema_source, &document_uri);
+
+        assert_eq!(schema_fallback.uri.as_str(), "file:///schema.sql");
+        assert_eq!(schema_source.uri, source_uri);
     }
 
     #[test]

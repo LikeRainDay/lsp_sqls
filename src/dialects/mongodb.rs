@@ -195,10 +195,10 @@ impl Dialect for MongoDbDialect {
             return Vec::new();
         }
 
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
+        match serde_json::from_str::<serde_json::Value>(json) {
             Ok(value) => mongodb_command_hints(&value, json),
             Err(error) if error.is_eof() && is_trailing_incomplete_json(trimmed) => Vec::new(),
-            Err(error) => vec![json_error_diagnostic(error)],
+            Err(error) => vec![json_error_diagnostic(error, json)],
         }
     }
 
@@ -670,9 +670,11 @@ fn mongodb_command_hints(value: &serde_json::Value, source: &str) -> Vec<Diagnos
     diagnostics
 }
 
-fn json_error_diagnostic(error: serde_json::Error) -> Diagnostic {
+fn json_error_diagnostic(error: serde_json::Error, source: &str) -> Diagnostic {
     let line = error.line().saturating_sub(1) as u32;
-    let column = error.column().saturating_sub(1) as u32;
+    let byte_column = error.column().saturating_sub(1);
+    let source_line = source.split('\n').nth(line as usize).unwrap_or("");
+    let column = crate::position::byte_column_to_utf16_column(source_line, byte_column);
     Diagnostic {
         range: Range {
             start: Position {
@@ -704,7 +706,12 @@ fn hint_diagnostic(source: &str, message: &str) -> Diagnostic {
             },
             end: Position {
                 line: 0,
-                character: source.lines().next().unwrap_or("").len() as u32,
+                character: source
+                    .split('\n')
+                    .next()
+                    .unwrap_or("")
+                    .encode_utf16()
+                    .count() as u32,
             },
         },
         severity: Some(DiagnosticSeverity::HINT),
@@ -767,16 +774,18 @@ fn find_token_references(
             while let Some(offset) = line[search_from..].find(token) {
                 let start = search_from + offset;
                 let end = start + token.len();
+                let start_character = line[..start].encode_utf16().count() as u32;
+                let end_character = line[..end].encode_utf16().count() as u32;
                 matches.push(Location {
                     uri: uri.clone(),
                     range: Range {
                         start: Position {
                             line: line_index as u32,
-                            character: start as u32,
+                            character: start_character,
                         },
                         end: Position {
                             line: line_index as u32,
-                            character: end as u32,
+                            character: end_character,
                         },
                     },
                 });

@@ -24,7 +24,16 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(SqlLspServer::new);
+    let (service, socket) = LspService::build(SqlLspServer::new)
+        .custom_method(
+            "oxide/inlineCompletionContext",
+            SqlLspServer::inline_completion_context,
+        )
+        .custom_method(
+            "oxide/validateInlineCompletion",
+            SqlLspServer::validate_inline_completion,
+        )
+        .finish();
     tracing::info!("SQL LSP server initialized, starting service");
     Server::new(stdin, stdout, socket).serve(service).await;
     tracing::info!("SQL LSP server shutting down");

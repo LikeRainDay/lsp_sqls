@@ -1,5 +1,25 @@
 use tower_lsp::lsp_types::{Diagnostic, Position};
 
+/// Convert a byte-based position (as used by tree-sitter) to an LSP UTF-16
+/// position. The byte column is interpreted against the original source line.
+pub fn byte_position_to_lsp_position(source: &str, position: Position) -> Position {
+    let line = source.split('\n').nth(position.line as usize).unwrap_or("");
+
+    Position {
+        line: position.line,
+        character: byte_column_to_utf16_column(line, position.character as usize),
+    }
+}
+
+pub fn byte_column_to_utf16_column(line: &str, byte_column: usize) -> u32 {
+    let mut byte_column = byte_column.min(line.len());
+    while !line.is_char_boundary(byte_column) {
+        byte_column -= 1;
+    }
+
+    line[..byte_column].encode_utf16().count() as u32
+}
+
 /// Convert an LSP UTF-16 position to the byte-based column expected by tree-sitter.
 pub fn lsp_position_to_byte_position(source: &str, position: Position) -> Position {
     let mut last_line = "";
@@ -58,6 +78,10 @@ pub fn byte_position_at_end(source: &str) -> Position {
     Position { line, character }
 }
 
+pub fn lsp_position_at_end(source: &str) -> Position {
+    byte_position_to_lsp_position(source, byte_position_at_end(source))
+}
+
 pub fn diagnostic_reaches_position(diagnostic: &Diagnostic, position: Position) -> bool {
     diagnostic.range.end.line > position.line
         || (diagnostic.range.end.line == position.line
@@ -85,4 +109,48 @@ pub fn cursor_token_prefix(
         .trim_matches('"')
         .trim_matches('\'')
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_byte_columns_to_utf16_on_the_requested_line() {
+        let source = "SELECT 1;\nSELECT '😀中文', value";
+        let second_line = source.lines().nth(1).expect("second line");
+        let value_byte_column = second_line.find("value").expect("value column");
+
+        assert_eq!(
+            byte_position_to_lsp_position(
+                source,
+                Position {
+                    line: 1,
+                    character: value_byte_column as u32,
+                },
+            ),
+            Position {
+                line: 1,
+                character: second_line[..value_byte_column].encode_utf16().count() as u32,
+            }
+        );
+        assert_ne!(
+            value_byte_column as u32,
+            second_line[..value_byte_column].encode_utf16().count() as u32,
+            "the fixture must distinguish UTF-8 byte columns from UTF-16 columns"
+        );
+    }
+
+    #[test]
+    fn converts_eof_to_utf16_after_multiline_non_ascii_text() {
+        let source = "SELECT '中文';\nSELECT '😀'";
+
+        assert_eq!(
+            lsp_position_at_end(source),
+            Position {
+                line: 1,
+                character: "SELECT '😀'".encode_utf16().count() as u32,
+            }
+        );
+    }
 }

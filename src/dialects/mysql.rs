@@ -1,6 +1,7 @@
 use crate::dialect::Dialect;
 use crate::dialects::common;
 use crate::parser::SqlParser;
+use crate::placeholder::SqlPlaceholderDialect;
 use crate::schema::{Function, Schema};
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
@@ -20,7 +21,9 @@ impl Default for MysqlDialect {
 impl MysqlDialect {
     pub fn new() -> Self {
         Self {
-            parser: std::sync::Mutex::new(SqlParser::new()),
+            parser: std::sync::Mutex::new(SqlParser::new_with_placeholder_dialect(
+                SqlPlaceholderDialect::Mysql,
+            )),
         }
     }
 
@@ -1273,7 +1276,7 @@ impl Dialect for MysqlDialect {
                                     end: tower_lsp::lsp_types::Position {
                                         line: token.position.line,
                                         character: token.position.character
-                                            + token.text.len() as u32,
+                                            + token.text.encode_utf16().count() as u32,
                                     },
                                 },
                             });
@@ -1290,10 +1293,11 @@ impl Dialect for MysqlDialect {
         use sqlformat::{FormatOptions, Indent, QueryParams};
         let options = FormatOptions {
             indent: Indent::Spaces(2),
-            uppercase: true,
+            uppercase: Some(true),
             lines_between_queries: 1,
+            ..FormatOptions::default()
         };
-        sqlformat::format(sql, &QueryParams::None, options)
+        sqlformat::format(sql, &QueryParams::None, &options)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

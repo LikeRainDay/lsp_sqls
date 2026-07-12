@@ -1,4 +1,6 @@
 use crate::dialect::Dialect;
+use crate::dialects::common;
+use crate::position::lsp_position_at_end;
 use crate::schema::Schema;
 use async_trait::async_trait;
 use tower_lsp::lsp_types::{
@@ -49,10 +51,7 @@ impl Dialect for ElasticsearchEqlDialect {
                             line: 0,
                             character: 0,
                         },
-                        end: Position {
-                            line: 0,
-                            character: sql.len() as u32,
-                        },
+                        end: lsp_position_at_end(sql),
                     },
                     severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String("EQL001".to_string())),
@@ -233,7 +232,7 @@ impl Dialect for ElasticsearchEqlDialect {
 
     async fn format(&self, sql: &str) -> String {
         // EQL 格式化：保持基本格式
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        common::compact_sql_whitespace(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

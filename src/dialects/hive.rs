@@ -852,7 +852,7 @@ impl Dialect for HiveDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        common::compact_sql_whitespace(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

@@ -300,7 +300,7 @@ impl ElasticsearchDslDialect {
                     if key == field_name {
                         locations.push(Location {
                             uri: uri.clone(),
-                            range: parser.node_range(key_node),
+                            range: parser.node_range(key_node, source),
                         });
                     }
                 }
@@ -503,7 +503,7 @@ impl Dialect for ElasticsearchDslDialect {
                                     .unwrap_or_else(|_| {
                                         tower_lsp::lsp_types::Url::parse("file:///").unwrap()
                                     }),
-                                range: parser.node_range(node),
+                                range: parser.node_range(node, dsl),
                             });
                         }
                     }
@@ -556,7 +556,9 @@ impl Dialect for ElasticsearchDslDialect {
     async fn format(&self, sql: &str) -> String {
         // DSL 格式化：尝试美化 JSON
         // 这里简化处理，实际应该使用 JSON 格式化库
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        serde_json::from_str::<serde_json::Value>(sql)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .unwrap_or_else(|_| sql.to_string())
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
@@ -1062,7 +1064,7 @@ fn http_request_diagnostic(line: u32, text: &str, message: &str) -> Diagnostic {
             start: Position { line, character: 0 },
             end: Position {
                 line,
-                character: text.len() as u32,
+                character: text.encode_utf16().count() as u32,
             },
         },
         severity: Some(DiagnosticSeverity::ERROR),

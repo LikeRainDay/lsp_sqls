@@ -2,6 +2,7 @@
 //! DSL 是基于 JSON 的查询语言，使用 tree-sitter-json 进行解析
 //! 参考 sqls-server/sqls 的实现方式，保持与 SQL 解析器的一致性
 
+use crate::position::{byte_position_to_lsp_position, lsp_position_at_end};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 use tree_sitter::{Node, Parser, Tree};
 
@@ -83,10 +84,7 @@ impl DslParser {
                         line: 0,
                         character: 0,
                     },
-                    end: Position {
-                        line: 0,
-                        character: dsl.len() as u32,
-                    },
+                    end: lsp_position_at_end(dsl),
                 },
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: Some(NumberOrString::String("DSL_PARSE_ERROR".to_string())),
@@ -138,14 +136,20 @@ impl DslParser {
 
             diagnostics.push(Diagnostic {
                 range: Range {
-                    start: Position {
-                        line: start_point.row as u32,
-                        character: start_point.column as u32,
-                    },
-                    end: Position {
-                        line: end_point.row as u32,
-                        character: end_point.column as u32,
-                    },
+                    start: byte_position_to_lsp_position(
+                        source,
+                        Position {
+                            line: start_point.row as u32,
+                            character: start_point.column as u32,
+                        },
+                    ),
+                    end: byte_position_to_lsp_position(
+                        source,
+                        Position {
+                            line: end_point.row as u32,
+                            character: end_point.column as u32,
+                        },
+                    ),
                 },
                 severity: Some(if node.is_error() {
                     DiagnosticSeverity::ERROR
@@ -195,10 +199,7 @@ impl DslParser {
                             line: 0,
                             character: 0,
                         },
-                        end: Position {
-                            line: 0,
-                            character: json.len() as u32,
-                        },
+                        end: lsp_position_at_end(json),
                     },
                     severity: Some(DiagnosticSeverity::HINT),
                     code: Some(NumberOrString::String("DSL_HINT".to_string())),
@@ -271,7 +272,7 @@ impl DslParser {
 
                 if !found_valid_query {
                     // 如果 query 对象存在但没有找到有效的查询类型，给出警告
-                    let range = self.node_range(query_node);
+                    let range = self.node_range(query_node, json);
                     diagnostics.push(Diagnostic {
                         range,
                         severity: Some(DiagnosticSeverity::WARNING),
@@ -286,7 +287,7 @@ impl DslParser {
                 }
             } else if query_value.trim().is_empty() {
                 // query 字段存在但值为空
-                let range = self.node_range(query_node);
+                let range = self.node_range(query_node, json);
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Some(DiagnosticSeverity::WARNING),
@@ -421,18 +422,24 @@ impl DslParser {
     }
 
     /// 获取节点的范围
-    pub fn node_range(&self, node: Node) -> Range {
+    pub fn node_range(&self, node: Node, source: &str) -> Range {
         let start = node.start_position();
         let end = node.end_position();
         Range {
-            start: Position {
-                line: start.row as u32,
-                character: start.column as u32,
-            },
-            end: Position {
-                line: end.row as u32,
-                character: end.column as u32,
-            },
+            start: byte_position_to_lsp_position(
+                source,
+                Position {
+                    line: start.row as u32,
+                    character: start.column as u32,
+                },
+            ),
+            end: byte_position_to_lsp_position(
+                source,
+                Position {
+                    line: end.row as u32,
+                    character: end.column as u32,
+                },
+            ),
         }
     }
 
@@ -565,7 +572,7 @@ fn filter_trailing_incomplete_json_diagnostics(source: &str, diagnostics: &mut V
         return;
     }
 
-    let eof = crate::position::byte_position_at_end(source);
+    let eof = crate::position::lsp_position_at_end(source);
     diagnostics.retain(|diagnostic| !crate::position::diagnostic_reaches_position(diagnostic, eof));
 }
 
@@ -631,5 +638,47 @@ pub(crate) fn is_trailing_incomplete_json(source: &str) -> bool {
 impl Default for DslParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_node_ranges_use_utf16_columns() {
+        let source = "{\"中文😀\": true}";
+        let mut parser = DslParser::new();
+        let (tree, diagnostics) = parser.parse_with_tree(source);
+        assert!(diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Some(DiagnosticSeverity::ERROR)));
+
+        let tree = tree.expect("valid JSON tree");
+        let root = tree.root_node();
+        let object = root.named_child(0).expect("object");
+        let pair = object.named_child(0).expect("pair");
+        let key = pair.named_child(0).expect("key");
+        let range = parser.node_range(key, source);
+
+        assert_eq!(range.start.character, 1);
+        assert_eq!(
+            range.end.character,
+            1 + "\"中文😀\"".encode_utf16().count() as u32
+        );
+    }
+
+    #[test]
+    fn json_syntax_diagnostics_use_utf16_columns() {
+        let source = "{\"ok\": \"中文😀\", @}";
+        let mut parser = DslParser::new();
+        let diagnostics = parser.parse(source);
+        let diagnostic = diagnostics.first().expect("syntax diagnostic");
+        let error_prefix = "{\"ok\": \"中文😀\"";
+        let expected = error_prefix.encode_utf16().count() as u32;
+
+        assert_eq!(diagnostic.range.start.line, 0);
+        assert_eq!(diagnostic.range.start.character, expected);
+        assert_ne!(diagnostic.range.start.character, error_prefix.len() as u32);
     }
 }

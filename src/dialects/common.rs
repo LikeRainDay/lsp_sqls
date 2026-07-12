@@ -3,6 +3,132 @@ use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
 use std::collections::HashSet;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Position};
 
+fn dollar_quote_tag_at(source: &str, index: usize) -> Option<&str> {
+    let rest = source.get(index..)?;
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'$') {
+        return None;
+    }
+
+    let mut end = 1;
+    while end < bytes.len() {
+        let byte = bytes[end];
+        if byte == b'$' {
+            return Some(&rest[..=end]);
+        }
+        if end == 1 && !(byte == b'_' || byte.is_ascii_alphabetic()) {
+            return None;
+        }
+        if end > 1 && !(byte == b'_' || byte.is_ascii_alphanumeric()) {
+            return None;
+        }
+        end += 1;
+    }
+
+    None
+}
+
+fn flush_compact_space(output: &mut String, pending_space: &mut bool) {
+    if *pending_space
+        && !output.is_empty()
+        && output.chars().last().is_some_and(|ch| !ch.is_whitespace())
+    {
+        output.push(' ');
+    }
+    *pending_space = false;
+}
+
+/// Compact whitespace without changing quoted values, identifiers, comments,
+/// or PostgreSQL dollar-quoted bodies. This is intentionally conservative: it
+/// is a safe fallback formatter, not a SQL rewriter.
+pub(crate) fn compact_sql_whitespace(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut pending_space = false;
+    let mut index = 0usize;
+
+    while index < source.len() {
+        if source[index..].starts_with("--") {
+            flush_compact_space(&mut output, &mut pending_space);
+            let end = source[index..]
+                .find('\n')
+                .map(|relative| index + relative + 1)
+                .unwrap_or(source.len());
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+
+        if source[index..].starts_with("/*") {
+            flush_compact_space(&mut output, &mut pending_space);
+            let end = source[index + 2..]
+                .find("*/")
+                .map(|relative| index + relative + 4)
+                .unwrap_or(source.len());
+            output.push_str(&source[index..end]);
+            index = end;
+            pending_space = true;
+            continue;
+        }
+
+        if let Some(tag) = dollar_quote_tag_at(source, index) {
+            flush_compact_space(&mut output, &mut pending_space);
+            let body_start = index + tag.len();
+            let end = source[body_start..]
+                .find(tag)
+                .map(|relative| body_start + relative + tag.len())
+                .unwrap_or(source.len());
+            output.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+
+        let Some(ch) = source[index..].chars().next() else {
+            break;
+        };
+        if ch.is_whitespace() {
+            pending_space = true;
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            flush_compact_space(&mut output, &mut pending_space);
+            let start = index;
+            let closing = if ch == '[' { ']' } else { ch };
+            index += ch.len_utf8();
+            while index < source.len() {
+                let Some(quoted) = source[index..].chars().next() else {
+                    break;
+                };
+                index += quoted.len_utf8();
+
+                if quoted == '\\' && ch != '[' && index < source.len() {
+                    if let Some(escaped) = source[index..].chars().next() {
+                        index += escaped.len_utf8();
+                    }
+                    continue;
+                }
+
+                if quoted == closing {
+                    if source[index..].starts_with(closing) {
+                        index += closing.len_utf8();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            output.push_str(&source[start..index]);
+            continue;
+        }
+
+        flush_compact_space(&mut output, &mut pending_space);
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+
+    output.trim().to_string()
+}
+
 pub(crate) fn cursor_prefix(sql: &str, position: Position) -> String {
     let lines: Vec<&str> = sql.lines().collect();
     let line_text = lines.get(position.line as usize).unwrap_or(&"");
@@ -68,8 +194,7 @@ pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool
 
     let last_token = trimmed
         .split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')' | ',' | ';'))
-        .filter(|token| !token.is_empty())
-        .next_back()
+        .rfind(|token| !token.is_empty())
         .unwrap_or("")
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '[' | ']'));
     let last_token_upper = last_token.to_ascii_uppercase();
@@ -1132,6 +1257,26 @@ mod tests {
         assert_eq!(
             referenced_table_names(&parser, tree, sql),
             vec!["app.users".to_string(), "app.orders".to_string()]
+        );
+    }
+
+    #[test]
+    fn compact_formatting_preserves_literals_comments_and_dollar_quotes() {
+        let sql = "  SELECT   'a   b',  \"spaced  name\"  -- keep   comment\n  FROM   users  WHERE body = $tag$line  one\nline   two$tag$  /* block   comment */  ";
+
+        assert_eq!(
+            compact_sql_whitespace(sql),
+            "SELECT 'a   b', \"spaced  name\" -- keep   comment\nFROM users WHERE body = $tag$line  one\nline   two$tag$ /* block   comment */"
+        );
+    }
+
+    #[test]
+    fn compact_formatting_preserves_escaped_and_bracketed_content() {
+        assert_eq!(
+            compact_sql_whitespace(
+                "SELECT  'it''s  spaced',  `my  column`,  [also  spaced]  FROM  t"
+            ),
+            "SELECT 'it''s  spaced', `my  column`, [also  spaced] FROM t"
         );
     }
 }
