@@ -995,6 +995,11 @@ impl Dialect for PostgresDialect {
             }
         }
 
+        if let (Some(schema), Some(tree)) = (schema, parse_result.tree.as_ref()) {
+            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+            common::apply_column_aliases(&mut items, schema, &aliases);
+        }
+
         items
     }
 

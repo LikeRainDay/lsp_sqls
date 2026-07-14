@@ -157,8 +157,8 @@ async fn test_comprehensive_completion_scenarios() {
     assert!(
         items1
             .iter()
-            .any(|item| item.label.contains("users.") || item.label.contains("orders.")),
-        "Multi-table query WHERE should include table-prefixed columns"
+            .any(|item| item.label.starts_with("u.") || item.label.starts_with("o.")),
+        "Multi-table query WHERE should include alias-qualified columns"
     );
     // 应该有列名（不管是否有前缀）
     assert!(
@@ -278,8 +278,8 @@ async fn test_comprehensive_completion_scenarios() {
     assert!(
         items3
             .iter()
-            .any(|item| item.label.contains("users.") || item.label.contains("orders.")),
-        "Multi-table ORDER BY should suggest table-prefixed columns"
+            .any(|item| item.label.starts_with("u.") || item.label.starts_with("o.")),
+        "Multi-table ORDER BY should suggest alias-qualified columns"
     );
 
     // ==================== 场景4: 单表 GROUP BY 子句 ====================

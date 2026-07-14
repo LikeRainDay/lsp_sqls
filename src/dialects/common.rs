@@ -1,6 +1,7 @@
 use crate::parser::SqlParser;
 use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
-use std::collections::HashSet;
+use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Position};
 
 fn dollar_quote_tag_at(source: &str, index: usize) -> Option<&str> {
@@ -700,7 +701,7 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
     };
 
     CompletionItem {
-        label,
+        label: label.clone(),
         kind: Some(CompletionItemKind::FIELD),
         detail: Some(detail),
         documentation: column.documentation().map(Documentation::String),
@@ -708,7 +709,7 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         preselect: None,
         sort_text: Some(completion_sort_text("2", &column.name)),
         filter_text: Some(column.name.clone()),
-        insert_text: Some(column.name.clone()),
+        insert_text: Some(label),
         insert_text_format: None,
         insert_text_mode: None,
         text_edit: None,
@@ -872,26 +873,196 @@ pub(crate) fn add_schema_columns(
     prefix: &str,
     sort_prefix: &str,
 ) {
-    for table in &schema.tables {
-        if !table_is_referenced(schema, table, referenced_tables) {
-            continue;
+    let candidate_tables = schema
+        .tables
+        .iter()
+        .filter(|table| table_is_referenced(schema, table, referenced_tables))
+        .collect::<Vec<_>>();
+    let mut column_sources = HashMap::<String, usize>::new();
+    for table in &candidate_tables {
+        let mut table_columns = HashSet::new();
+        for column in &table.columns {
+            let normalized = column.name.to_ascii_lowercase();
+            if table_columns.insert(normalized.clone()) {
+                *column_sources.entry(normalized).or_default() += 1;
+            }
         }
+    }
+    let mut seen_sources = HashSet::new();
+
+    for (table_order, table) in candidate_tables.into_iter().enumerate() {
+        let relation_order = referenced_tables
+            .iter()
+            .position(|reference| table_matches(schema, table, reference))
+            .unwrap_or(table_order);
 
         for column in &table.columns {
-            if !prefix.is_empty() && !column.name.to_lowercase().starts_with(prefix) {
+            let Some(match_rank) = identifier_match_rank(&column.name, prefix) else {
+                continue;
+            };
+            let source_key = format!(
+                "{}\u{0}{}\u{0}{}",
+                schema.database.to_ascii_lowercase(),
+                table.name.to_ascii_lowercase(),
+                column.name.to_ascii_lowercase()
+            );
+            if !seen_sources.insert(source_key) {
                 continue;
             }
 
-            let table_name = if use_table_prefix {
+            let is_ambiguous = column_sources
+                .get(&column.name.to_ascii_lowercase())
+                .copied()
+                .unwrap_or_default()
+                > 1;
+            let table_name = if use_table_prefix || (referenced_tables.is_empty() && is_ambiguous) {
                 Some(table.name.as_str())
             } else {
                 None
             };
             let mut item = create_column_item(column, table_name);
-            set_completion_sort_text(&mut item, sort_prefix, &column.name);
+            item.detail = Some(format!(
+                "Column: {}.{}.{} ({})",
+                schema.database, table.name, column.name, column.data_type
+            ));
+            item.data = Some(json!({
+                "oxide": {
+                    "kind": "column",
+                    "schema": schema.database,
+                    "table": table.name,
+                    "column": column.name,
+                }
+            }));
+            item.sort_text = Some(format!(
+                "{}:{:02}:{:04}:{}:{}",
+                sort_prefix,
+                match_rank,
+                relation_order,
+                column.name.to_ascii_lowercase(),
+                table.name.to_ascii_lowercase()
+            ));
             items.push(item);
         }
     }
+}
+
+fn identifier_match_rank(candidate: &str, prefix: &str) -> Option<u8> {
+    if prefix.is_empty() {
+        return Some(0);
+    }
+
+    let candidate_lower = candidate.to_ascii_lowercase();
+    let prefix_lower = prefix.to_ascii_lowercase();
+    if candidate_lower == prefix_lower {
+        return Some(0);
+    }
+    if candidate_lower.starts_with(&prefix_lower) {
+        return Some(1);
+    }
+
+    let abbreviation = identifier_abbreviation(candidate);
+    if abbreviation.starts_with(&prefix_lower) {
+        return Some(2);
+    }
+    is_subsequence(&prefix_lower, &candidate_lower).then_some(3)
+}
+
+fn identifier_abbreviation(candidate: &str) -> String {
+    let mut abbreviation = String::new();
+    let mut previous_is_separator = true;
+    let mut previous_is_lowercase = false;
+    for ch in candidate.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            previous_is_separator = true;
+            previous_is_lowercase = false;
+            continue;
+        }
+        if previous_is_separator || (previous_is_lowercase && ch.is_ascii_uppercase()) {
+            abbreviation.push(ch.to_ascii_lowercase());
+        }
+        previous_is_separator = false;
+        previous_is_lowercase = ch.is_ascii_lowercase();
+    }
+    abbreviation
+}
+
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut needle_chars = needle.chars();
+    let mut next = needle_chars.next();
+    for ch in haystack.chars() {
+        if next == Some(ch) {
+            next = needle_chars.next();
+            if next.is_none() {
+                return true;
+            }
+        }
+    }
+    next.is_none()
+}
+
+pub(crate) fn apply_column_aliases(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    aliases: &HashMap<String, String>,
+) {
+    if aliases.is_empty() {
+        return;
+    }
+
+    let mut expanded = Vec::with_capacity(items.len());
+    for item in items.drain(..) {
+        let Some(source) = completion_column_source(&item) else {
+            expanded.push(item);
+            continue;
+        };
+        let matching_aliases = aliases
+            .iter()
+            .filter(|(_, reference)| {
+                SqlParser::table_name_matches(reference, &source.schema, &source.table)
+                    && source.schema.eq_ignore_ascii_case(&schema.database)
+            })
+            .map(|(alias, _)| alias.clone())
+            .collect::<Vec<_>>();
+        let mut matching_aliases = matching_aliases;
+        matching_aliases.sort_by_key(|alias| alias.to_ascii_lowercase());
+
+        let is_qualified = item.label != source.column;
+        if matching_aliases.is_empty() || (!is_qualified && matching_aliases.len() == 1) {
+            expanded.push(item);
+            continue;
+        }
+
+        for alias in matching_aliases {
+            let mut aliased = item.clone();
+            let label = format!("{}.{}", alias, source.column);
+            aliased.label = label.clone();
+            aliased.insert_text = Some(label);
+            aliased.sort_text = aliased
+                .sort_text
+                .as_ref()
+                .map(|sort_text| format!("{sort_text}:{}", alias.to_ascii_lowercase()));
+            expanded.push(aliased);
+        }
+    }
+    *items = expanded;
+}
+
+struct CompletionColumnSource {
+    schema: String,
+    table: String,
+    column: String,
+}
+
+fn completion_column_source(item: &CompletionItem) -> Option<CompletionColumnSource> {
+    let source = item.data.as_ref()?.get("oxide")?;
+    if source.get("kind")?.as_str()? != "column" {
+        return None;
+    }
+    Some(CompletionColumnSource {
+        schema: source.get("schema")?.as_str()?.to_string(),
+        table: source.get("table")?.as_str()?.to_string(),
+        column: source.get("column")?.as_str()?.to_string(),
+    })
 }
 
 pub(crate) fn add_schema_using_columns(
@@ -1163,12 +1334,20 @@ mod tests {
                 },
                 Table {
                     name: "orders".to_string(),
-                    columns: vec![Column {
-                        name: "total".to_string(),
-                        data_type: "numeric".to_string(),
-                        nullable: false,
-                        ..Default::default()
-                    }],
+                    columns: vec![
+                        Column {
+                            name: "id".to_string(),
+                            data_type: "integer".to_string(),
+                            nullable: false,
+                            ..Default::default()
+                        },
+                        Column {
+                            name: "total".to_string(),
+                            data_type: "numeric".to_string(),
+                            nullable: false,
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
                 },
             ],
@@ -1232,7 +1411,83 @@ mod tests {
             .map(|item| item.label.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(labels, vec!["users.id", "users.name", "orders.total"]);
+        assert_eq!(
+            labels,
+            vec!["users.id", "users.name", "orders.id", "orders.total"]
+        );
+        assert_eq!(
+            prefixed_items
+                .iter()
+                .map(|item| item.insert_text.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("users.id"),
+                Some("users.name"),
+                Some("orders.id"),
+                Some("orders.total")
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_columns_disambiguate_duplicate_names_before_from() {
+        let schema = test_schema();
+        let mut items = Vec::new();
+        add_schema_columns(&mut items, &schema, &[], false, "id", "0");
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["users.id", "orders.id"]
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.insert_text.as_deref() == Some(item.label.as_str())));
+        assert_ne!(items[0].sort_text, items[1].sort_text);
+        assert!(items.iter().all(|item| item.data.is_some()));
+    }
+
+    #[test]
+    fn schema_columns_rank_abbreviation_and_fuzzy_matches_after_prefixes() {
+        assert_eq!(identifier_match_rank("user_id", "ui"), Some(2));
+        assert_eq!(identifier_match_rank("created_at", "cat"), Some(3));
+        assert_eq!(identifier_match_rank("account_id", "zzz"), None);
+    }
+
+    #[test]
+    fn aliased_join_columns_use_aliases_for_label_and_insertion() {
+        let schema = test_schema();
+        let mut items = Vec::new();
+        add_schema_columns(
+            &mut items,
+            &schema,
+            &["users".to_string(), "orders".to_string()],
+            true,
+            "id",
+            "0",
+        );
+        let aliases = HashMap::from([
+            ("u".to_string(), "users".to_string()),
+            ("o".to_string(), "orders".to_string()),
+        ]);
+        apply_column_aliases(&mut items, &schema, &aliases);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u.id", "o.id"]
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.insert_text.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("u.id"), Some("o.id")]
+        );
     }
 
     #[test]

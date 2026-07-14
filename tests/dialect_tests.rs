@@ -197,8 +197,8 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
     assert!(
         join_items
             .iter()
-            .any(|item| item.label == "users.id" || item.label == "orders.order_id"),
-        "multi-table WHERE should qualify column labels"
+            .any(|item| item.label == "u.id" || item.label == "o.order_id"),
+        "multi-table WHERE should qualify column labels with query aliases"
     );
 
     let alias_sql = "SELECT u. FROM users u";
@@ -409,7 +409,13 @@ async fn test_postgres_completion_keeps_relation_targets_separate_from_column_ta
         .iter()
         .find(|item| item.label == "id")
         .expect("WHERE completion should include columns from the selected table");
-    assert_eq!(id_column.sort_text.as_deref(), Some("0:id"));
+    assert!(
+        id_column
+            .sort_text
+            .as_deref()
+            .is_some_and(|sort_text| sort_text.starts_with("0:")),
+        "column relevance should retain the column priority bucket: {id_column:?}"
+    );
     assert!(
         !where_items
             .iter()
@@ -631,8 +637,8 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
         .await;
 
     assert!(
-        join_items.iter().any(|item| item.label == "orders.user_id"),
-        "multi-table SELECT should qualify and include referenced table columns"
+        join_items.iter().any(|item| item.label == "o.user_id"),
+        "multi-table SELECT should qualify referenced columns with query aliases"
     );
 
     let where_prefix_sql = "SELECT * FROM orders WHERE us";
@@ -842,6 +848,60 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
         !on_alias_items.iter().any(|item| item.label == "order_id"),
         "JOIN ON alias member completion should stay scoped to the aliased table"
     );
+}
+
+#[tokio::test]
+async fn test_sql_completion_disambiguates_same_named_columns_before_from() {
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "public".to_string(),
+        tables: ["users", "orders"]
+            .into_iter()
+            .map(|name| Table {
+                name: name.to_string(),
+                columns: vec![Column {
+                    name: "id".to_string(),
+                    data_type: "integer".to_string(),
+                    nullable: false,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .collect(),
+        functions: vec![],
+        source_uri: None,
+    };
+    let sql = "SELECT id";
+    let position = tower_lsp::lsp_types::Position {
+        line: 0,
+        character: sql.len() as u32,
+    };
+
+    let postgres_items = PostgresDialect::new()
+        .completion(sql, position, Some(&schema))
+        .await;
+    let mysql_items = MysqlDialect::new()
+        .completion(sql, position, Some(&schema))
+        .await;
+
+    for items in [&postgres_items, &mysql_items] {
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.label.ends_with(".id"))
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["users.id", "orders.id"]
+        );
+        assert!(
+            !items.iter().any(|item| item.label == "id"),
+            "ambiguous columns must not be presented as duplicate unqualified labels: {items:?}"
+        );
+        assert!(items
+            .iter()
+            .filter(|item| item.label.ends_with(".id"))
+            .all(|item| item.insert_text.as_deref() == Some(item.label.as_str())));
+    }
 }
 
 #[tokio::test]
