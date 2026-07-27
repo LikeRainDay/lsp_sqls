@@ -831,7 +831,7 @@ impl Dialect for ClickHouseDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        common::compact_sql_whitespace(sql)
+        common::format_sql_pretty(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

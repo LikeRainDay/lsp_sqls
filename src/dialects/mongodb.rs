@@ -1,4 +1,5 @@
 use crate::dialect::Dialect;
+use crate::dialects::common;
 use crate::parser::dsl::is_trailing_incomplete_json;
 use crate::schema::{Column, Schema, Table};
 use async_trait::async_trait;
@@ -283,11 +284,22 @@ impl Dialect for MongoDbDialect {
 
         for table in &schema.tables {
             if table.name == token {
-                return schema_location(table.source_location.as_ref(), "file:///schema.json");
+                return common::metadata_location(
+                    table.source_location.as_ref(),
+                    schema.source_uri.as_ref(),
+                    "file:///schema.json",
+                );
             }
 
             if let Some(column) = table.columns.iter().find(|column| column.name == token) {
-                return schema_location(column.source_location.as_ref(), "file:///schema.json");
+                return common::metadata_location(
+                    column
+                        .source_location
+                        .as_ref()
+                        .or(table.source_location.as_ref()),
+                    schema.source_uri.as_ref(),
+                    "file:///schema.json",
+                );
             }
         }
 
@@ -743,22 +755,6 @@ fn token_at_position(text: &str, position: Position) -> String {
 
 fn is_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
-}
-
-fn schema_location(
-    source_location: Option<&(String, u32)>,
-    fallback_uri: &str,
-) -> Option<Location> {
-    let (uri, line) = source_location
-        .cloned()
-        .unwrap_or_else(|| (fallback_uri.to_string(), 0));
-    Some(Location {
-        uri: tower_lsp::lsp_types::Url::parse(&uri).ok()?,
-        range: Range {
-            start: Position { line, character: 0 },
-            end: Position { line, character: 0 },
-        },
-    })
 }
 
 fn find_token_references(

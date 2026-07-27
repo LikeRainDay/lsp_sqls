@@ -1134,14 +1134,12 @@ impl Dialect for PostgresDialect {
                 if is_table {
                     if let Some(schema) = schema {
                         let table_ref = SqlParser::normalize_identifier(&node_text);
-                        if Self::find_table_by_reference(schema, &table_ref).is_some() {
-                            return Some(Location {
-                                uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                    .unwrap_or_else(|_| {
-                                        tower_lsp::lsp_types::Url::parse("file:///").unwrap()
-                                    }),
-                                range: parser.node_range(node),
-                            });
+                        if let Some(table) = Self::find_table_by_reference(schema, &table_ref) {
+                            return common::metadata_location(
+                                table.source_location.as_ref(),
+                                schema.source_uri.as_ref(),
+                                "file:///schema.sql",
+                            );
                         }
                     }
                 }
@@ -1164,26 +1162,35 @@ impl Dialect for PostgresDialect {
 
                         for table in &schema.tables {
                             if let Some(ref tname) = table_name {
-                                if Self::table_matches(schema, table, tname)
-                                    && table.columns.iter().any(|c| c.name == column_name)
-                                {
-                                    return Some(Location {
-                                        uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                            .unwrap_or_else(|_| {
-                                                tower_lsp::lsp_types::Url::parse("file:///")
-                                                    .unwrap()
-                                            }),
-                                        range: parser.node_range(node),
-                                    });
+                                if Self::table_matches(schema, table, tname) {
+                                    if let Some(column) = table
+                                        .columns
+                                        .iter()
+                                        .find(|column| column.name == column_name)
+                                    {
+                                        return common::metadata_location(
+                                            column
+                                                .source_location
+                                                .as_ref()
+                                                .or(table.source_location.as_ref()),
+                                            schema.source_uri.as_ref(),
+                                            "file:///schema.sql",
+                                        );
+                                    }
                                 }
-                            } else if table.columns.iter().any(|c| c.name == column_name) {
-                                return Some(Location {
-                                    uri: tower_lsp::lsp_types::Url::parse("file:///schema.sql")
-                                        .unwrap_or_else(|_| {
-                                            tower_lsp::lsp_types::Url::parse("file:///").unwrap()
-                                        }),
-                                    range: parser.node_range(node),
-                                });
+                            } else if let Some(column) = table
+                                .columns
+                                .iter()
+                                .find(|column| column.name == column_name)
+                            {
+                                return common::metadata_location(
+                                    column
+                                        .source_location
+                                        .as_ref()
+                                        .or(table.source_location.as_ref()),
+                                    schema.source_uri.as_ref(),
+                                    "file:///schema.sql",
+                                );
                             }
                         }
                     }
@@ -1259,7 +1266,7 @@ impl Dialect for PostgresDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        common::compact_sql_whitespace(sql)
+        common::format_sql_pretty(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

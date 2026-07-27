@@ -1,4 +1,5 @@
 use crate::dialect::Dialect;
+use crate::dialects::common;
 use crate::parser::dsl::DslParser;
 use crate::schema::Schema;
 use async_trait::async_trait;
@@ -346,6 +347,21 @@ impl Dialect for ElasticsearchDslDialect {
         position: Position,
         schema: Option<&Schema>,
     ) -> Vec<CompletionItem> {
+        // Console documents may expose mappings for many indices. Once the
+        // request path names an index, completion must not mix identically
+        // named fields from unrelated mappings.
+        let scoped_schema = elasticsearch_index_at_position(dsl, position).and_then(|index| {
+            let schema = schema?;
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| table.name.eq_ignore_ascii_case(&index))?
+                .clone();
+            let mut scoped = schema.clone();
+            scoped.tables = vec![table];
+            Some(scoped)
+        });
+        let schema = scoped_schema.as_ref().or(schema);
         let prefix = crate::position::cursor_token_prefix(dsl, position, is_token_char);
         let hint = elasticsearch_completion_context(dsl, position);
         let quoted_insert = !hint.inside_string;
@@ -494,17 +510,28 @@ impl Dialect for ElasticsearchDslDialect {
                 if !field_name.is_empty() {
                     // 如果是索引名或字段名，在 schema 中查找
                     if let Some(schema) = schema {
-                        if schema.tables.iter().any(|table| {
-                            table.name == field_name
-                                || table.columns.iter().any(|column| column.name == field_name)
-                        }) {
-                            return Some(Location {
-                                uri: tower_lsp::lsp_types::Url::parse("file:///schema.json")
-                                    .unwrap_or_else(|_| {
-                                        tower_lsp::lsp_types::Url::parse("file:///").unwrap()
-                                    }),
-                                range: parser.node_range(node, dsl),
-                            });
+                        for table in &schema.tables {
+                            if table.name == field_name {
+                                return common::metadata_location(
+                                    table.source_location.as_ref(),
+                                    schema.source_uri.as_ref(),
+                                    "file:///schema.json",
+                                );
+                            }
+                            if let Some(column) = table
+                                .columns
+                                .iter()
+                                .find(|column| column.name == field_name)
+                            {
+                                return common::metadata_location(
+                                    column
+                                        .source_location
+                                        .as_ref()
+                                        .or(table.source_location.as_ref()),
+                                    schema.source_uri.as_ref(),
+                                    "file:///schema.json",
+                                );
+                            }
                         }
                     }
                 }
@@ -939,6 +966,43 @@ fn token_at_position(text: &str, position: Position) -> String {
 
 fn is_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')
+}
+
+fn elasticsearch_index_at_position(source: &str, position: Position) -> Option<String> {
+    let mut active_path = None;
+    for (line_index, line) in source.lines().enumerate() {
+        if line_index > position.line as usize {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some((method, rest)) = trimmed.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if !matches!(
+            method.to_ascii_uppercase().as_str(),
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH"
+        ) {
+            continue;
+        }
+        active_path = rest.split_whitespace().next().map(ToString::to_string);
+    }
+
+    let path = active_path?;
+    let index = path
+        .trim_matches(|character| character == '"' || character == '\'')
+        .trim_start_matches('/')
+        .split(['/', '?', '#'])
+        .next()?
+        .trim();
+    if index.is_empty()
+        || index.starts_with('_')
+        || index
+            .chars()
+            .any(|character| matches!(character, ',' | '*' | '$' | '{' | '}'))
+    {
+        return None;
+    }
+    Some(index.to_string())
 }
 
 #[derive(Debug)]

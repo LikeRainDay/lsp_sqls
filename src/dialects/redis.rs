@@ -295,15 +295,11 @@ impl Dialect for RedisDialect {
         items
     }
 
-    async fn hover(
-        &self,
-        sql: &str,
-        _position: Position,
-        schema: Option<&Schema>,
-    ) -> Option<Hover> {
+    async fn hover(&self, sql: &str, position: Position, schema: Option<&Schema>) -> Option<Hover> {
+        let token = redis_token_at_position(sql, position);
         if let Some(schema) = schema {
             for table in &schema.tables {
-                if sql.contains(&table.name) {
+                if table.name == token {
                     return Some(Hover {
                         contents: tower_lsp::lsp_types::HoverContents::Scalar(
                             MarkedString::String(format!(
@@ -322,20 +318,32 @@ impl Dialect for RedisDialect {
 
     async fn goto_definition(
         &self,
-        _sql: &str,
-        _position: Position,
-        _schema: Option<&Schema>,
+        sql: &str,
+        position: Position,
+        schema: Option<&Schema>,
     ) -> Option<Location> {
-        None
+        let token = redis_token_at_position(sql, position);
+        let schema = schema?;
+        let table = schema.tables.iter().find(|table| table.name == token)?;
+        common::metadata_location(
+            table.source_location.as_ref(),
+            schema.source_uri.as_ref(),
+            "file:///schema.redis",
+        )
     }
 
     async fn references(
         &self,
-        _sql: &str,
-        _position: Position,
+        sql: &str,
+        position: Position,
         _schema: Option<&Schema>,
     ) -> Vec<Location> {
-        Vec::new()
+        let token = redis_token_at_position(sql, position);
+        if token.is_empty() {
+            return Vec::new();
+        }
+        let uri = tower_lsp::lsp_types::Url::parse("file:///current.sql").unwrap();
+        token_references(sql, &token, &uri)
     }
 
     async fn format(&self, sql: &str) -> String {
@@ -459,4 +467,58 @@ fn is_redis_key_argument(command: &str, arg_index: usize) -> bool {
 
 fn is_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '@')
+}
+
+fn redis_token_at_position(source: &str, position: Position) -> String {
+    let offset = byte_offset_at_position(source, position).min(source.len());
+    let mut start = offset;
+    while start > 0 {
+        let Some(ch) = source[..start].chars().next_back() else {
+            break;
+        };
+        if !is_token_char(ch) {
+            break;
+        }
+        start -= ch.len_utf8();
+    }
+    let mut end = offset;
+    while end < source.len() {
+        let Some(ch) = source[end..].chars().next() else {
+            break;
+        };
+        if !is_token_char(ch) {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    source[start..end].to_string()
+}
+
+fn token_references(source: &str, token: &str, uri: &tower_lsp::lsp_types::Url) -> Vec<Location> {
+    source
+        .lines()
+        .enumerate()
+        .flat_map(|(line_index, line)| {
+            line.match_indices(token).filter_map(move |(start, value)| {
+                let before = line[..start].chars().next_back();
+                let after = line[start + value.len()..].chars().next();
+                if before.is_some_and(is_token_char) || after.is_some_and(is_token_char) {
+                    return None;
+                }
+                Some(Location {
+                    uri: uri.clone(),
+                    range: Range {
+                        start: Position {
+                            line: line_index as u32,
+                            character: line[..start].encode_utf16().count() as u32,
+                        },
+                        end: Position {
+                            line: line_index as u32,
+                            character: line[..start + value.len()].encode_utf16().count() as u32,
+                        },
+                    },
+                })
+            })
+        })
+        .collect()
 }

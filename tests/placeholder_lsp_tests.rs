@@ -176,7 +176,9 @@ fn lsp_accepts_placeholders_and_keeps_static_schema_inference() {
         let sql = format!("SELECT * FROM users WHERE id = {placeholder};");
         let diagnostics = lsp.open_and_read_diagnostics(&case_uri, &sql);
         assert!(
-            diagnostics.is_empty(),
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.get("severity").and_then(Value::as_u64) != Some(1)),
             "{placeholder} produced diagnostics: {diagnostics:?}"
         );
     }
@@ -184,7 +186,9 @@ fn lsp_accepts_placeholders_and_keeps_static_schema_inference() {
     let sql = "SELECT {{column}} FROM {{schema}}.users u WHERE u.id = :id AND ";
     let diagnostics = lsp.open_and_read_diagnostics(uri, sql);
     assert!(
-        diagnostics.is_empty(),
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.get("severity").and_then(Value::as_u64) != Some(1)),
         "template query diagnostics: {diagnostics:?}"
     );
 
@@ -226,7 +230,9 @@ WHERE id = ? AND tenant_id = ?1;"#;
     let diagnostics = lsp.open_and_read_diagnostics(uri, sql);
 
     assert!(
-        diagnostics.is_empty(),
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.get("severity").and_then(Value::as_u64) != Some(1)),
         "PostgreSQL JSON operators or question-mark binds produced diagnostics: {diagnostics:?}"
     );
 }

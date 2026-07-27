@@ -3,10 +3,11 @@ use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
 use crate::placeholder::SqlPlaceholderDialect;
 use crate::position::lsp_position_at_end;
-use crate::schema::{Schema, SchemaId, SchemaManager};
+use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
+use crate::token::Keywords;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -201,13 +202,14 @@ impl SqlLspServer {
     }
 
     fn get_schema_for_position(&self, uri: &str, text: &str, position: Position) -> Option<Schema> {
-        schema_for_table_column_at_position(&self.schema_manager, text, position)
+        let schema = schema_for_table_column_at_position(&self.schema_manager, text, position)
             .or_else(|| {
                 schema_qualifier_at_position(text, position).and_then(|qualifier| {
                     find_schema_by_qualifier(&self.schema_manager, &qualifier)
                 })
             })
-            .or_else(|| self.get_schema_for_file(uri))
+            .or_else(|| self.get_schema_for_file(uri));
+        schema.map(|schema| augment_schema_with_local_relations(schema, text, position, uri))
     }
 
     /// 将 LSP Position 转换为字符串字节偏移
@@ -224,7 +226,7 @@ impl SqlLspServer {
 
             if let Some(dialect) = self.get_dialect_for_file(&uri) {
                 let schema = self.get_schema_for_file(&uri);
-                let diagnostics = dialect.parse(&text, schema.as_ref()).await;
+                let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
                 self.client
                     .publish_diagnostics(parsed_uri, diagnostics, None)
                     .await;
@@ -297,7 +299,7 @@ impl SqlLspServer {
                 kind: item.kind.and_then(serialized_lsp_number),
             })
             .collect();
-        let raw_diagnostics = dialect.parse(&text, schema.as_ref()).await;
+        let raw_diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
         let error_count = raw_diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
@@ -368,7 +370,7 @@ impl SqlLspServer {
             return Ok(Vec::new());
         };
         let schema = self.get_schema_for_file(&uri);
-        Ok(dialect.parse(&params.text, schema.as_ref()).await)
+        Ok(document_diagnostics(&*dialect, &params.text, schema.as_ref()).await)
     }
 }
 
@@ -820,9 +822,50 @@ impl LanguageServer for SqlLspServer {
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
+                    ..Default::default()
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR_REWRITE,
+                            CodeActionKind::SOURCE,
+                        ]),
+                        resolve_provider: Some(false),
+                        ..Default::default()
+                    },
+                )),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: semantic_tokens_legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        resolve_provider: Some(false),
+                        ..Default::default()
+                    },
+                ))),
                 diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
                     DiagnosticOptions {
                         identifier: Some("sql-lsp".to_string()),
@@ -845,6 +888,29 @@ impl LanguageServer for SqlLspServer {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> Result<DocumentDiagnosticReportResult> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let diagnostics = if let Some(dialect) = self.get_dialect_for_file(&uri) {
+            let schema = self.get_schema_for_file(&uri);
+            document_diagnostics(&*dialect, &text, schema.as_ref()).await
+        } else {
+            Vec::new()
+        };
+        Ok(DocumentDiagnosticReportResult::Report(
+            DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+                related_documents: None,
+                full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                    result_id: None,
+                    items: diagnostics,
+                },
+            }),
+        ))
     }
 
     async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
@@ -964,7 +1030,7 @@ impl LanguageServer for SqlLspServer {
         // 发布诊断
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_file(&uri);
-            let diagnostics = dialect.parse(&text, schema.as_ref()).await;
+            let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
             self.client
                 .publish_diagnostics(params.text_document.uri, diagnostics, None)
                 .await;
@@ -992,7 +1058,8 @@ impl LanguageServer for SqlLspServer {
                     // 重新解析并发布诊断
                     if let Some(dialect) = self.get_dialect_for_file(&uri) {
                         let schema = self.get_schema_for_file(&uri);
-                        let diagnostics = dialect.parse(&current_text, schema.as_ref()).await;
+                        let diagnostics =
+                            document_diagnostics(&*dialect, &current_text, schema.as_ref()).await;
                         self.client
                             .publish_diagnostics(
                                 params.text_document.uri.clone(),
@@ -1009,7 +1076,7 @@ impl LanguageServer for SqlLspServer {
 
                 if let Some(dialect) = self.get_dialect_for_file(&uri) {
                     let schema = self.get_schema_for_file(&uri);
-                    let diagnostics = dialect.parse(&text, schema.as_ref()).await;
+                    let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
                     self.client
                         .publish_diagnostics(params.text_document.uri.clone(), diagnostics, None)
                         .await;
@@ -1100,10 +1167,232 @@ impl LanguageServer for SqlLspServer {
             let schema = self.get_schema_for_position(&uri, &text, position);
             let mut locations = dialect.references(&text, position, schema.as_ref()).await;
             rewrite_current_document_location_uris(&mut locations, &document_uri);
+            if locations.is_empty() {
+                return Ok(Some(locations));
+            }
+
+            if let Some(identifier) = identifier_at_position(&text, position, dialect.name()) {
+                let schema_id = schema.as_ref().map(|schema| schema.id);
+                for (candidate_uri, candidate_text) in self.document_manager.entries() {
+                    if candidate_uri == uri {
+                        continue;
+                    }
+                    let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
+                        continue;
+                    };
+                    if candidate_dialect.name() != dialect.name() {
+                        continue;
+                    }
+                    if let Some(expected_schema_id) = schema_id {
+                        if self
+                            .get_schema_for_file(&candidate_uri)
+                            .is_none_or(|candidate_schema| {
+                                candidate_schema.id != expected_schema_id
+                            })
+                        {
+                            continue;
+                        }
+                    }
+                    let Ok(candidate_url) = Url::parse(&candidate_uri) else {
+                        continue;
+                    };
+                    locations.extend(identifier_references(
+                        &candidate_text,
+                        &identifier,
+                        dialect.name(),
+                        &candidate_url,
+                    ));
+                }
+                deduplicate_locations(&mut locations);
+            }
             return Ok(Some(locations));
         }
 
         Ok(None)
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some((routine_name, active_parameter)) = routine_call_at_position(&text, position)
+        else {
+            return Ok(None);
+        };
+        let Some(schema) = self.get_schema_for_position(&uri, &text, position) else {
+            return Ok(None);
+        };
+        let signatures = schema
+            .functions
+            .iter()
+            .filter(|function| function.name.eq_ignore_ascii_case(&routine_name))
+            .map(|function| SignatureInformation {
+                label: function.signature(),
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: function.markdown_documentation(),
+                })),
+                parameters: Some(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| ParameterInformation {
+                            label: ParameterLabel::Simple(if parameter.name.trim().is_empty() {
+                                parameter.data_type.clone()
+                            } else {
+                                format!("{} {}", parameter.name, parameter.data_type)
+                            }),
+                            documentation: None,
+                        })
+                        .collect(),
+                ),
+                active_parameter: Some(active_parameter),
+            })
+            .collect::<Vec<_>>();
+        if signatures.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(SignatureHelp {
+            signatures,
+            active_signature: Some(0),
+            active_parameter: Some(active_parameter),
+        }))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some(dialect) = self.get_dialect_for_file(&uri) else {
+            return Ok(None);
+        };
+        if !supports_semantic_rename(dialect.name()) {
+            return Ok(None);
+        }
+        let schema = self.get_schema_for_position(&uri, &text, params.position);
+        if dialect
+            .references(&text, params.position, schema.as_ref())
+            .await
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        Ok(
+            identifier_range_at_position(&text, params.position, dialect.name())
+                .map(PrepareRenameResponse::Range),
+        )
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some(dialect) = self.get_dialect_for_file(&uri) else {
+            return Ok(None);
+        };
+        if !supports_semantic_rename(dialect.name()) || !valid_renamed_identifier(&params.new_name)
+        {
+            return Ok(None);
+        }
+        let schema = self.get_schema_for_position(&uri, &text, position);
+        if dialect
+            .references(&text, position, schema.as_ref())
+            .await
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        let Some(identifier) = identifier_at_position(&text, position, dialect.name()) else {
+            return Ok(None);
+        };
+        let schema_id = schema.as_ref().map(|schema| schema.id);
+        let mut changes = HashMap::new();
+        for (candidate_uri, candidate_text) in self.document_manager.entries() {
+            let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
+                continue;
+            };
+            if candidate_dialect.name() != dialect.name() {
+                continue;
+            }
+            if let Some(expected_schema_id) = schema_id {
+                if self
+                    .get_schema_for_file(&candidate_uri)
+                    .is_none_or(|candidate_schema| candidate_schema.id != expected_schema_id)
+                {
+                    continue;
+                }
+            }
+            let Ok(candidate_url) = Url::parse(&candidate_uri) else {
+                continue;
+            };
+            let edits =
+                identifier_references(&candidate_text, &identifier, dialect.name(), &candidate_url)
+                    .into_iter()
+                    .map(|location| TextEdit {
+                        range: location.range,
+                        new_text: params.new_name.clone(),
+                    })
+                    .collect::<Vec<_>>();
+            if !edits.is_empty() {
+                changes.insert(candidate_url, edits);
+            }
+        }
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let uri_string = uri.to_string();
+        let text = self.document_manager.get(&uri_string).unwrap_or_default();
+        let Some(dialect) = self.get_dialect_for_file(&uri_string) else {
+            return Ok(None);
+        };
+        let formatted = dialect.format(&text).await;
+        let mut actions = Vec::new();
+        if formatted != text {
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Format document with database dialect".to_string(),
+                kind: Some(CodeActionKind::SOURCE),
+                edit: Some(single_document_edit(
+                    uri.clone(),
+                    Range::new(Position::new(0, 0), lsp_position_at_end(&text)),
+                    formatted,
+                )),
+                ..Default::default()
+            }));
+        }
+        if let Some(action) = expand_select_star_action(
+            &text,
+            &uri,
+            params.range,
+            self.get_schema_for_file(&uri_string),
+        ) {
+            actions.push(CodeActionOrCommand::CodeAction(action));
+        }
+        for diagnostic in &params.context.diagnostics {
+            if matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "OXIDE001"
+            ) {
+                if let Some(action) = add_mutation_safety_guard_action(&text, &uri, diagnostic) {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            }
+        }
+        Ok(Some(actions))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -1127,6 +1416,1789 @@ impl LanguageServer for SqlLspServer {
 
         Ok(None)
     }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some(dialect) = self.get_dialect_for_file(&uri) else {
+            return Ok(None);
+        };
+        let start = position_to_byte_offset(&text, params.range.start);
+        let end = position_to_byte_offset(&text, params.range.end);
+        let Some(selected) = text.get(start.min(end)..end.max(start)) else {
+            return Ok(None);
+        };
+        let formatted = dialect.format(selected).await;
+        Ok(Some(vec![TextEdit {
+            range: params.range,
+            new_text: formatted,
+        }]))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let symbols = document_symbols(&text, self.get_schema_for_file(&uri).as_ref());
+        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let text = self
+            .document_manager
+            .get(params.text_document.uri.as_str())
+            .unwrap_or_default();
+        Ok(Some(folding_ranges(&text)))
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let dialect_name = self
+            .get_dialect_for_file(&uri)
+            .map(|dialect| dialect.name().to_string())
+            .unwrap_or_else(|| "postgres".to_string());
+        Ok(Some(
+            params
+                .positions
+                .into_iter()
+                .map(|position| selection_range_for_position(&text, position, &dialect_name))
+                .collect(),
+        ))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let schema = self.get_schema_for_file(&uri);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: schema_semantic_tokens(&text, schema.as_ref()),
+        })))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.to_string();
+        let text = self.document_manager.get(&uri).unwrap_or_default();
+        let Some(schema) = self.get_schema_for_file(&uri) else {
+            return Ok(Some(Vec::new()));
+        };
+        Ok(Some(routine_parameter_hints(&text, params.range, &schema)))
+    }
+
+    #[allow(deprecated)]
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let query = params.query.trim().to_ascii_lowercase();
+        let mut symbols = Vec::new();
+        for schema_id in self.schema_manager.list_ids() {
+            let Some(schema) = self.schema_manager.get(schema_id) else {
+                continue;
+            };
+            for table in &schema.tables {
+                if workspace_symbol_matches(&query, &table.name, &schema.database) {
+                    if let Some(location) = crate::dialects::common::metadata_location(
+                        table.source_location.as_ref(),
+                        schema.source_uri.as_ref(),
+                        "file:///schema.sql",
+                    ) {
+                        symbols.push(SymbolInformation {
+                            name: table.name.clone(),
+                            kind: SymbolKind::CLASS,
+                            tags: None,
+                            deprecated: None,
+                            location,
+                            container_name: Some(schema.database.clone()),
+                        });
+                    }
+                }
+                for column in &table.columns {
+                    if !workspace_symbol_matches(&query, &column.name, &table.name) {
+                        continue;
+                    }
+                    if let Some(location) = crate::dialects::common::metadata_location(
+                        column
+                            .source_location
+                            .as_ref()
+                            .or(table.source_location.as_ref()),
+                        schema.source_uri.as_ref(),
+                        "file:///schema.sql",
+                    ) {
+                        symbols.push(SymbolInformation {
+                            name: column.name.clone(),
+                            kind: SymbolKind::FIELD,
+                            tags: None,
+                            deprecated: None,
+                            location,
+                            container_name: Some(format!("{}.{}", schema.database, table.name)),
+                        });
+                    }
+                }
+            }
+            for function in &schema.functions {
+                if !workspace_symbol_matches(&query, &function.name, &schema.database) {
+                    continue;
+                }
+                if let Some(location) = crate::dialects::common::metadata_location(
+                    None,
+                    schema.source_uri.as_ref(),
+                    "file:///schema.sql",
+                ) {
+                    symbols.push(SymbolInformation {
+                        name: function.name.clone(),
+                        kind: SymbolKind::FUNCTION,
+                        tags: None,
+                        deprecated: None,
+                        location,
+                        container_name: Some(schema.database.clone()),
+                    });
+                }
+            }
+        }
+        symbols.sort_by(|left, right| {
+            workspace_symbol_rank(&query, &left.name)
+                .cmp(&workspace_symbol_rank(&query, &right.name))
+                .then_with(|| {
+                    left.name
+                        .to_ascii_lowercase()
+                        .cmp(&right.name.to_ascii_lowercase())
+                })
+                .then_with(|| left.container_name.cmp(&right.container_name))
+        });
+        symbols.truncate(1_000);
+        Ok(Some(symbols))
+    }
+}
+
+fn identifier_at_position(text: &str, position: Position, dialect: &str) -> Option<String> {
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let mut start = offset;
+    while start > 0 {
+        let ch = text[..start].chars().next_back()?;
+        if !is_identifier_character(ch, dialect) {
+            break;
+        }
+        start -= ch.len_utf8();
+    }
+    let mut end = offset;
+    while end < text.len() {
+        let ch = text[end..].chars().next()?;
+        if !is_identifier_character(ch, dialect) {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    let identifier = text[start..end]
+        .trim_matches(|character| matches!(character, '"' | '\'' | '`'))
+        .to_string();
+    (!identifier.is_empty()).then_some(identifier)
+}
+
+fn identifier_references(text: &str, identifier: &str, dialect: &str, uri: &Url) -> Vec<Location> {
+    let needle = identifier.to_ascii_lowercase();
+    text.lines()
+        .enumerate()
+        .flat_map(|(line_index, line)| {
+            let searchable = line.to_ascii_lowercase();
+            searchable
+                .match_indices(&needle)
+                .filter_map(move |(start, matched)| {
+                    let end = start + matched.len();
+                    let before = line[..start].chars().next_back();
+                    let after = line[end..].chars().next();
+                    if before.is_some_and(|ch| is_identifier_character(ch, dialect))
+                        || after.is_some_and(|ch| is_identifier_character(ch, dialect))
+                    {
+                        return None;
+                    }
+                    Some(Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: line_index as u32,
+                                character: line[..start].encode_utf16().count() as u32,
+                            },
+                            end: Position {
+                                line: line_index as u32,
+                                character: line[..end].encode_utf16().count() as u32,
+                            },
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn is_identifier_character(character: char, dialect: &str) -> bool {
+    character.is_alphanumeric()
+        || character == '_'
+        || match dialect {
+            "redis" => matches!(character, ':' | '-' | '.' | '@'),
+            "mongodb" | "elasticsearch-dsl" | "elasticsearch-eql" => {
+                matches!(character, '.' | '-' | '@')
+            }
+            _ => character == '$',
+        }
+}
+
+fn deduplicate_locations(locations: &mut Vec<Location>) {
+    let mut seen = HashSet::new();
+    locations.retain(|location| {
+        seen.insert((
+            location.uri.to_string(),
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        ))
+    });
+    locations.sort_by(|left, right| {
+        left.uri
+            .as_str()
+            .cmp(right.uri.as_str())
+            .then_with(|| left.range.start.line.cmp(&right.range.start.line))
+            .then_with(|| left.range.start.character.cmp(&right.range.start.character))
+    });
+}
+
+fn supports_semantic_rename(dialect: &str) -> bool {
+    matches!(dialect, "postgres" | "mysql" | "clickhouse" | "hive")
+}
+
+fn workspace_symbol_matches(query: &str, name: &str, container: &str) -> bool {
+    query.is_empty()
+        || name.to_ascii_lowercase().contains(query)
+        || container.to_ascii_lowercase().contains(query)
+}
+
+fn workspace_symbol_rank(query: &str, name: &str) -> u8 {
+    let name = name.to_ascii_lowercase();
+    if query.is_empty() || name == query {
+        0
+    } else if name.starts_with(query) {
+        1
+    } else {
+        2
+    }
+}
+
+async fn document_diagnostics(
+    dialect: &dyn Dialect,
+    text: &str,
+    schema: Option<&Schema>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = dialect.parse(text, schema).await;
+    if matches!(dialect.name(), "postgres" | "mysql" | "clickhouse" | "hive") {
+        diagnostics.extend(sql_inspection_diagnostics(text, schema, dialect.name()));
+    }
+    diagnostics
+}
+
+fn sql_inspection_diagnostics(
+    text: &str,
+    schema: Option<&Schema>,
+    dialect_name: &str,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut offset = 0usize;
+    for segment in text.split_inclusive(';') {
+        let trimmed_start = segment.len() - segment.trim_start().len();
+        let trimmed_end = segment.trim_end().len();
+        if trimmed_start >= trimmed_end {
+            offset += segment.len();
+            continue;
+        }
+        let statement_start = offset + trimmed_start;
+        let statement_end = offset + trimmed_end;
+        let statement = &text[statement_start..statement_end];
+        let normalized = SqlParser::mask_sql_noise(statement).to_ascii_uppercase();
+        let statement_range = range_for_offsets(text, statement_start, statement_end);
+
+        let mutating_without_where = (normalized.trim_start().starts_with("UPDATE ")
+            || normalized.trim_start().starts_with("DELETE "))
+            && !contains_sql_keyword(&normalized, "WHERE");
+        if mutating_without_where && !inspection_suppressed(statement, "OXIDE001") {
+            diagnostics.push(Diagnostic {
+                range: statement_range,
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("OXIDE001".to_string())),
+                code_description: None,
+                source: Some("oxide-inspections".to_string()),
+                message: "Mutation has no WHERE clause and may affect every matching row."
+                    .to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
+        if let Some(join_relative) = join_without_condition_offset(&normalized) {
+            if !inspection_suppressed(statement, "OXIDE002") {
+                diagnostics.push(Diagnostic {
+                    range: range_for_offsets(
+                        text,
+                        statement_start + join_relative,
+                        statement_start + join_relative + "JOIN".len(),
+                    ),
+                    severity: Some(DiagnosticSeverity::WARNING),
+                    code: Some(NumberOrString::String("OXIDE002".to_string())),
+                    code_description: None,
+                    source: Some("oxide-inspections".to_string()),
+                    message:
+                        "JOIN has no ON or USING condition and may create a Cartesian product."
+                            .to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        if let Some(star_relative) = select_star_offset(&normalized) {
+            if !inspection_suppressed(statement, "OXIDE003") {
+                diagnostics.push(Diagnostic {
+                    range: range_for_offsets(
+                        text,
+                        statement_start + star_relative,
+                        statement_start + star_relative + 1,
+                    ),
+                    severity: Some(DiagnosticSeverity::HINT),
+                    code: Some(NumberOrString::String("OXIDE003".to_string())),
+                    code_description: None,
+                    source: Some("oxide-inspections".to_string()),
+                    message: "Explicit columns are safer when a schema changes.".to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        if !inspection_suppressed(statement, "OXIDE004") {
+            diagnostics.extend(ambiguous_column_diagnostics(
+                text,
+                statement,
+                statement_start,
+                schema,
+            ));
+        }
+
+        if !inspection_suppressed(statement, "OXIDE005") {
+            diagnostics.extend(dialect_risk_diagnostics(
+                text,
+                statement,
+                statement_start,
+                dialect_name,
+            ));
+        }
+
+        offset += segment.len();
+    }
+    diagnostics
+}
+
+fn inspection_suppressed(statement: &str, code: &str) -> bool {
+    statement
+        .to_ascii_uppercase()
+        .contains(&format!("NOINSPECTION {}", code.to_ascii_uppercase()))
+}
+
+fn join_without_condition_offset(normalized: &str) -> Option<usize> {
+    for (offset, _) in normalized.match_indices("JOIN") {
+        let before = normalized[..offset].trim_end();
+        let keyword_before = before.split_whitespace().next_back().unwrap_or_default();
+        if matches!(keyword_before, "CROSS" | "NATURAL") {
+            continue;
+        }
+        let tail = &normalized[offset + "JOIN".len()..];
+        let boundary = [
+            " JOIN ", " WHERE ", " GROUP ", " HAVING ", " ORDER ", " LIMIT ", " UNION ",
+        ]
+        .iter()
+        .filter_map(|keyword| tail.find(keyword))
+        .min()
+        .unwrap_or(tail.len());
+        let join_clause = &tail[..boundary];
+        if !contains_sql_keyword(join_clause, "ON") && !contains_sql_keyword(join_clause, "USING") {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+fn ambiguous_column_diagnostics(
+    full_text: &str,
+    statement: &str,
+    statement_start: usize,
+    schema: Option<&Schema>,
+) -> Vec<Diagnostic> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let mut parser = SqlParser::new();
+    let Some(tree) = parser.parse(statement).tree else {
+        return Vec::new();
+    };
+    let referenced = parser.extract_tables(&tree, statement);
+    if referenced.len() < 2 {
+        return Vec::new();
+    }
+    let referenced_tables = schema
+        .tables
+        .iter()
+        .filter(|table| {
+            referenced.iter().any(|reference| {
+                SqlParser::table_name_matches(reference, &schema.database, &table.name)
+            })
+        })
+        .collect::<Vec<_>>();
+    if referenced_tables.len() < 2 {
+        return Vec::new();
+    }
+    let mut counts = HashMap::<String, usize>::new();
+    for table in referenced_tables {
+        for column in &table.columns {
+            *counts.entry(column.name.to_ascii_lowercase()).or_default() += 1;
+        }
+    }
+    let ambiguous = counts
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect::<HashSet<_>>();
+    if ambiguous.is_empty() {
+        return Vec::new();
+    }
+
+    sql_identifier_tokens(statement)
+        .into_iter()
+        .filter_map(|(identifier, start, end)| {
+            if !ambiguous.contains(&identifier.to_ascii_lowercase()) {
+                return None;
+            }
+            let qualified = statement[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character == '.');
+            if qualified {
+                return None;
+            }
+            Some(Diagnostic {
+                range: range_for_offsets(
+                    full_text,
+                    statement_start + start,
+                    statement_start + end,
+                ),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("OXIDE004".to_string())),
+                code_description: None,
+                source: Some("oxide-inspections".to_string()),
+                message: format!(
+                    "Column `{identifier}` exists in multiple referenced relations; qualify it with an alias."
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            })
+        })
+        .collect()
+}
+
+fn dialect_risk_diagnostics(
+    full_text: &str,
+    statement: &str,
+    statement_start: usize,
+    dialect_name: &str,
+) -> Vec<Diagnostic> {
+    if dialect_name == "postgres" {
+        return Vec::new();
+    }
+    let normalized = SqlParser::mask_sql_noise(statement).to_ascii_uppercase();
+    let mut risks = Vec::new();
+    for (needle, message) in [
+        (
+            "ILIKE",
+            "ILIKE is PostgreSQL-specific and is not portable to this dialect.",
+        ),
+        (
+            "::",
+            "The :: cast syntax is PostgreSQL-specific; use CAST(value AS type).",
+        ),
+    ] {
+        for (start, matched) in normalized.match_indices(needle) {
+            risks.push(Diagnostic {
+                range: range_for_offsets(
+                    full_text,
+                    statement_start + start,
+                    statement_start + start + matched.len(),
+                ),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String("OXIDE005".to_string())),
+                code_description: None,
+                source: Some("oxide-inspections".to_string()),
+                message: message.to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+    }
+    risks
+}
+
+fn contains_sql_keyword(normalized: &str, keyword: &str) -> bool {
+    normalized.match_indices(keyword).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = normalized[..start].chars().next_back();
+        let after = normalized[end..].chars().next();
+        !before.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+            && !after.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn select_star_offset(normalized: &str) -> Option<usize> {
+    let select = normalized.find("SELECT")?;
+    let mut offset = select + "SELECT".len();
+    while normalized[offset..]
+        .chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+    {
+        offset += normalized[offset..].chars().next()?.len_utf8();
+    }
+    (normalized[offset..].starts_with('*')).then_some(offset)
+}
+
+fn valid_renamed_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first == '_' || first.is_alphabetic())
+        && characters.all(|character| character == '_' || character.is_alphanumeric())
+}
+
+fn identifier_range_at_position(text: &str, position: Position, dialect: &str) -> Option<Range> {
+    let identifier = identifier_at_position(text, position, dialect)?;
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let line_start = text[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = text[offset..]
+        .find('\n')
+        .map_or(text.len(), |index| offset + index);
+    let line = &text[line_start..line_end];
+    let cursor = offset.saturating_sub(line_start).min(line.len());
+    let searchable = line.to_ascii_lowercase();
+    let needle = identifier.to_ascii_lowercase();
+    let (start, matched) = searchable
+        .match_indices(&needle)
+        .find(|(start, matched)| *start <= cursor && cursor <= *start + matched.len())?;
+    let line_number = text[..line_start].matches('\n').count() as u32;
+    Some(Range {
+        start: Position {
+            line: line_number,
+            character: line[..start].encode_utf16().count() as u32,
+        },
+        end: Position {
+            line: line_number,
+            character: line[..start + matched.len()].encode_utf16().count() as u32,
+        },
+    })
+}
+
+fn routine_call_at_position(text: &str, position: Position) -> Option<(String, u32)> {
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let before = &text[..offset];
+    let mut nesting = 0u32;
+    let mut opening = None;
+    for (index, character) in before.char_indices().rev() {
+        match character {
+            ')' => nesting += 1,
+            '(' if nesting > 0 => nesting -= 1,
+            '(' => {
+                opening = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let opening = opening?;
+    let mut name_end = opening;
+    while name_end > 0
+        && text[..name_end]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        name_end -= text[..name_end].chars().next_back()?.len_utf8();
+    }
+    let mut name_start = name_end;
+    while name_start > 0 {
+        let character = text[..name_start].chars().next_back()?;
+        if !(character.is_alphanumeric() || matches!(character, '_' | '.' | '"' | '`')) {
+            break;
+        }
+        name_start -= character.len_utf8();
+    }
+    let routine_name = text[name_start..name_end]
+        .trim_matches(|character| matches!(character, '"' | '`'))
+        .rsplit('.')
+        .next()?
+        .to_string();
+    if routine_name.is_empty() {
+        return None;
+    }
+
+    let mut active_parameter = 0u32;
+    let mut nested = 0u32;
+    let mut quote = None;
+    for character in text[opening + 1..offset].chars() {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            continue;
+        }
+        match character {
+            '(' | '[' | '{' => nested += 1,
+            ')' | ']' | '}' if nested > 0 => nested -= 1,
+            ',' if nested == 0 => active_parameter += 1,
+            _ => {}
+        }
+    }
+    Some((routine_name, active_parameter))
+}
+
+fn single_document_edit(uri: Url, range: Range, new_text: String) -> WorkspaceEdit {
+    WorkspaceEdit {
+        changes: Some(HashMap::from([(uri, vec![TextEdit { range, new_text }])])),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+fn add_mutation_safety_guard_action(
+    text: &str,
+    uri: &Url,
+    diagnostic: &Diagnostic,
+) -> Option<CodeAction> {
+    let start = position_to_byte_offset(text, diagnostic.range.start);
+    let end = position_to_byte_offset(text, diagnostic.range.end).min(text.len());
+    let statement = text.get(start..end)?;
+    let trailing = statement.trim_end();
+    let insert_offset = if trailing.ends_with(';') {
+        start + trailing.len() - 1
+    } else {
+        start + trailing.len()
+    };
+    let insert_range = range_for_offsets(text, insert_offset, insert_offset);
+    Some(CodeAction {
+        title: "Add non-matching WHERE safety guard".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diagnostic.clone()]),
+        edit: Some(single_document_edit(
+            uri.clone(),
+            insert_range,
+            " WHERE 1 = 0 /* replace safety guard before executing */".to_string(),
+        )),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+fn expand_select_star_action(
+    text: &str,
+    uri: &Url,
+    request_range: Range,
+    schema: Option<Schema>,
+) -> Option<CodeAction> {
+    let schema = schema?;
+    let selection_start = position_to_byte_offset(text, request_range.start);
+    let selection_end = position_to_byte_offset(text, request_range.end);
+    let star = text.match_indices('*').find_map(|(offset, _)| {
+        let selected = selection_start <= offset && offset <= selection_end.max(selection_start);
+        let nearby = offset.abs_diff(selection_start) <= 2;
+        (selected || nearby).then_some(offset)
+    })?;
+    let prefix = text[..star].to_ascii_uppercase();
+    let select_start = prefix.rfind("SELECT")?;
+    if text[select_start + "SELECT".len()..star]
+        .chars()
+        .any(|character| !character.is_whitespace())
+    {
+        return None;
+    }
+    let statement_start = text[..star].rfind(';').map_or(0, |offset| offset + 1);
+    let statement_end = text[star..]
+        .find(';')
+        .map_or(text.len(), |offset| star + offset + 1);
+    let statement = &text[statement_start..statement_end];
+    let mut parser = SqlParser::new();
+    let parse_result = parser.parse(statement);
+    let tree = parse_result.tree.as_ref()?;
+    let tables = parser.extract_tables(tree, statement);
+    if tables.len() != 1 {
+        return None;
+    }
+    let table_reference = &tables[0];
+    let table = schema.tables.iter().find(|table| {
+        SqlParser::table_name_matches(table_reference, &schema.database, &table.name)
+    })?;
+    if table.columns.is_empty() {
+        return None;
+    }
+    let replacement = table
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let range = range_for_offsets(text, star, star + 1);
+    Some(CodeAction {
+        title: format!("Expand * to {} columns", table.columns.len()),
+        kind: Some(CodeActionKind::REFACTOR_REWRITE),
+        edit: Some(single_document_edit(uri.clone(), range, replacement)),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+#[allow(deprecated)]
+fn document_symbols(text: &str, schema: Option<&Schema>) -> Vec<DocumentSymbol> {
+    let mut symbols = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(schema) = schema {
+        for table in &schema.tables {
+            if let Some(range) = range_for_identifier_occurrence(text, &table.name) {
+                if seen.insert(("table", table.name.to_ascii_lowercase())) {
+                    symbols.push(DocumentSymbol {
+                        name: table.name.clone(),
+                        detail: Some(table.object_kind().to_string()),
+                        kind: SymbolKind::CLASS,
+                        tags: None,
+                        deprecated: None,
+                        range,
+                        selection_range: range,
+                        children: None,
+                    });
+                }
+            }
+        }
+        for function in &schema.functions {
+            if let Some(range) = range_for_identifier_occurrence(text, &function.name) {
+                if seen.insert(("function", function.name.to_ascii_lowercase())) {
+                    symbols.push(DocumentSymbol {
+                        name: function.name.clone(),
+                        detail: Some(function.signature()),
+                        kind: SymbolKind::FUNCTION,
+                        tags: None,
+                        deprecated: None,
+                        range,
+                        selection_range: range,
+                        children: None,
+                    });
+                }
+            }
+        }
+    }
+    let parser = SqlParser::new();
+    for cte in parser.extract_common_table_expressions(text) {
+        if let Some(range) = range_for_identifier_occurrence(text, &cte) {
+            if seen.insert(("cte", cte.to_ascii_lowercase())) {
+                symbols.push(DocumentSymbol {
+                    name: cte,
+                    detail: Some("Common table expression".to_string()),
+                    kind: SymbolKind::VARIABLE,
+                    tags: None,
+                    deprecated: None,
+                    range,
+                    selection_range: range,
+                    children: None,
+                });
+            }
+        }
+    }
+    symbols.sort_by_key(|symbol| {
+        (
+            symbol.range.start.line,
+            symbol.range.start.character,
+            symbol.name.clone(),
+        )
+    });
+    symbols
+}
+
+fn range_for_identifier_occurrence(text: &str, identifier: &str) -> Option<Range> {
+    let searchable = text.to_ascii_lowercase();
+    let needle = identifier.to_ascii_lowercase();
+    searchable
+        .match_indices(&needle)
+        .find_map(|(start, matched)| {
+            let end = start + matched.len();
+            let before = text[..start].chars().next_back();
+            let after = text[end..].chars().next();
+            if before.is_some_and(|character| character.is_alphanumeric() || character == '_')
+                || after.is_some_and(|character| character.is_alphanumeric() || character == '_')
+            {
+                return None;
+            }
+            Some(range_for_offsets(text, start, end))
+        })
+}
+
+fn range_for_offsets(text: &str, start: usize, end: usize) -> Range {
+    Range {
+        start: position_for_offset(text, start),
+        end: position_for_offset(text, end),
+    }
+}
+
+fn position_for_offset(text: &str, offset: usize) -> Position {
+    let offset = offset.min(text.len());
+    let prefix = &text[..offset];
+    let line = prefix.matches('\n').count() as u32;
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    Position {
+        line,
+        character: text[line_start..offset].encode_utf16().count() as u32,
+    }
+}
+
+fn folding_ranges(text: &str) -> Vec<FoldingRange> {
+    let mut stack = Vec::new();
+    let mut ranges = Vec::new();
+    let mut line = 0u32;
+    let mut character = 0u32;
+    let mut quote = None;
+    for current in text.chars() {
+        if current == '\n' {
+            line += 1;
+            character = 0;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if current == active_quote {
+                quote = None;
+            }
+            character += current.len_utf16() as u32;
+            continue;
+        }
+        if matches!(current, '\'' | '"' | '`') {
+            quote = Some(current);
+            character += 1;
+            continue;
+        }
+        match current {
+            '(' | '[' | '{' => stack.push((current, line, character)),
+            ')' | ']' | '}' => {
+                let expected = match current {
+                    ')' => '(',
+                    ']' => '[',
+                    _ => '{',
+                };
+                if let Some(index) = stack.iter().rposition(|(open, _, _)| *open == expected) {
+                    let (_, start_line, start_character) = stack.remove(index);
+                    if start_line < line {
+                        ranges.push(FoldingRange {
+                            start_line,
+                            start_character: Some(start_character),
+                            end_line: line,
+                            end_character: Some(character),
+                            kind: None,
+                            collapsed_text: None,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        character += current.len_utf16() as u32;
+    }
+    ranges.sort_by_key(|range| (range.start_line, range.start_character));
+    ranges.truncate(500);
+    ranges
+}
+
+fn selection_range_for_position(text: &str, position: Position, dialect: &str) -> SelectionRange {
+    let document_range = Range::new(Position::new(0, 0), lsp_position_at_end(text));
+    let (line_start, line_end) = line_bounds_for_position(text, position.line);
+    let line_range = range_for_offsets(text, line_start, line_end);
+    let parent = SelectionRange {
+        range: line_range,
+        parent: Some(Box::new(SelectionRange {
+            range: document_range,
+            parent: None,
+        })),
+    };
+    SelectionRange {
+        range: identifier_range_at_position(text, position, dialect)
+            .unwrap_or(Range::new(position, position)),
+        parent: Some(Box::new(parent)),
+    }
+}
+
+fn augment_schema_with_local_relations(
+    mut schema: Schema,
+    text: &str,
+    position: Position,
+    uri: &str,
+) -> Schema {
+    let cursor = position_to_byte_offset(text, position).min(text.len());
+    let visible = &text[..cursor];
+    let mut local_relations = temporary_tables_before_cursor(visible, &schema, uri);
+    local_relations.extend(cte_tables_before_cursor(visible, &schema, uri));
+    local_relations.extend(derived_tables_before_cursor(visible, &schema, uri));
+
+    for table in local_relations.into_iter().rev() {
+        schema
+            .tables
+            .retain(|candidate| !candidate.name.eq_ignore_ascii_case(&table.name));
+        schema.tables.insert(0, table);
+    }
+    schema
+}
+
+fn temporary_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
+    let upper = source.to_ascii_uppercase();
+    let mut tables = HashMap::<String, (usize, Table)>::new();
+    for keyword in ["CREATE TEMP TABLE", "CREATE TEMPORARY TABLE"] {
+        let mut search = 0;
+        while let Some(relative) = upper[search..].find(keyword) {
+            let start = search + relative;
+            let after_keyword = start + keyword.len();
+            let name_position =
+                skip_optional_keyword_sequence(source, after_keyword, &["IF", "NOT", "EXISTS"]);
+            let Some((name, name_start, name_end)) =
+                read_local_identifier_after(source, name_position)
+            else {
+                search = after_keyword;
+                continue;
+            };
+            let definition_start = skip_local_whitespace(source, name_end);
+            let source_line = source[..name_start].matches('\n').count() as u32 + 1;
+            let (columns, statement_end) = if source[definition_start..].starts_with('(') {
+                let Some(closing) = matching_parenthesis(source, definition_start) else {
+                    search = definition_start + 1;
+                    continue;
+                };
+                (
+                    split_top_level_ranges(source, definition_start + 1, closing)
+                        .into_iter()
+                        .filter_map(|(column_start, column_end)| {
+                            parse_temporary_column(
+                                &source[column_start..column_end],
+                                uri,
+                                source[..column_start].matches('\n').count() as u32 + 1,
+                            )
+                        })
+                        .collect(),
+                    closing + 1,
+                )
+            } else if upper[definition_start..].starts_with("AS")
+                && local_keyword_boundary(&upper, definition_start, "AS")
+            {
+                let query_start = skip_local_whitespace(source, definition_start + "AS".len());
+                let statement_end = source[query_start..]
+                    .find(';')
+                    .map_or(source.len(), |relative| query_start + relative);
+                (
+                    infer_query_output_columns(
+                        &source[query_start..statement_end],
+                        schema,
+                        uri,
+                        source_line,
+                    ),
+                    statement_end,
+                )
+            } else {
+                search = name_end;
+                continue;
+            };
+            let table =
+                local_relation_table(name.clone(), "TEMPORARY TABLE", columns, uri, source_line);
+            tables.insert(name.to_ascii_lowercase(), (start, table));
+            search = statement_end;
+        }
+    }
+
+    for keyword in ["DROP TABLE", "DROP TEMP TABLE", "DROP TEMPORARY TABLE"] {
+        let mut search = 0;
+        while let Some(relative) = upper[search..].find(keyword) {
+            let start = search + relative;
+            let after_keyword = start + keyword.len();
+            let name_position =
+                skip_optional_keyword_sequence(source, after_keyword, &["IF", "EXISTS"]);
+            if let Some((name, _, name_end)) = read_local_identifier_after(source, name_position) {
+                let normalized = name.to_ascii_lowercase();
+                if tables
+                    .get(&normalized)
+                    .is_some_and(|(created_at, _)| *created_at < start)
+                {
+                    tables.remove(&normalized);
+                }
+                search = name_end;
+            } else {
+                search = after_keyword;
+            }
+        }
+    }
+
+    let mut tables = tables.into_values().collect::<Vec<_>>();
+    tables.sort_by_key(|(offset, _)| *offset);
+    tables.into_iter().map(|(_, table)| table).collect()
+}
+
+fn parse_temporary_column(definition: &str, uri: &str, line: u32) -> Option<Column> {
+    let (name, _, name_end) = read_local_identifier_after(definition, 0)?;
+    if matches!(
+        name.to_ascii_uppercase().as_str(),
+        "PRIMARY" | "UNIQUE" | "CONSTRAINT" | "CHECK" | "FOREIGN" | "EXCLUDE"
+    ) {
+        return None;
+    }
+    let (data_type, _, _) = read_local_identifier_after(definition, name_end)
+        .unwrap_or_else(|| ("unknown".to_string(), name_end, name_end));
+    Some(Column {
+        name,
+        data_type,
+        nullable: !definition.to_ascii_uppercase().contains("NOT NULL"),
+        primary_key: definition.to_ascii_uppercase().contains("PRIMARY KEY"),
+        unique: definition.to_ascii_uppercase().contains("UNIQUE"),
+        indexed: false,
+        comment: Some("Column from a temporary table in the current console".to_string()),
+        source_location: Some((uri.to_string(), line)),
+    })
+}
+
+fn cte_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
+    let upper = source.to_ascii_uppercase();
+    let mut tables = Vec::new();
+    let mut search = 0;
+    while let Some(relative) = upper[search..].find("WITH") {
+        let with_start = search + relative;
+        if !local_keyword_boundary(&upper, with_start, "WITH") {
+            search = with_start + "WITH".len();
+            continue;
+        }
+        let mut cursor = skip_local_whitespace(source, with_start + "WITH".len());
+        if upper[cursor..].starts_with("RECURSIVE")
+            && local_keyword_boundary(&upper, cursor, "RECURSIVE")
+        {
+            cursor = skip_local_whitespace(source, cursor + "RECURSIVE".len());
+        }
+        loop {
+            let Some((name, name_start, name_end)) = read_local_identifier_after(source, cursor)
+            else {
+                break;
+            };
+            cursor = skip_local_whitespace(source, name_end);
+            let mut explicit_columns = Vec::new();
+            if source[cursor..].starts_with('(') {
+                let Some(closing) = matching_parenthesis(source, cursor) else {
+                    break;
+                };
+                explicit_columns = split_top_level_ranges(source, cursor + 1, closing)
+                    .into_iter()
+                    .filter_map(|(start, _)| {
+                        read_local_identifier_after(source, start).map(|(name, _, _)| name)
+                    })
+                    .collect();
+                cursor = skip_local_whitespace(source, closing + 1);
+            }
+            if !upper[cursor..].starts_with("AS") || !local_keyword_boundary(&upper, cursor, "AS") {
+                break;
+            }
+            cursor = skip_local_whitespace(source, cursor + "AS".len());
+            if !source[cursor..].starts_with('(') {
+                break;
+            }
+            let Some(closing) = matching_parenthesis(source, cursor) else {
+                break;
+            };
+            let body = &source[cursor + 1..closing];
+            let source_line = source[..name_start].matches('\n').count() as u32 + 1;
+            let columns = if explicit_columns.is_empty() {
+                infer_query_output_columns(body, schema, uri, source_line)
+            } else {
+                explicit_columns
+                    .into_iter()
+                    .map(|column_name| {
+                        local_relation_column(column_name, "unknown", uri, source_line)
+                    })
+                    .collect()
+            };
+            tables.push(local_relation_table(
+                name,
+                "COMMON TABLE EXPRESSION",
+                columns,
+                uri,
+                source_line,
+            ));
+            cursor = skip_local_whitespace(source, closing + 1);
+            if !source[cursor..].starts_with(',') {
+                break;
+            }
+            cursor = skip_local_whitespace(source, cursor + 1);
+        }
+        search = cursor.max(with_start + "WITH".len());
+    }
+    tables
+}
+
+fn derived_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
+    let upper = source.to_ascii_uppercase();
+    let mut tables = Vec::new();
+    for keyword in ["FROM", "JOIN"] {
+        let mut search = 0;
+        while let Some(relative) = upper[search..].find(keyword) {
+            let keyword_start = search + relative;
+            if !local_keyword_boundary(&upper, keyword_start, keyword) {
+                search = keyword_start + keyword.len();
+                continue;
+            }
+            let opening = skip_local_whitespace(source, keyword_start + keyword.len());
+            if !source[opening..].starts_with('(') {
+                search = opening;
+                continue;
+            }
+            let Some(closing) = matching_parenthesis(source, opening) else {
+                search = opening + 1;
+                continue;
+            };
+            let mut alias_start = skip_local_whitespace(source, closing + 1);
+            if upper[alias_start..].starts_with("AS")
+                && local_keyword_boundary(&upper, alias_start, "AS")
+            {
+                alias_start = skip_local_whitespace(source, alias_start + "AS".len());
+            }
+            let Some((alias, alias_offset, alias_end)) =
+                read_local_identifier_after(source, alias_start)
+            else {
+                search = closing + 1;
+                continue;
+            };
+            if Keywords::is_keyword(&alias) {
+                search = closing + 1;
+                continue;
+            }
+            let body = &source[opening + 1..closing];
+            if !body.to_ascii_uppercase().contains("SELECT") {
+                search = alias_end;
+                continue;
+            }
+            tables.push(local_relation_table(
+                alias,
+                "DERIVED TABLE",
+                infer_query_output_columns(
+                    body,
+                    schema,
+                    uri,
+                    source[..alias_offset].matches('\n').count() as u32 + 1,
+                ),
+                uri,
+                source[..alias_offset].matches('\n').count() as u32 + 1,
+            ));
+            search = alias_end;
+        }
+    }
+    tables
+}
+
+fn infer_query_output_columns(
+    query: &str,
+    schema: &Schema,
+    uri: &str,
+    source_line: u32,
+) -> Vec<Column> {
+    let upper = query.to_ascii_uppercase();
+    let Some(select) = upper.find("SELECT") else {
+        return Vec::new();
+    };
+    let projection_start = select + "SELECT".len();
+    let projection_end =
+        find_top_level_keyword(query, projection_start, "FROM").unwrap_or(query.len());
+    let mut columns = Vec::new();
+    for (start, end) in split_top_level_ranges(query, projection_start, projection_end) {
+        let expression = query[start..end].trim();
+        if expression.is_empty() {
+            continue;
+        }
+        if expression == "*" || expression.ends_with(".*") {
+            let mut parser = SqlParser::new();
+            if let Some(tree) = parser.parse(query).tree {
+                let references = parser.extract_referenced_tables(&tree, query);
+                for table in &schema.tables {
+                    if references.iter().any(|reference| {
+                        SqlParser::table_name_matches(reference, &schema.database, &table.name)
+                    }) {
+                        columns.extend(table.columns.clone());
+                    }
+                }
+            }
+            continue;
+        }
+        let name = select_expression_output_name(expression);
+        let Some(name) = name else {
+            continue;
+        };
+        if columns
+            .iter()
+            .any(|column: &Column| column.name.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        let data_type = schema
+            .tables
+            .iter()
+            .flat_map(|table| table.columns.iter())
+            .find(|column| column.name.eq_ignore_ascii_case(&name))
+            .map(|column| column.data_type.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        columns.push(local_relation_column(name, &data_type, uri, source_line));
+    }
+    columns
+}
+
+fn select_expression_output_name(expression: &str) -> Option<String> {
+    let upper = expression.to_ascii_uppercase();
+    if let Some(as_offset) = upper.rfind(" AS ") {
+        return read_local_identifier_after(expression, as_offset + " AS ".len())
+            .map(|(name, _, _)| name);
+    }
+    let trimmed = expression.trim();
+    if trimmed
+        .chars()
+        .all(|character| character.is_alphanumeric() || matches!(character, '_' | '$' | '.'))
+    {
+        return trimmed.rsplit('.').next().map(str::to_string);
+    }
+    let trailing = trimmed
+        .split_whitespace()
+        .next_back()
+        .filter(|value| !Keywords::is_keyword(value))?;
+    trailing
+        .chars()
+        .all(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
+        .then(|| trailing.to_string())
+}
+
+fn local_relation_table(
+    name: String,
+    object_type: &str,
+    columns: Vec<Column>,
+    uri: &str,
+    line: u32,
+) -> Table {
+    Table {
+        name,
+        object_type: Some(object_type.to_string()),
+        columns,
+        indexes: Vec::new(),
+        constraints: Vec::new(),
+        comment: Some(format!("{object_type} visible in the current console")),
+        source_location: Some((uri.to_string(), line)),
+    }
+}
+
+fn local_relation_column(name: String, data_type: &str, uri: &str, line: u32) -> Column {
+    Column {
+        name,
+        data_type: data_type.to_string(),
+        nullable: true,
+        primary_key: false,
+        unique: false,
+        indexed: false,
+        comment: Some("Output column inferred from the current console".to_string()),
+        source_location: Some((uri.to_string(), line)),
+    }
+}
+
+fn read_local_identifier_after(source: &str, start: usize) -> Option<(String, usize, usize)> {
+    let start = skip_local_whitespace(source, start);
+    let first = source[start..].chars().next()?;
+    if matches!(first, '"' | '`' | '[') {
+        let closing = if first == '[' { ']' } else { first };
+        let content_start = start + first.len_utf8();
+        let relative_end = source[content_start..].find(closing)?;
+        let content_end = content_start + relative_end;
+        return Some((
+            source[content_start..content_end].to_string(),
+            start,
+            content_end + closing.len_utf8(),
+        ));
+    }
+    if !(first == '_' || first.is_alphabetic()) {
+        return None;
+    }
+    let mut end = start + first.len_utf8();
+    for character in source[end..].chars() {
+        if !(character == '_' || character == '$' || character.is_alphanumeric()) {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    Some((source[start..end].to_string(), start, end))
+}
+
+fn skip_local_whitespace(source: &str, mut offset: usize) -> usize {
+    offset = offset.min(source.len());
+    while offset < source.len() {
+        let Some(character) = source[offset..].chars().next() else {
+            break;
+        };
+        if !character.is_whitespace() {
+            break;
+        }
+        offset += character.len_utf8();
+    }
+    offset
+}
+
+fn skip_optional_keyword_sequence(source: &str, start: usize, keywords: &[&str]) -> usize {
+    let upper = source.to_ascii_uppercase();
+    let original = skip_local_whitespace(source, start);
+    let mut cursor = original;
+    for keyword in keywords {
+        if !upper[cursor..].starts_with(keyword) || !local_keyword_boundary(&upper, cursor, keyword)
+        {
+            return original;
+        }
+        cursor = skip_local_whitespace(source, cursor + keyword.len());
+    }
+    cursor
+}
+
+fn local_keyword_boundary(source_upper: &str, start: usize, keyword: &str) -> bool {
+    let end = start + keyword.len();
+    let before = source_upper[..start].chars().next_back();
+    let after = source_upper[end.min(source_upper.len())..].chars().next();
+    !before.is_some_and(|character| character.is_alphanumeric() || character == '_')
+        && !after.is_some_and(|character| character.is_alphanumeric() || character == '_')
+}
+
+fn matching_parenthesis(source: &str, opening: usize) -> Option<usize> {
+    if !source[opening..].starts_with('(') {
+        return None;
+    }
+    let mut nesting = 0u32;
+    let mut quote = None;
+    for (relative, character) in source[opening..].char_indices() {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            continue;
+        }
+        match character {
+            '(' => nesting += 1,
+            ')' => {
+                nesting = nesting.saturating_sub(1);
+                if nesting == 0 {
+                    return Some(opening + relative);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_ranges(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut segment_start = start;
+    let mut nesting = 0u32;
+    let mut quote = None;
+    for (relative, character) in source[start..end].char_indices() {
+        let offset = start + relative;
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            continue;
+        }
+        match character {
+            '(' | '[' | '{' => nesting += 1,
+            ')' | ']' | '}' if nesting > 0 => nesting -= 1,
+            ',' if nesting == 0 => {
+                ranges.push((segment_start, offset));
+                segment_start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    ranges.push((segment_start, end));
+    ranges
+}
+
+fn find_top_level_keyword(source: &str, start: usize, keyword: &str) -> Option<usize> {
+    let upper = source.to_ascii_uppercase();
+    let mut nesting = 0u32;
+    let mut quote = None;
+    for (relative, character) in source[start..].char_indices() {
+        let offset = start + relative;
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            continue;
+        }
+        match character {
+            '(' | '[' | '{' => nesting += 1,
+            ')' | ']' | '}' if nesting > 0 => nesting -= 1,
+            _ if nesting == 0
+                && upper[offset..].starts_with(keyword)
+                && local_keyword_boundary(&upper, offset, keyword) =>
+            {
+                return Some(offset);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::NAMESPACE,
+            SemanticTokenType::CLASS,
+            SemanticTokenType::PROPERTY,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::VARIABLE,
+        ],
+        token_modifiers: Vec::new(),
+    }
+}
+
+fn schema_semantic_tokens(text: &str, schema: Option<&Schema>) -> Vec<SemanticToken> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let tables = schema
+        .tables
+        .iter()
+        .map(|table| table.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let columns = schema
+        .tables
+        .iter()
+        .flat_map(|table| table.columns.iter())
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let functions = schema
+        .functions
+        .iter()
+        .map(|function| function.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let ctes = SqlParser::new()
+        .extract_common_table_expressions(text)
+        .into_iter()
+        .map(|cte| cte.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let database = schema.database.to_ascii_lowercase();
+
+    let mut absolute = Vec::new();
+    for (identifier, start, end) in sql_identifier_tokens(text) {
+        let normalized = identifier.to_ascii_lowercase();
+        let following_open_parenthesis = text[end..]
+            .chars()
+            .find(|character| !character.is_whitespace())
+            == Some('(');
+        let token_type = if functions.contains(&normalized) && following_open_parenthesis {
+            3
+        } else if tables.contains(&normalized) {
+            1
+        } else if columns.contains(&normalized) {
+            2
+        } else if ctes.contains(&normalized) {
+            4
+        } else if normalized == database {
+            0
+        } else {
+            continue;
+        };
+        let position = position_for_offset(text, start);
+        let length = text[start..end].encode_utf16().count() as u32;
+        if length > 0 {
+            absolute.push((position.line, position.character, length, token_type));
+        }
+    }
+    absolute.sort_unstable();
+    absolute.dedup();
+
+    let mut previous_line = 0;
+    let mut previous_character = 0;
+    absolute
+        .into_iter()
+        .map(|(line, character, length, token_type)| {
+            let delta_line = line - previous_line;
+            let delta_start = if delta_line == 0 {
+                character - previous_character
+            } else {
+                character
+            };
+            previous_line = line;
+            previous_character = character;
+            SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type,
+                token_modifiers_bitset: 0,
+            }
+        })
+        .collect()
+}
+
+fn sql_identifier_tokens(text: &str) -> Vec<(String, usize, usize)> {
+    let mut tokens = Vec::new();
+    let mut characters = text.char_indices().peekable();
+    let mut quote = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while let Some((index, character)) = characters.next() {
+        if line_comment {
+            if character == '\n' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_comment {
+            if character == '*' && characters.peek().is_some_and(|(_, next)| *next == '/') {
+                characters.next();
+                block_comment = false;
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                if characters
+                    .peek()
+                    .is_some_and(|(_, next)| *next == active_quote)
+                {
+                    characters.next();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if character == '-' && characters.peek().is_some_and(|(_, next)| *next == '-') {
+            characters.next();
+            line_comment = true;
+            continue;
+        }
+        if character == '/' && characters.peek().is_some_and(|(_, next)| *next == '*') {
+            characters.next();
+            block_comment = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            continue;
+        }
+        if !(character == '_' || character.is_alphabetic()) {
+            continue;
+        }
+
+        let start = index;
+        let mut end = index + character.len_utf8();
+        while let Some((next_index, next)) = characters.peek().copied() {
+            if !(next == '_' || next == '$' || next.is_alphanumeric()) {
+                break;
+            }
+            characters.next();
+            end = next_index + next.len_utf8();
+        }
+        tokens.push((text[start..end].to_string(), start, end));
+    }
+    tokens
+}
+
+fn routine_parameter_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHint> {
+    let range_start = position_to_byte_offset(text, range.start);
+    let range_end = position_to_byte_offset(text, range.end);
+    let mut hints = Vec::new();
+
+    for (identifier, _, name_end) in sql_identifier_tokens(text) {
+        let mut opening = name_end;
+        while text[opening..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+        {
+            let Some(character) = text[opening..].chars().next() else {
+                break;
+            };
+            opening += character.len_utf8();
+        }
+        if !text[opening..].starts_with('(') {
+            continue;
+        }
+        let overloads = schema
+            .functions
+            .iter()
+            .filter(|function| function.name.eq_ignore_ascii_case(&identifier))
+            .collect::<Vec<_>>();
+        if overloads.is_empty() {
+            continue;
+        }
+        let Some(arguments) = routine_argument_offsets(text, opening) else {
+            continue;
+        };
+        let matching_overloads = overloads
+            .into_iter()
+            .filter(|function| {
+                let required = function
+                    .parameters
+                    .iter()
+                    .filter(|parameter| !parameter.optional)
+                    .count();
+                required <= arguments.len() && arguments.len() <= function.parameters.len()
+            })
+            .collect::<Vec<_>>();
+        if matching_overloads.is_empty() {
+            continue;
+        }
+
+        for (parameter_index, argument_start) in arguments.into_iter().enumerate() {
+            if argument_start < range_start || argument_start > range_end {
+                continue;
+            }
+            let names = matching_overloads
+                .iter()
+                .filter_map(|function| function.parameters.get(parameter_index))
+                .map(|parameter| parameter.name.trim())
+                .filter(|name| !name.is_empty())
+                .collect::<HashSet<_>>();
+            if names.len() != 1 {
+                continue;
+            }
+            let name = *names.iter().next().expect("one parameter name");
+            let argument_tail = &text[argument_start..];
+            if argument_tail.strip_prefix(name).is_some_and(|tail| {
+                tail.trim_start().starts_with("=>") || tail.trim_start().starts_with(":=")
+            }) {
+                continue;
+            }
+            let data_types = matching_overloads
+                .iter()
+                .filter_map(|function| function.parameters.get(parameter_index))
+                .map(|parameter| parameter.data_type.trim())
+                .filter(|data_type| !data_type.is_empty())
+                .collect::<HashSet<_>>();
+            let tooltip = (data_types.len() == 1).then(|| {
+                InlayHintTooltip::String(format!(
+                    "Parameter type: {}",
+                    data_types.iter().next().expect("one data type")
+                ))
+            });
+            hints.push(InlayHint {
+                position: position_for_offset(text, argument_start),
+                label: InlayHintLabel::String(format!("{name}:")),
+                kind: Some(InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    }
+    hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
+    hints.truncate(500);
+    hints
+}
+
+fn routine_argument_offsets(text: &str, opening: usize) -> Option<Vec<usize>> {
+    let mut arguments = Vec::new();
+    let mut nesting = 0u32;
+    let mut quote = None;
+    let mut argument_start = opening + 1;
+    let mut saw_content = false;
+
+    for (relative, character) in text[opening + 1..].char_indices() {
+        let offset = opening + 1 + relative;
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            }
+            saw_content = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            saw_content = true;
+            continue;
+        }
+        match character {
+            '(' | '[' | '{' => {
+                nesting += 1;
+                saw_content = true;
+            }
+            ')' if nesting == 0 => {
+                if saw_content {
+                    arguments.push(skip_sql_whitespace(text, argument_start, offset));
+                }
+                return Some(arguments);
+            }
+            ')' | ']' | '}' if nesting > 0 => {
+                nesting -= 1;
+                saw_content = true;
+            }
+            ',' if nesting == 0 => {
+                arguments.push(skip_sql_whitespace(text, argument_start, offset));
+                argument_start = offset + character.len_utf8();
+                saw_content = false;
+            }
+            _ if !character.is_whitespace() => saw_content = true,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn skip_sql_whitespace(text: &str, start: usize, end: usize) -> usize {
+    let mut offset = start.min(end);
+    while offset < end {
+        let Some(character) = text[offset..end].chars().next() else {
+            break;
+        };
+        if !character.is_whitespace() {
+            break;
+        }
+        offset += character.len_utf8();
+    }
+    offset
 }
 
 fn schema_qualifier_at_position(text: &str, position: Position) -> Option<String> {
@@ -1278,8 +3350,9 @@ mod tests {
         infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
         rewrite_current_document_location_uri, rewrite_current_document_location_uris,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics,
     };
-    use crate::schema::{Schema, SchemaId, SchemaManager, Table};
+    use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
     use tower_lsp::lsp_types::{
         CompletionItem, CompletionItemKind, CompletionTextEdit, Location, Position, Range, Url,
@@ -1306,6 +3379,16 @@ mod tests {
             uri: Url::parse(uri).expect("valid test URI"),
             range: Range::default(),
         }
+    }
+
+    fn diagnostic_codes(diagnostics: &[tower_lsp::lsp_types::Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .filter_map(|diagnostic| match diagnostic.code.as_ref() {
+                Some(tower_lsp::lsp_types::NumberOrString::String(code)) => Some(code.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1381,6 +3464,52 @@ mod tests {
         assert_eq!(
             infer_dialect_from_uri_and_language("untitled://1", "sql", "clickhouse"),
             "clickhouse"
+        );
+    }
+
+    #[test]
+    fn semantic_inspections_cover_join_ambiguity_dialect_risk_and_suppression() {
+        let shared_id = Column {
+            name: "id".to_string(),
+            data_type: "bigint".to_string(),
+            ..Default::default()
+        };
+        let schema = Schema {
+            id: SchemaId::new(),
+            database: "app".to_string(),
+            tables: vec![
+                Table {
+                    name: "orders".to_string(),
+                    columns: vec![shared_id.clone()],
+                    ..Default::default()
+                },
+                Table {
+                    name: "customers".to_string(),
+                    columns: vec![shared_id],
+                    ..Default::default()
+                },
+            ],
+            functions: Vec::new(),
+            source_uri: None,
+        };
+        let diagnostics = sql_inspection_diagnostics(
+            "SELECT id FROM orders JOIN customers WHERE name ILIKE 'a%';",
+            Some(&schema),
+            "mysql",
+        );
+        let codes = diagnostic_codes(&diagnostics);
+        assert!(codes.contains(&"OXIDE002".to_string()), "{diagnostics:?}");
+        assert!(codes.contains(&"OXIDE004".to_string()), "{diagnostics:?}");
+        assert!(codes.contains(&"OXIDE005".to_string()), "{diagnostics:?}");
+
+        let suppressed = sql_inspection_diagnostics(
+            "-- noinspection OXIDE001\nUPDATE orders SET id = 1;",
+            Some(&schema),
+            "postgres",
+        );
+        assert!(
+            !diagnostic_codes(&suppressed).contains(&"OXIDE001".to_string()),
+            "{suppressed:?}"
         );
     }
 

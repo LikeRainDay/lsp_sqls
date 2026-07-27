@@ -231,8 +231,7 @@ impl Dialect for ElasticsearchEqlDialect {
     }
 
     async fn format(&self, sql: &str) -> String {
-        // EQL 格式化：保持基本格式
-        common::compact_sql_whitespace(sql)
+        common::format_sql_pretty(sql)
     }
 
     async fn validate(&self, sql: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {

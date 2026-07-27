@@ -27,12 +27,13 @@ impl LspProcess {
         }
     }
 
-    fn initialize(&mut self) {
-        self.request(
+    fn initialize(&mut self) -> Value {
+        let result = self.request(
             "initialize",
             json!({ "processId": null, "rootUri": null, "capabilities": {} }),
         );
         self.notify("initialized", json!({}));
+        result
     }
 
     fn open(&mut self, uri: &str, language_id: &str, text: &str) {
@@ -181,6 +182,70 @@ fn sql_references_use_the_requested_uri_and_utf16_ranges() {
 }
 
 #[test]
+fn sql_references_include_open_documents_in_the_same_schema() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let first_uri = "file:///workspace/first.postgres.sql";
+    let second_uri = "file:///workspace/second.postgres.sql";
+    let schema_id = "33333333-3333-4333-8333-333333333333";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "public",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": null
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (first_uri): schema_id,
+                    (second_uri): schema_id
+                },
+                "fileDialects": {
+                    (first_uri): "postgres",
+                    (second_uri): "postgres"
+                }
+            }
+        }),
+    );
+    let first_sql = "SELECT * FROM orders";
+    let second_sql = "DELETE FROM orders WHERE id = 1";
+    lsp.open(first_uri, "postgres", first_sql);
+    lsp.open(second_uri, "postgres", second_sql);
+
+    let offset = first_sql.find("orders").unwrap() + 2;
+    let result = lsp.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": first_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(first_sql, offset),
+            },
+            "context": { "includeDeclaration": true },
+        }),
+    );
+    let uris = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|location| location.get("uri").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(uris.contains(&first_uri), "{result}");
+    assert!(uris.contains(&second_uri), "{result}");
+}
+
+#[test]
 fn json_references_use_the_requested_uri_and_utf16_ranges() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();
@@ -260,6 +325,54 @@ fn goto_definition_preserves_a_schema_source_uri() {
         result.pointer("/range/start/line").and_then(Value::as_u64),
         Some(6)
     );
+}
+
+#[test]
+fn postgres_definition_preserves_database_object_uri() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let uri = "file:///workspace/query.postgres.sql";
+    let schema_id = "44444444-4444-4444-8444-444444444444";
+    let object_uri = "oxide://database-object/object?connection=main&schema=public&object=users";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "public",
+                    "tables": [{
+                        "name": "users",
+                        "columns": [],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": [object_uri, 1]
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": { (uri): schema_id },
+                "fileDialects": { (uri): "postgres" }
+            }
+        }),
+    );
+    let sql = "SELECT * FROM users";
+    lsp.open(uri, "postgres", sql);
+    let table_offset = sql.find("users").unwrap();
+    let result = lsp.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(sql, table_offset + 2),
+            }
+        }),
+    );
+
+    assert_eq!(result.get("uri").and_then(Value::as_str), Some(object_uri));
 }
 
 #[test]
@@ -343,4 +456,434 @@ fn inline_completion_context_combines_ast_schema_and_validation() {
     assert!(diagnostics.as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.get("severity").and_then(Value::as_u64) == Some(1) })));
+}
+
+#[test]
+fn advanced_editor_capabilities_are_advertised_and_operational() {
+    let mut lsp = LspProcess::spawn();
+    let initialized = lsp.initialize();
+    for capability in [
+        "signatureHelpProvider",
+        "documentSymbolProvider",
+        "workspaceSymbolProvider",
+        "codeActionProvider",
+        "documentRangeFormattingProvider",
+        "renameProvider",
+        "foldingRangeProvider",
+        "selectionRangeProvider",
+        "semanticTokensProvider",
+        "inlayHintProvider",
+        "diagnosticProvider",
+    ] {
+        assert!(
+            initialized
+                .pointer(&format!("/capabilities/{capability}"))
+                .is_some(),
+            "missing {capability}: {initialized}"
+        );
+    }
+
+    let uri = "file:///workspace/advanced.postgres.sql";
+    let schema_id = "55555555-5555-4555-8555-555555555555";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [{
+                            "name": "amount",
+                            "data_type": "numeric",
+                            "nullable": false,
+                            "primary_key": false,
+                            "unique": false,
+                            "indexed": false,
+                            "comment": null,
+                            "source_location": null
+                        }],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": null
+                    }],
+                    "functions": [
+                        {
+                            "name": "calculate",
+                            "parameters": [{
+                                "name": "value",
+                                "data_type": "numeric",
+                                "optional": false
+                            }],
+                            "return_type": "numeric",
+                            "description": "Calculate a numeric result"
+                        },
+                        {
+                            "name": "calculate",
+                            "parameters": [{
+                                "name": "value",
+                                "data_type": "integer",
+                                "optional": false
+                            }],
+                            "return_type": "integer",
+                            "description": "Calculate an integer result"
+                        }
+                    ],
+                    "source_uri": null
+                }],
+                "fileSchemas": { (uri): schema_id },
+                "fileDialects": { (uri): "postgres" }
+            }
+        }),
+    );
+    let sql = "SELECT * FROM orders;\nSELECT calculate(\n  amount\n) FROM orders;\nUPDATE orders SET amount = 1;";
+    lsp.open(uri, "postgres", sql);
+
+    let call_line = "SELECT calculate(";
+    let signature = lsp.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": call_line.len() }
+        }),
+    );
+    assert_eq!(
+        signature
+            .get("signatures")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2),
+        "{signature}"
+    );
+
+    let semantic_tokens = lsp.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let semantic_data = semantic_tokens
+        .get("data")
+        .and_then(Value::as_array)
+        .expect("semantic token data");
+    assert!(!semantic_data.is_empty(), "{semantic_tokens}");
+    assert_eq!(semantic_data.len() % 5, 0);
+    assert!(semantic_data
+        .chunks(5)
+        .any(|token| token.get(3).and_then(Value::as_u64) == Some(3)));
+
+    let hints = lsp.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 4, "character": 29 }
+            }
+        }),
+    );
+    assert!(
+        hints.as_array().is_some_and(|items| items
+            .iter()
+            .any(|hint| { hint.get("label").and_then(Value::as_str) == Some("value:") })),
+        "{hints}"
+    );
+
+    let symbols = lsp.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert!(symbols.as_array().is_some_and(|items| !items.is_empty()));
+
+    let workspace_symbols = lsp.request("workspace/symbol", json!({ "query": "amount" }));
+    assert!(workspace_symbols.as_array().is_some_and(|items| items
+        .iter()
+        .any(|symbol| symbol.get("name").and_then(Value::as_str) == Some("amount"))));
+
+    let folds = lsp.request(
+        "textDocument/foldingRange",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    assert!(folds.as_array().is_some_and(|items| !items.is_empty()));
+
+    let selections = lsp.request(
+        "textDocument/selectionRange",
+        json!({
+            "textDocument": { "uri": uri },
+            "positions": [{ "line": 2, "character": 3 }]
+        }),
+    );
+    assert!(selections
+        .pointer("/0/parent/parent/range")
+        .is_some_and(Value::is_object));
+
+    let formatted = lsp.request(
+        "textDocument/rangeFormatting",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 20 }
+            },
+            "options": { "tabSize": 2, "insertSpaces": true }
+        }),
+    );
+    assert!(formatted
+        .pointer("/0/newText")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("SELECT")));
+
+    let diagnostic_report = lsp.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument": { "uri": uri },
+            "identifier": "sql-lsp"
+        }),
+    );
+    let diagnostics = diagnostic_report
+        .get("items")
+        .and_then(Value::as_array)
+        .expect("pull diagnostics");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.get("code").and_then(Value::as_str) == Some("OXIDE001")
+        }),
+        "{diagnostic_report}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.get("code").and_then(Value::as_str) == Some("OXIDE003")
+        }),
+        "{diagnostic_report}"
+    );
+
+    let actions = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": 7 },
+                "end": { "line": 0, "character": 8 }
+            },
+            "context": { "diagnostics": diagnostics }
+        }),
+    );
+    let titles = actions
+        .as_array()
+        .expect("code actions")
+        .iter()
+        .filter_map(|action| action.get("title").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(
+        titles.iter().any(|title| title.starts_with("Expand *")),
+        "{actions}"
+    );
+    assert!(
+        titles.contains(&"Add non-matching WHERE safety guard"),
+        "{actions}"
+    );
+}
+
+#[test]
+fn semantic_rename_updates_open_documents_in_the_same_schema() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+    let first_uri = "file:///workspace/rename-one.postgres.sql";
+    let second_uri = "file:///workspace/rename-two.postgres.sql";
+    let schema_id = "66666666-6666-4666-8666-666666666666";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": null
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (first_uri): schema_id,
+                    (second_uri): schema_id
+                },
+                "fileDialects": {
+                    (first_uri): "postgres",
+                    (second_uri): "postgres"
+                }
+            }
+        }),
+    );
+    let first_sql = "SELECT * FROM orders";
+    let second_sql = "DELETE FROM orders WHERE id = 1";
+    lsp.open(first_uri, "postgres", first_sql);
+    lsp.open(second_uri, "postgres", second_sql);
+    let offset = first_sql.find("orders").unwrap() + 2;
+
+    let prepared = lsp.request(
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": first_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(first_sql, offset)
+            }
+        }),
+    );
+    assert!(prepared.get("start").is_some(), "{prepared}");
+
+    let edit = lsp.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": first_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(first_sql, offset)
+            },
+            "newName": "archived_orders"
+        }),
+    );
+    assert!(
+        edit.pointer(&format!(
+            "/changes/{}/0/newText",
+            first_uri.replace('/', "~1")
+        ))
+        .is_some(),
+        "{edit}"
+    );
+    assert!(
+        edit.pointer(&format!(
+            "/changes/{}/0/newText",
+            second_uri.replace('/', "~1")
+        ))
+        .is_some(),
+        "{edit}"
+    );
+}
+
+#[test]
+fn completion_models_cte_derived_and_temporary_relation_columns() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+    let schema_id = "77777777-7777-4777-8777-777777777777";
+    let cte_uri = "file:///workspace/local-cte.postgres.sql";
+    let derived_uri = "file:///workspace/local-derived.postgres.sql";
+    let temporary_uri = "file:///workspace/local-temp.postgres.sql";
+    let temporary_as_uri = "file:///workspace/local-temp-as.postgres.sql";
+    let temporary_drop_uri = "file:///workspace/local-temp-drop.postgres.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [{
+                            "name": "amount",
+                            "data_type": "numeric",
+                            "nullable": false,
+                            "primary_key": false,
+                            "unique": false,
+                            "indexed": false,
+                            "comment": null,
+                            "source_location": null
+                        }],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": null
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (cte_uri): schema_id,
+                    (derived_uri): schema_id,
+                    (temporary_uri): schema_id,
+                    (temporary_as_uri): schema_id,
+                    (temporary_drop_uri): schema_id
+                },
+                "fileDialects": {
+                    (cte_uri): "postgres",
+                    (derived_uri): "postgres",
+                    (temporary_uri): "postgres",
+                    (temporary_as_uri): "postgres",
+                    (temporary_drop_uri): "postgres"
+                }
+            }
+        }),
+    );
+
+    for (uri, sql, expected) in [
+        (
+            cte_uri,
+            "WITH recent AS (SELECT amount AS total FROM orders) SELECT * FROM recent r WHERE r.",
+            vec!["total"],
+        ),
+        (
+            derived_uri,
+            "SELECT * FROM (SELECT amount AS total FROM orders) d WHERE d.",
+            vec!["total"],
+        ),
+        (
+            temporary_uri,
+            "CREATE TEMP TABLE IF NOT EXISTS scratch (temp_id bigint, note text); SELECT * FROM scratch s WHERE s.",
+            vec!["temp_id", "note"],
+        ),
+        (
+            temporary_as_uri,
+            "CREATE TEMP TABLE scratch AS SELECT amount AS copied_amount FROM orders; SELECT * FROM scratch s WHERE s.",
+            vec!["copied_amount"],
+        ),
+    ] {
+        lsp.open(uri, "postgres", sql);
+        let result = lsp.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": {
+                    "line": 0,
+                    "character": utf16_column(sql, sql.len())
+                },
+                "context": { "triggerKind": 2, "triggerCharacter": "." }
+            }),
+        );
+        let labels = result
+            .as_array()
+            .expect("completion array")
+            .iter()
+            .filter_map(|item| item.get("label").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        for label in expected {
+            assert!(labels.contains(&label), "missing {label}: {result}");
+        }
+    }
+
+    let dropped_sql = "CREATE TEMP TABLE scratch (temp_id bigint); DROP TABLE IF EXISTS scratch; SELECT * FROM scratch s WHERE s.";
+    lsp.open(temporary_drop_uri, "postgres", dropped_sql);
+    let dropped_result = lsp.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": temporary_drop_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(dropped_sql, dropped_sql.len())
+            },
+            "context": { "triggerKind": 2, "triggerCharacter": "." }
+        }),
+    );
+    assert!(
+        !dropped_result.as_array().is_some_and(|items| items
+            .iter()
+            .any(|item| item.get("label").and_then(Value::as_str) == Some("temp_id"))),
+        "{dropped_result}"
+    );
 }

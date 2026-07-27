@@ -1345,6 +1345,54 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
 }
 
 #[tokio::test]
+async fn test_elasticsearch_console_scopes_fields_to_request_index() {
+    let dialect = ElasticsearchDslDialect::new();
+    let table = |name: &str, columns: &[&str]| Table {
+        name: name.to_string(),
+        columns: columns
+            .iter()
+            .map(|column| Column {
+                name: (*column).to_string(),
+                data_type: "keyword".to_string(),
+                nullable: true,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let schema = Schema {
+        id: SchemaId::new(),
+        database: "default".to_string(),
+        tables: vec![
+            table("anocs_new", &["gid", "current_only"]),
+            table("archive", &["gid", "archive_only"]),
+        ],
+        functions: vec![],
+        source_uri: None,
+    };
+    // Monaco inserts both quotes at once and keeps the caret between them.
+    // The LSP receives the complete document, so this specifically protects
+    // completion at the `"|"` position rather than only after an open quote.
+    let request =
+        "POST /anocs_new/_search\n{\n  \"query\": {\n    \"term\": {\n      \"\": \"value\"\n    }\n  }\n}";
+    let items = dialect
+        .completion(
+            request,
+            tower_lsp::lsp_types::Position {
+                line: 4,
+                character: 7,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(items.iter().any(|item| item.label == "gid"));
+    assert!(items.iter().any(|item| item.label == "current_only"));
+    assert!(!items.iter().any(|item| item.label == "archive_only"));
+    assert_eq!(items.iter().filter(|item| item.label == "gid").count(), 1);
+}
+
+#[tokio::test]
 async fn test_elasticsearch_dsl_http_style_requests() {
     let dialect = ElasticsearchDslDialect::new();
     let request = r#"GET /users/_search

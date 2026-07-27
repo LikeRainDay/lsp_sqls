@@ -2,7 +2,41 @@ use crate::parser::SqlParser;
 use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Documentation, Position};
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionItemKind, Documentation, Location, Position, Range, Url,
+};
+
+pub(crate) fn format_sql_pretty(source: &str) -> String {
+    use sqlformat::{FormatOptions, Indent, QueryParams};
+    let options = FormatOptions {
+        indent: Indent::Spaces(2),
+        uppercase: Some(true),
+        lines_between_queries: 1,
+        ..FormatOptions::default()
+    };
+    sqlformat::format(source, &QueryParams::None, &options)
+}
+
+pub(crate) fn metadata_location(
+    source_location: Option<&(String, u32)>,
+    schema_uri: Option<&String>,
+    fallback_uri: &str,
+) -> Option<Location> {
+    let (raw_uri, line) = if let Some((uri, line)) = source_location {
+        (uri.as_str(), line.saturating_sub(1))
+    } else if let Some(uri) = schema_uri {
+        (uri.as_str(), 0)
+    } else {
+        (fallback_uri, 0)
+    };
+    Some(Location {
+        uri: Url::parse(raw_uri).ok()?,
+        range: Range {
+            start: Position { line, character: 0 },
+            end: Position { line, character: 0 },
+        },
+    })
+}
 
 fn dollar_quote_tag_at(source: &str, index: usize) -> Option<&str> {
     let rest = source.get(index..)?;
