@@ -218,10 +218,14 @@ impl ElasticsearchDslDialect {
     fn add_top_level_items(
         &self,
         items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
         prefix: &str,
         quoted_insert: bool,
     ) {
         for field in ES_TOP_LEVEL_FIELDS {
+            if !elasticsearch_top_level_field_supported(field, schema) {
+                continue;
+            }
             if !prefix.is_empty() && !field.to_ascii_lowercase().starts_with(prefix) {
                 continue;
             }
@@ -237,10 +241,14 @@ impl ElasticsearchDslDialect {
     fn add_query_type_items(
         &self,
         items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
         prefix: &str,
         quoted_insert: bool,
     ) {
         for query_type in ES_QUERY_TYPES {
+            if !elasticsearch_query_type_supported(query_type, schema) {
+                continue;
+            }
             if !prefix.is_empty() && !query_type.to_ascii_lowercase().starts_with(prefix) {
                 continue;
             }
@@ -369,11 +377,11 @@ impl Dialect for ElasticsearchDslDialect {
 
         match hint.kind {
             EsCompletionKind::TopLevel => {
-                self.add_top_level_items(&mut items, &prefix, quoted_insert);
+                self.add_top_level_items(&mut items, schema, &prefix, quoted_insert);
                 return items;
             }
             EsCompletionKind::QueryType => {
-                self.add_query_type_items(&mut items, &prefix, quoted_insert);
+                self.add_query_type_items(&mut items, schema, &prefix, quoted_insert);
                 return items;
             }
             EsCompletionKind::AggType => {
@@ -413,11 +421,11 @@ impl Dialect for ElasticsearchDslDialect {
         // 根据上下文提供不同的补全
         match context {
             crate::parser::DslCompletionContext::TopLevel => {
-                self.add_top_level_items(&mut items, &prefix, true);
+                self.add_top_level_items(&mut items, schema, &prefix, true);
             }
 
             crate::parser::DslCompletionContext::QueryObject => {
-                self.add_query_type_items(&mut items, &prefix, true);
+                self.add_query_type_items(&mut items, schema, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
 
@@ -445,8 +453,8 @@ impl Dialect for ElasticsearchDslDialect {
             }
 
             crate::parser::DslCompletionContext::Default => {
-                self.add_query_type_items(&mut items, &prefix, true);
-                self.add_top_level_items(&mut items, &prefix, true);
+                self.add_query_type_items(&mut items, schema, &prefix, true);
+                self.add_top_level_items(&mut items, schema, &prefix, true);
                 self.add_schema_field_items(&mut items, schema, &prefix);
             }
         }
@@ -612,6 +620,11 @@ const ES_TOP_LEVEL_FIELDS: &[&str] = &[
     "min_score",
     "timeout",
     "terminate_after",
+    "collapse",
+    "search_after",
+    "track_total_hits",
+    "runtime_mappings",
+    "knn",
 ];
 
 const ES_QUERY_TYPES: &[&str] = &[
@@ -641,7 +654,37 @@ const ES_QUERY_TYPES: &[&str] = &[
     "function_score",
     "script_score",
     "percolate",
+    "intervals",
+    "combined_fields",
+    "distance_feature",
+    "rank_feature",
+    "pinned",
 ];
+
+fn elasticsearch_top_level_field_supported(field: &str, schema: Option<&Schema>) -> bool {
+    let Some(schema) = schema else {
+        return true;
+    };
+    match field {
+        "runtime_mappings" => schema.supports_server_version(7, 11),
+        "knn" => schema.supports_server_version(8, 0),
+        _ => true,
+    }
+}
+
+fn elasticsearch_query_type_supported(query_type: &str, schema: Option<&Schema>) -> bool {
+    let Some(schema) = schema else {
+        return true;
+    };
+    match query_type {
+        "type" => schema.server_major_version().is_none_or(|major| major <= 6),
+        "intervals" | "distance_feature" | "rank_feature" | "pinned" => {
+            schema.supports_server_version(7, 0)
+        }
+        "combined_fields" => schema.supports_server_version(7, 13),
+        _ => true,
+    }
+}
 
 const ES_AGG_TYPES: &[&str] = &[
     "terms",

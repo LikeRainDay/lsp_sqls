@@ -62,6 +62,7 @@ async fn test_comprehensive_completion_scenarios() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "shop".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "users".to_string(),

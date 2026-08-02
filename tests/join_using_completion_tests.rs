@@ -16,6 +16,7 @@ fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
         database: database.to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "users".to_string(),

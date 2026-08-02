@@ -1,4 +1,7 @@
-use sql_lsp::dialects::DialectRegistry;
+use sql_lsp::dialects::{
+    DialectRegistry, MYSQL_COMPATIBILITY_ALIASES, POSTGRES_COMPATIBILITY_ALIASES,
+    SQLITE_COMPATIBILITY_ALIASES,
+};
 
 #[test]
 fn test_dialect_registry() {
@@ -7,6 +10,7 @@ fn test_dialect_registry() {
     let names = registry.list_names();
     assert!(names.contains(&"mysql".to_string()));
     assert!(names.contains(&"postgres".to_string()));
+    assert!(names.contains(&"sqlite".to_string()));
     assert!(names.contains(&"hive".to_string()));
     assert!(names.contains(&"elasticsearch-eql".to_string()));
     assert!(names.contains(&"elasticsearch-dsl".to_string()));
@@ -23,6 +27,8 @@ fn test_dialect_registry_get_by_name() {
     assert!(registry.get_by_name("mariadb").is_some());
     assert!(registry.get_by_name("postgres").is_some());
     assert!(registry.get_by_name("postgresql").is_some());
+    assert!(registry.get_by_name("sqlite").is_some());
+    assert!(registry.get_by_name("sqlite3").is_some());
     assert!(registry.get_by_name("pgsql").is_some());
     assert!(registry.get_by_name("psql").is_some());
     assert!(registry.get_by_name("hive").is_some());
@@ -51,4 +57,31 @@ fn test_dialect_registry_case_insensitive() {
     assert!(registry.get_by_name("MySQL").is_some());
     assert!(registry.get_by_name("POSTGRES").is_some());
     assert!(registry.get_by_name("HiVe").is_some());
+}
+
+#[test]
+fn test_reviewed_vendor_compatibility_aliases_keep_their_parser_baseline() {
+    let registry = DialectRegistry::new();
+
+    for alias in MYSQL_COMPATIBILITY_ALIASES {
+        assert_eq!(
+            registry.get_by_name(alias).unwrap().name(),
+            "mysql",
+            "{alias}"
+        );
+    }
+    for alias in POSTGRES_COMPATIBILITY_ALIASES {
+        assert_eq!(
+            registry.get_by_name(alias).unwrap().name(),
+            "postgres",
+            "{alias}"
+        );
+    }
+    for alias in SQLITE_COMPATIBILITY_ALIASES {
+        assert_eq!(
+            registry.get_by_name(alias).unwrap().name(),
+            "sqlite",
+            "{alias}"
+        );
+    }
 }

@@ -16,6 +16,44 @@ use tower_lsp::{Client, LanguageServer};
 const CURRENT_SQL_DOCUMENT_URI: &str = "file:///current.sql";
 const CURRENT_JSON_DOCUMENT_URI: &str = "file:///current.json";
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletionPreferences {
+    #[serde(default = "default_keyword_case")]
+    keyword_case: KeywordCase,
+    #[serde(default)]
+    table_alias: TableAliasStyle,
+}
+
+impl Default for CompletionPreferences {
+    fn default() -> Self {
+        Self {
+            keyword_case: KeywordCase::Upper,
+            table_alias: TableAliasStyle::None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum KeywordCase {
+    Upper,
+    Lower,
+    Preserve,
+}
+
+fn default_keyword_case() -> KeywordCase {
+    KeywordCase::Upper
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TableAliasStyle {
+    #[default]
+    None,
+    Initials,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InlineCompletionCandidate {
@@ -124,6 +162,7 @@ pub struct SqlLspServer {
     inferred_file_schemas: Arc<DashMap<String, SchemaId>>,
     /// 无法从 URI/languageId 推断时使用的默认方言
     default_dialect: Arc<RwLock<String>>,
+    completion_preferences: Arc<RwLock<CompletionPreferences>>,
     /// 打开文档的 languageId，用于配置刷新后恢复推断方言
     document_languages: Arc<DashMap<String, String>>,
     /// 文档管理器
@@ -143,6 +182,7 @@ impl SqlLspServer {
             configured_file_schemas: Arc::new(DashMap::new()),
             inferred_file_schemas: Arc::new(DashMap::new()),
             default_dialect: Arc::new(RwLock::new("postgres".to_string())),
+            completion_preferences: Arc::new(RwLock::new(CompletionPreferences::default())),
             document_languages: Arc::new(DashMap::new()),
             document_manager: DocumentManager::new(),
             analysis_cache: Arc::new(DashMap::new()),
@@ -433,6 +473,26 @@ fn position_to_byte_offset(text: &str, position: Position) -> usize {
     line_start + utf16_position_to_line_byte_offset(&text[line_start..line_end], position.character)
 }
 
+/// Recover a high-confidence active statement for completion when users keep
+/// multiple query blocks in one console but omit a semicolon between them.
+///
+/// This is intentionally narrower than the execution splitter. A blank line,
+/// a top-level statement keyword, and balanced parentheses are required. CTE,
+/// INSERT SELECT, EXPLAIN, CREATE body, ClickHouse mutation, and set-operation
+/// continuations remain a single scope.
+fn completion_statement_prefix(text: &str, position: Position) -> Option<(&str, Position)> {
+    let cursor = position_to_byte_offset(text, position);
+    let prefix = text.get(..cursor)?;
+    let masked = SqlParser::mask_sql_noise(prefix);
+    let semicolon_start = masked.rfind(';').map(|offset| offset + 1).unwrap_or(0);
+    let start = SqlParser::active_statement_start(prefix);
+    if start == semicolon_start {
+        return None;
+    }
+    let scoped = text.get(start..cursor)?;
+    Some((scoped, lsp_position_at_end(scoped)))
+}
+
 fn line_bounds_for_position(text: &str, target_line: u32) -> (usize, usize) {
     let bytes = text.as_bytes();
     let mut current_line = 0u32;
@@ -587,6 +647,109 @@ fn is_relation_completion_kind(kind: Option<CompletionItemKind>) -> bool {
                 | CompletionItemKind::FOLDER
         )
     )
+}
+
+fn apply_completion_preferences(
+    text: &str,
+    position: Position,
+    items: &mut [CompletionItem],
+    preferences: &CompletionPreferences,
+) {
+    let add_table_alias = preferences.table_alias == TableAliasStyle::Initials
+        && relation_alias_context_at_position(text, position);
+
+    for item in items {
+        if item.kind == Some(CompletionItemKind::KEYWORD) {
+            let transform = |value: &str| match preferences.keyword_case {
+                KeywordCase::Upper => value.to_ascii_uppercase(),
+                KeywordCase::Lower => value.to_ascii_lowercase(),
+                KeywordCase::Preserve => value.to_string(),
+            };
+            item.label = transform(&item.label);
+            if let Some(insert_text) = item.insert_text.as_mut() {
+                *insert_text = transform(insert_text);
+            }
+            update_completion_text_edit(item, &transform);
+        } else if add_table_alias && is_relation_completion_kind(item.kind) {
+            let Some(alias) = table_alias_initials(&item.label) else {
+                continue;
+            };
+            let append_alias = |value: &str| format!("{value} ${{1:{alias}}}");
+            if let Some(insert_text) = item.insert_text.as_mut() {
+                *insert_text = append_alias(insert_text);
+            } else {
+                item.insert_text = Some(append_alias(&item.label));
+            }
+            item.insert_text_format = Some(InsertTextFormat::SNIPPET);
+            update_completion_text_edit(item, &append_alias);
+        }
+    }
+}
+
+fn update_completion_text_edit(item: &mut CompletionItem, transform: &impl Fn(&str) -> String) {
+    match item.text_edit.as_mut() {
+        Some(CompletionTextEdit::Edit(edit)) => edit.new_text = transform(&edit.new_text),
+        Some(CompletionTextEdit::InsertAndReplace(edit)) => {
+            edit.new_text = transform(&edit.new_text)
+        }
+        None => {}
+    }
+}
+
+fn relation_alias_context_at_position(text: &str, position: Position) -> bool {
+    let offset = position_to_byte_offset(text, position);
+    let Some(text_before) = text.get(..offset) else {
+        return false;
+    };
+    let mut last_clause = None;
+    for token in text_before
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|token| !token.is_empty())
+    {
+        let token = token.to_ascii_uppercase();
+        if matches!(
+            token.as_str(),
+            "SELECT"
+                | "FROM"
+                | "JOIN"
+                | "WHERE"
+                | "ON"
+                | "GROUP"
+                | "HAVING"
+                | "ORDER"
+                | "LIMIT"
+                | "UNION"
+                | "VALUES"
+                | "SET"
+                | "INTO"
+        ) {
+            last_clause = Some(token);
+        }
+    }
+    matches!(last_clause.as_deref(), Some("FROM" | "JOIN"))
+}
+
+fn table_alias_initials(label: &str) -> Option<String> {
+    let relation = label.rsplit('.').next()?.trim_matches(['`', '"', '[', ']']);
+    let mut alias = String::new();
+    let mut take_next = true;
+    let mut previous_lowercase = false;
+    for character in relation.chars() {
+        if !character.is_ascii_alphanumeric() {
+            take_next = true;
+            previous_lowercase = false;
+            continue;
+        }
+        if take_next || (previous_lowercase && character.is_ascii_uppercase()) {
+            alias.push(character.to_ascii_lowercase());
+            if alias.len() == 4 {
+                break;
+            }
+        }
+        take_next = false;
+        previous_lowercase = character.is_ascii_lowercase();
+    }
+    (!alias.is_empty()).then_some(alias)
 }
 
 fn qualified_identifier_range_at_position(text: &str, position: Position) -> Option<Range> {
@@ -944,6 +1107,24 @@ impl LanguageServer for SqlLspServer {
                 }
             }
 
+            if let Some(preferences_value) = settings.get("completionPreferences") {
+                match serde_json::from_value::<CompletionPreferences>(preferences_value.clone()) {
+                    Ok(preferences) => {
+                        if let Ok(mut current_preferences) = self.completion_preferences.write() {
+                            *current_preferences = preferences;
+                        }
+                    }
+                    Err(error) => {
+                        self.client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Ignoring invalid completion preferences: {error}"),
+                            )
+                            .await;
+                    }
+                }
+            }
+
             // 处理 schemas 配置
             if let Some(schemas_value) = settings.get("schemas") {
                 if let Ok(schemas) =
@@ -1103,11 +1284,26 @@ impl LanguageServer for SqlLspServer {
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let schema = self.get_schema_for_position(&uri, &text, position);
+            let (completion_text, completion_position) =
+                completion_statement_prefix(&text, position).unwrap_or((&text, position));
             let mut items = dialect
-                .completion_with_context(&text, position, schema.as_ref(), params.context.as_ref())
+                .completion_with_context(
+                    completion_text,
+                    completion_position,
+                    schema.as_ref(),
+                    params.context.as_ref(),
+                )
                 .await;
             apply_completed_sql_context_completion_edits(&text, position, &mut items);
             apply_qualified_identifier_completion_edits(&text, position, &mut items);
+            if matches!(dialect.name(), "postgres" | "mysql" | "hive" | "clickhouse") {
+                let preferences = self
+                    .completion_preferences
+                    .read()
+                    .map(|preferences| preferences.clone())
+                    .unwrap_or_default();
+                apply_completion_preferences(&text, position, &mut items, &preferences);
+            }
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
@@ -3303,6 +3499,16 @@ fn infer_dialect_from_uri_and_language(
         || uri_lower.ends_with(".psql")
     {
         return "postgres".to_string();
+    } else if uri_lower.ends_with(".sqlite.sql")
+        || uri_lower.ends_with(".sqlite")
+        || uri_lower.ends_with(".sqlite3")
+        // DuckDB currently opts into the shipped SQLite-compatible completion
+        // profile. Recognize its URI extension too, so a document never falls
+        // back to the previously selected connection while config sync runs.
+        || uri_lower.ends_with(".duckdb.sql")
+        || uri_lower.ends_with(".duckdb")
+    {
+        return "sqlite".to_string();
     } else if uri_lower.ends_with(".hive.sql") || uri_lower.ends_with(".hql") {
         return "hive".to_string();
     } else if uri_lower.ends_with(".es.eql") || uri_lower.ends_with(".eql") {
@@ -3329,6 +3535,7 @@ fn infer_dialect_from_uri_and_language(
     match lang_lower.as_str() {
         "mysql" | "mysql-sql" => "mysql".to_string(),
         "postgresql" | "postgres" | "postgres-sql" | "pgsql" | "psql" => "postgres".to_string(),
+        "sqlite" | "sqlite3" | "duckdb" => "sqlite".to_string(),
         "hive" | "hql" => "hive".to_string(),
         "elasticsearch-eql" | "eql" => "elasticsearch-eql".to_string(),
         "elasticsearch-dsl" | "es-dsl" | "json" if uri_lower.contains("elasticsearch") => {
@@ -3344,13 +3551,15 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_completed_sql_context_completion_edits, apply_qualified_identifier_completion_edits,
-        calculate_schema_match_score, completed_sql_context_keyword_at_position,
+        apply_completed_sql_context_completion_edits, apply_completion_preferences,
+        apply_qualified_identifier_completion_edits, calculate_schema_match_score,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
         find_schema_by_qualifier, find_schema_by_table_reference,
         infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
         rewrite_current_document_location_uri, rewrite_current_document_location_uris,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
+        TableAliasStyle,
     };
     use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
@@ -3362,6 +3571,7 @@ mod tests {
         Schema {
             id: SchemaId::new(),
             database: database.to_string(),
+            server_version: None,
             tables: tables
                 .iter()
                 .map(|name| Table {
@@ -3437,6 +3647,14 @@ mod tests {
             infer_dialect_from_uri_and_language("file:///query.mongo.json", "sql", "postgres"),
             "mongodb"
         );
+        assert_eq!(
+            infer_dialect_from_uri_and_language(
+                "oxide://query/tab.duckdb.sqlite",
+                "sql",
+                "postgres"
+            ),
+            "sqlite"
+        );
     }
 
     #[test]
@@ -3452,6 +3670,10 @@ mod tests {
         assert_eq!(
             infer_dialect_from_uri_and_language("untitled://1", "json", "postgres"),
             "mongodb"
+        );
+        assert_eq!(
+            infer_dialect_from_uri_and_language("untitled://1", "sqlite", "mysql"),
+            "sqlite"
         );
     }
 
@@ -3477,6 +3699,7 @@ mod tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "app".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "orders".to_string(),
@@ -3807,6 +4030,74 @@ mod tests {
     }
 
     #[test]
+    fn completion_preferences_rewrite_keyword_case_and_text_edit() {
+        let mut items = vec![CompletionItem {
+            label: "SELECT".to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            insert_text: Some("SELECT".to_string()),
+            ..CompletionItem::default()
+        }];
+        apply_completed_sql_context_completion_edits("WHERE", Position::new(0, 5), &mut items);
+        apply_completion_preferences(
+            "WHERE",
+            Position::new(0, 5),
+            &mut items,
+            &CompletionPreferences {
+                keyword_case: KeywordCase::Lower,
+                table_alias: TableAliasStyle::None,
+            },
+        );
+
+        assert_eq!(items[0].label, "select");
+        assert_eq!(items[0].insert_text.as_deref(), Some("select"));
+        let Some(CompletionTextEdit::Edit(edit)) = items[0].text_edit.as_ref() else {
+            panic!("keyword completion should keep its text edit");
+        };
+        assert_eq!(edit.new_text, " select");
+    }
+
+    #[test]
+    fn completion_preferences_add_initial_alias_only_for_relation_context() {
+        let preferences = CompletionPreferences {
+            keyword_case: KeywordCase::Upper,
+            table_alias: TableAliasStyle::Initials,
+        };
+        let mut from_items = vec![CompletionItem {
+            label: "app.user_accounts".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            insert_text: Some("app.user_accounts".to_string()),
+            ..CompletionItem::default()
+        }];
+        apply_completion_preferences(
+            "SELECT * FROM user",
+            Position::new(0, 18),
+            &mut from_items,
+            &preferences,
+        );
+        assert_eq!(
+            from_items[0].insert_text.as_deref(),
+            Some("app.user_accounts ${1:ua}")
+        );
+
+        let mut select_items = from_items.clone();
+        select_items[0].insert_text = Some("app.user_accounts".to_string());
+        apply_completion_preferences(
+            "SELECT user",
+            Position::new(0, 11),
+            &mut select_items,
+            &preferences,
+        );
+        assert_eq!(
+            select_items[0].insert_text.as_deref(),
+            Some("app.user_accounts")
+        );
+        assert_eq!(
+            table_alias_initials("audit.userAccounts"),
+            Some("ua".to_string())
+        );
+    }
+
+    #[test]
     fn completion_after_from_keyword_drops_non_relation_items() {
         let sql = "SELECT * from";
         let position = Position {
@@ -4093,6 +4384,44 @@ mod tests {
             )
             .map(|schema| schema.id),
             Some(audit_id)
+        );
+    }
+
+    #[test]
+    fn completion_recovers_the_second_top_level_query_without_a_semicolon() {
+        let sql = "SELECT *\nFROM first_table\n\nSELECT ";
+        let position = crate::position::lsp_position_at_end(sql);
+        let (scope, local_position) =
+            completion_statement_prefix(sql, position).expect("second query should be isolated");
+
+        assert_eq!(scope, "SELECT ");
+        assert_eq!(local_position, crate::position::lsp_position_at_end(scope));
+    }
+
+    #[test]
+    fn completion_keeps_wrapped_and_nested_queries_in_one_scope() {
+        for sql in [
+            "WITH recent AS (\n  SELECT * FROM events\n)\n\nSELECT ",
+            "INSERT INTO archive (id)\n\nSELECT ",
+            "EXPLAIN\n\nSELECT ",
+            "SELECT * FROM (\n\n  SELECT ",
+            "SELECT 1\nUNION ALL\n\nSELECT ",
+        ] {
+            assert!(
+                completion_statement_prefix(sql, crate::position::lsp_position_at_end(sql))
+                    .is_none(),
+                "{sql:?} must remain one completion scope"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_ignores_statement_keywords_inside_sql_noise() {
+        let sql =
+            "SELECT '-- not a boundary'\n\n-- SELECT ignored\n/* SELECT ignored too */\nFROM logs";
+
+        assert!(
+            completion_statement_prefix(sql, crate::position::lsp_position_at_end(sql)).is_none()
         );
     }
 }

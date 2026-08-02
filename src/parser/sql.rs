@@ -11,6 +11,49 @@ use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
+const SOFT_STATEMENT_KEYWORDS: &[&str] = &[
+    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "CREATE", "ALTER", "DROP",
+    "TRUNCATE", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "USE", "CALL", "EXEC", "EXECUTE", "BEGIN",
+    "COMMIT", "ROLLBACK", "ANALYZE", "VACUUM",
+];
+
+fn soft_statement_keyword(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim_start();
+    let end = trimmed
+        .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .unwrap_or(trimmed.len());
+    let keyword = trimmed.get(..end)?;
+    SOFT_STATEMENT_KEYWORDS
+        .iter()
+        .copied()
+        .find(|candidate| keyword.eq_ignore_ascii_case(candidate))
+}
+
+fn soft_statement_is_wrapped_continuation(initial: &str, candidate: &str) -> bool {
+    match initial {
+        "WITH" => matches!(
+            candidate,
+            "SELECT" | "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        ),
+        "INSERT" => matches!(candidate, "SELECT" | "WITH"),
+        "EXPLAIN" | "DESCRIBE" | "DESC" => matches!(
+            candidate,
+            "SELECT" | "WITH" | "INSERT" | "UPDATE" | "DELETE" | "MERGE"
+        ),
+        "CREATE" => matches!(candidate, "SELECT" | "WITH" | "BEGIN"),
+        "ALTER" => candidate == "UPDATE",
+        _ => false,
+    }
+}
+
+fn soft_statement_is_set_continuation(previous_non_empty_line: &str, candidate: &str) -> bool {
+    candidate == "SELECT"
+        && matches!(
+            previous_non_empty_line.trim().to_ascii_uppercase().as_str(),
+            "UNION" | "UNION ALL" | "INTERSECT" | "EXCEPT" | "MINUS"
+        )
+}
+
 /// 补全上下文类型
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletionContext {
@@ -4401,11 +4444,67 @@ impl SqlParser {
         previous
     }
 
+    /// Determines the active top-level statement for interactive editor
+    /// contexts. Semicolons are authoritative; a blank line followed by a
+    /// top-level statement keyword can start a new scope when users omit one.
+    pub(crate) fn active_statement_start(source: &str) -> usize {
+        let masked = Self::mask_sql_noise(source);
+        let semicolon_start = masked.rfind(';').map(|position| position + 1).unwrap_or(0);
+        let Some(segment) = masked.get(semicolon_start..) else {
+            return semicolon_start;
+        };
+
+        let mut initial_keyword: Option<&str> = None;
+        let mut previous_non_empty_line = "";
+        let mut blank_lines = 0usize;
+        let mut parenthesis_depth = 0usize;
+        let mut candidate_start = None;
+        let mut line_offset = 0usize;
+
+        for line_with_newline in segment.split_inclusive('\n') {
+            let line = line_with_newline
+                .strip_suffix('\n')
+                .unwrap_or(line_with_newline);
+            let trimmed = line.trim();
+            let keyword = soft_statement_keyword(line);
+
+            if initial_keyword.is_none() && !trimmed.is_empty() {
+                initial_keyword = keyword;
+            } else if blank_lines > 0 && parenthesis_depth == 0 {
+                if let (Some(initial), Some(candidate)) = (initial_keyword, keyword) {
+                    if !soft_statement_is_wrapped_continuation(initial, candidate)
+                        && !soft_statement_is_set_continuation(previous_non_empty_line, candidate)
+                    {
+                        let leading = line.len() - line.trim_start().len();
+                        candidate_start = Some(semicolon_start + line_offset + leading);
+                        initial_keyword = Some(candidate);
+                    }
+                }
+            }
+
+            for character in line.chars() {
+                match character {
+                    '(' => parenthesis_depth += 1,
+                    ')' => parenthesis_depth = parenthesis_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            if trimmed.is_empty() {
+                if initial_keyword.is_some() {
+                    blank_lines += 1;
+                }
+            } else {
+                previous_non_empty_line = trimmed;
+                blank_lines = 0;
+            }
+            line_offset += line_with_newline.len();
+        }
+
+        candidate_start.unwrap_or(semicolon_start)
+    }
+
     fn previous_statement_start(source_upper: &str, index: usize) -> usize {
-        source_upper[..index]
-            .rfind(';')
-            .map(|position| position + 1)
-            .unwrap_or(0)
+        Self::active_statement_start(&source_upper[..index])
     }
 
     fn contains_keyword_between(

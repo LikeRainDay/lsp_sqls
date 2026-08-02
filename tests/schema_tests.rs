@@ -46,6 +46,7 @@ fn test_schema_manager_basic() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![],
         functions: vec![],
         source_uri: None,
@@ -69,6 +70,7 @@ fn test_schema_manager_multiple_schemas() {
     let schema1 = Schema {
         id: SchemaId::new(),
         database: "db1".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "table1".to_string(),
             columns: vec![],
@@ -83,6 +85,7 @@ fn test_schema_manager_multiple_schemas() {
     let schema2 = Schema {
         id: SchemaId::new(),
         database: "db2".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "table2".to_string(),
             columns: vec![],
@@ -118,6 +121,7 @@ async fn test_schema_manager_concurrent() {
             let schema = Schema {
                 id: SchemaId::new(),
                 database: format!("db_{}", i),
+                server_version: None,
                 tables: vec![],
                 functions: vec![],
                 source_uri: None,
@@ -141,6 +145,7 @@ fn test_schema_with_tables_and_columns() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "users".to_string(),
             columns: vec![
@@ -179,6 +184,7 @@ fn test_schema_with_functions() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![],
         functions: vec![Function {
             name: "my_function".to_string(),

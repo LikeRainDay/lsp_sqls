@@ -7,6 +7,7 @@ fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
         database: database.to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "webhook".to_string(),
             columns: vec![
@@ -64,8 +65,9 @@ async fn mysql_select_item_continuation_excludes_fields() {
     assert!(!has_kind(&items, CompletionItemKind::FIELD));
 
     let after_comma = complete(&MysqlDialect::new(), "SELECT owner, ", &schema).await;
-    assert!(has_label(&after_comma, "owner"));
-    assert!(has_label(&after_comma, "created_time"));
+    assert!(has_label(&after_comma, "webhook.owner"));
+    assert!(has_label(&after_comma, "webhook.created_time"));
+    assert!(!has_label(&after_comma, "owner"));
     assert!(has_kind(&after_comma, CompletionItemKind::FIELD));
 }
 

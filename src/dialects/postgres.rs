@@ -148,6 +148,7 @@ impl Dialect for PostgresDialect {
         } else {
             crate::parser::CompletionContext::Default
         };
+        let is_join_clause = context == crate::parser::CompletionContext::JoinClause;
 
         let mut items = Vec::new();
 
@@ -159,6 +160,21 @@ impl Dialect for PostgresDialect {
 
                 if let Some(schema) = schema {
                     common::add_schema_tables(&mut items, schema, &prefix, true);
+                    if is_join_clause {
+                        if let Some(tree) = &parse_result.tree {
+                            let referenced_tables =
+                                parser.extract_referenced_tables_at_position(tree, sql, position);
+                            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+                            common::add_foreign_key_join_snippets(
+                                &mut items,
+                                schema,
+                                &referenced_tables,
+                                &aliases,
+                                &prefix,
+                                true,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -214,7 +230,7 @@ impl Dialect for PostgresDialect {
                             Self::referenced_table_names_at_position(&parser, tree, sql, position)
                         })
                         .unwrap_or_default();
-                    let use_table_prefix = referenced_tables.len() > 1;
+                    let use_table_prefix = referenced_tables.len() != 1;
 
                     self.add_schema_columns(
                         &mut items,
@@ -274,6 +290,14 @@ impl Dialect for PostgresDialect {
                             let use_table_prefix =
                                 !matches!(latest_predicate_clause, Some("SET" | "UPDATE"))
                                     && referenced_tables.len() > 1;
+                            common::add_column_domain_value_items(
+                                &mut items,
+                                schema,
+                                &referenced_tables,
+                                sql,
+                                position,
+                                &prefix,
+                            );
                             self.add_schema_columns(
                                 &mut items,
                                 schema,
@@ -347,7 +371,7 @@ impl Dialect for PostgresDialect {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables =
                             Self::referenced_table_names_at_position(&parser, tree, sql, position);
-                        let use_table_prefix = referenced_tables.len() > 1;
+                        let use_table_prefix = referenced_tables.len() != 1;
                         self.add_schema_columns(
                             &mut items,
                             schema,
@@ -377,7 +401,7 @@ impl Dialect for PostgresDialect {
                     if let Some(tree) = &parse_result.tree {
                         let referenced_tables =
                             Self::referenced_table_names_at_position(&parser, tree, sql, position);
-                        let use_table_prefix = referenced_tables.len() > 1;
+                        let use_table_prefix = referenced_tables.len() != 1;
                         self.add_schema_columns(
                             &mut items,
                             schema,
@@ -441,7 +465,7 @@ impl Dialect for PostgresDialect {
                             let referenced_tables = Self::referenced_table_names_at_position(
                                 &parser, tree, sql, position,
                             );
-                            let use_table_prefix = referenced_tables.len() > 1;
+                            let use_table_prefix = referenced_tables.len() != 1;
                             self.add_schema_columns(
                                 &mut items,
                                 schema,
@@ -743,6 +767,23 @@ impl Dialect for PostgresDialect {
 
             crate::parser::CompletionContext::ExpressionValueClause => {
                 let prefix = common::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            Self::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    common::add_column_domain_value_items(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        sql,
+                        position,
+                        &prefix,
+                    );
+                }
                 let mut keywords =
                     vec!["NULL", "TRUE", "FALSE", "CURRENT_DATE", "CURRENT_TIMESTAMP"];
                 if common::expression_value_allows_default(sql, position) {
@@ -769,7 +810,7 @@ impl Dialect for PostgresDialect {
                             Self::referenced_table_names_at_position(&parser, tree, sql, position)
                         })
                         .unwrap_or_default();
-                    let use_table_prefix = referenced_tables.len() > 1;
+                    let use_table_prefix = referenced_tables.len() != 1;
 
                     self.add_schema_columns(
                         &mut items,

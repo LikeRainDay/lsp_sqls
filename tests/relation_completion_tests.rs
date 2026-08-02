@@ -1,5 +1,5 @@
 use sql_lsp::dialect::Dialect;
-use sql_lsp::dialects::{MysqlDialect, PostgresDialect};
+use sql_lsp::dialects::{MysqlDialect, PostgresDialect, SqliteDialect};
 use sql_lsp::schema::{Column, Schema, SchemaId, Table};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 
@@ -7,6 +7,7 @@ fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
         database: database.to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "webhook".to_string(),
@@ -107,6 +108,25 @@ async fn relation_target_completion_suggests_tables_not_columns() {
     assert!(has_kind(&postgres_items, CompletionItemKind::CLASS));
     assert!(!has_label(&postgres_items, "owner"));
     assert!(!has_kind(&postgres_items, CompletionItemKind::FIELD));
+}
+
+#[tokio::test]
+async fn sqlite_completion_uses_its_own_dialect_id_with_relational_scope() {
+    let schema = schema("main");
+    let from_items = complete(&SqliteDialect::new(), "SELECT * FROM ", &schema).await;
+    assert!(has_label(&from_items, "webhook"));
+    assert!(has_label(&from_items, "form"));
+    assert!(has_kind(&from_items, CompletionItemKind::CLASS));
+
+    let where_items = complete(
+        &SqliteDialect::new(),
+        "SELECT * FROM main.webhook WHERE ",
+        &schema,
+    )
+    .await;
+    assert!(has_label(&where_items, "owner"));
+    assert!(!has_label(&where_items, "form_css"));
+    assert!(has_kind(&where_items, CompletionItemKind::FIELD));
 }
 
 #[tokio::test]

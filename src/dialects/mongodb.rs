@@ -167,6 +167,7 @@ impl MongoDbDialect {
     fn add_field_items(
         items: &mut Vec<CompletionItem>,
         schema: Option<&Schema>,
+        collection_name: Option<&str>,
         prefix: &str,
         quoted_insert: bool,
     ) {
@@ -174,12 +175,60 @@ impl MongoDbDialect {
             return;
         };
 
-        for table in &schema.tables {
+        let tables = schema.tables.iter().filter(|table| {
+            collection_name
+                .map(|name| table.name.eq_ignore_ascii_case(name))
+                .unwrap_or(true)
+        });
+        for table in tables {
             for column in &table.columns {
                 if prefix.is_empty() || column.name.to_ascii_lowercase().starts_with(prefix) {
                     items.push(Self::field_item(table, column, quoted_insert));
                 }
             }
+        }
+    }
+
+    fn add_named_items(
+        items: &mut Vec<CompletionItem>,
+        names: &[&str],
+        prefix: &str,
+        quoted_insert: bool,
+        detail: &str,
+        kind: CompletionItemKind,
+    ) {
+        for name in names {
+            if prefix.is_empty() || name.to_ascii_lowercase().starts_with(prefix) {
+                items.push(Self::completion_item(
+                    name,
+                    kind,
+                    detail,
+                    "1",
+                    quoted_insert,
+                ));
+            }
+        }
+    }
+
+    fn add_pipeline_stage_items(
+        items: &mut Vec<CompletionItem>,
+        schema: Option<&Schema>,
+        prefix: &str,
+        quoted_insert: bool,
+    ) {
+        for stage in MONGODB_PIPELINE_STAGES {
+            if !mongodb_pipeline_stage_supported(stage, schema)
+                || (!prefix.is_empty() && !stage.to_ascii_lowercase().starts_with(prefix))
+            {
+                continue;
+            }
+            items.push(Self::completion_item(
+                stage,
+                CompletionItemKind::FUNCTION,
+                "MongoDB aggregation pipeline stage",
+                "1",
+                quoted_insert,
+            ));
         }
     }
 }
@@ -196,8 +245,15 @@ impl Dialect for MongoDbDialect {
             return Vec::new();
         }
 
-        match serde_json::from_str::<serde_json::Value>(json) {
-            Ok(value) => mongodb_command_hints(&value, json),
+        match parse_mongodb_json_stream(json) {
+            Ok(mut values) => {
+                let value = if values.len() == 1 {
+                    values.remove(0)
+                } else {
+                    serde_json::Value::Array(values)
+                };
+                mongodb_command_hints(&value, json)
+            }
             Err(error) if error.is_eof() && is_trailing_incomplete_json(trimmed) => Vec::new(),
             Err(error) => vec![json_error_diagnostic(error, json)],
         }
@@ -222,13 +278,39 @@ impl Dialect for MongoDbDialect {
                 Self::add_collection_items(&mut items, schema, &prefix, quoted_insert);
             }
             MongoCompletionKind::FieldName => {
-                Self::add_field_items(&mut items, schema, &prefix, quoted_insert);
+                Self::add_field_items(
+                    &mut items,
+                    schema,
+                    context.collection.as_deref(),
+                    &prefix,
+                    quoted_insert,
+                );
+            }
+            MongoCompletionKind::FieldOperator => {
+                Self::add_named_items(
+                    &mut items,
+                    MONGODB_FIELD_OPERATORS,
+                    &prefix,
+                    quoted_insert,
+                    "MongoDB field operator",
+                    CompletionItemKind::OPERATOR,
+                );
+            }
+            MongoCompletionKind::PipelineStage => {
+                Self::add_pipeline_stage_items(&mut items, schema, &prefix, quoted_insert);
             }
             MongoCompletionKind::Broad => {
                 Self::add_top_level_items(&mut items, &prefix, quoted_insert);
                 Self::add_collection_items(&mut items, schema, &prefix, quoted_insert);
-                Self::add_field_items(&mut items, schema, &prefix, quoted_insert);
+                Self::add_field_items(
+                    &mut items,
+                    schema,
+                    context.collection.as_deref(),
+                    &prefix,
+                    quoted_insert,
+                );
             }
+            MongoCompletionKind::None => {}
         }
 
         items
@@ -322,14 +404,26 @@ impl Dialect for MongoDbDialect {
     }
 
     async fn format(&self, json: &str) -> String {
-        serde_json::from_str::<serde_json::Value>(json)
-            .and_then(|value| serde_json::to_string_pretty(&value))
+        parse_mongodb_json_stream(json)
+            .and_then(|values| {
+                values
+                    .iter()
+                    .map(serde_json::to_string_pretty)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map(|values| values.join("\n\n"))
             .unwrap_or_else(|_| json.to_string())
     }
 
     async fn validate(&self, json: &str, schema: Option<&Schema>) -> Vec<Diagnostic> {
         self.parse(json, schema).await
     }
+}
+
+fn parse_mongodb_json_stream(json: &str) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    serde_json::Deserializer::from_str(json)
+        .into_iter::<serde_json::Value>()
+        .collect()
 }
 
 const MONGODB_TOP_LEVEL_FIELDS: &[&str] = &[
@@ -381,24 +475,87 @@ const MONGODB_COMMANDS: &[&str] = &[
     "dbStats",
 ];
 
+const MONGODB_FIELD_OPERATORS: &[&str] = &[
+    "$eq",
+    "$ne",
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$in",
+    "$nin",
+    "$exists",
+    "$type",
+    "$regex",
+    "$size",
+    "$all",
+    "$elemMatch",
+    "$not",
+];
+
+const MONGODB_PIPELINE_STAGES: &[&str] = &[
+    "$match",
+    "$project",
+    "$group",
+    "$sort",
+    "$limit",
+    "$skip",
+    "$unwind",
+    "$lookup",
+    "$addFields",
+    "$set",
+    "$unset",
+    "$count",
+    "$facet",
+    "$replaceRoot",
+    "$replaceWith",
+    "$sample",
+    "$bucket",
+    "$bucketAuto",
+    "$unionWith",
+    "$setWindowFields",
+    "$densify",
+    "$fill",
+    "$documents",
+];
+
+fn mongodb_pipeline_stage_supported(stage: &str, schema: Option<&Schema>) -> bool {
+    let Some(schema) = schema else {
+        return true;
+    };
+    match stage {
+        "$set" | "$unset" | "$replaceWith" => schema.supports_server_version(4, 2),
+        "$unionWith" => schema.supports_server_version(4, 4),
+        "$setWindowFields" => schema.supports_server_version(5, 0),
+        "$densify" | "$documents" => schema.supports_server_version(5, 1),
+        "$fill" => schema.supports_server_version(5, 3),
+        _ => true,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MongoCompletionKind {
+    None,
     Broad,
     TopLevel,
     CollectionValue,
     FieldName,
+    FieldOperator,
+    PipelineStage,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct MongoCompletionContext {
     kind: MongoCompletionKind,
     inside_string: bool,
+    collection: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct JsonObjectFrame {
     owner_key: Option<String>,
     last_key: Option<String>,
+    string_values: Vec<(String, String)>,
     after_colon: bool,
 }
 
@@ -428,17 +585,31 @@ fn mongodb_completion_context(source: &str, position: Position) -> MongoCompleti
         .frames
         .last()
         .and_then(|frame| frame.owner_key.as_deref());
+    let collection = state.frames.iter().rev().find_map(|frame| {
+        frame
+            .string_values
+            .iter()
+            .rev()
+            .find_map(|(key, value)| is_mongodb_collection_key(key).then(|| value.clone()))
+    });
 
     let kind = if matches!(previous, Some(':')) {
         match current_key {
             Some(key) if is_mongodb_collection_key(key) => MongoCompletionKind::CollectionValue,
-            _ => MongoCompletionKind::Broad,
+            _ => MongoCompletionKind::None,
         }
     } else if is_json_key_position(previous) {
         if owner_key.is_none() {
             MongoCompletionKind::TopLevel
+        } else if owner_key == Some("pipeline") {
+            MongoCompletionKind::PipelineStage
         } else if owner_key.map(is_mongodb_field_object_key).unwrap_or(false) {
             MongoCompletionKind::FieldName
+        } else if owner_key
+            .map(|key| !is_mongodb_structural_object_key(key))
+            .unwrap_or(false)
+        {
+            MongoCompletionKind::FieldOperator
         } else {
             MongoCompletionKind::Broad
         }
@@ -449,6 +620,7 @@ fn mongodb_completion_context(source: &str, position: Position) -> MongoCompleti
     MongoCompletionContext {
         kind,
         inside_string,
+        collection,
     }
 }
 
@@ -505,8 +677,13 @@ fn scan_json_context(source: &str) -> JsonScanState {
             } else if ch == '"' {
                 in_string = false;
                 let value = source[string_start..index].to_string();
-                if previous_significant != Some(':') {
-                    if let Some(frame) = state.frames.last_mut() {
+                if let Some(frame) = state.frames.last_mut() {
+                    if previous_significant == Some(':') {
+                        if let Some(key) = frame.last_key.clone() {
+                            frame.string_values.push((key, value));
+                        }
+                        frame.after_colon = false;
+                    } else {
                         frame.last_key = Some(value);
                     }
                 }
@@ -543,6 +720,7 @@ fn scan_json_context(source: &str) -> JsonScanState {
                 state.frames.push(JsonObjectFrame {
                     owner_key,
                     last_key: None,
+                    string_values: Vec::new(),
                     after_colon: false,
                 });
                 previous_significant = Some('{');
@@ -612,7 +790,15 @@ fn is_json_key_position(previous: Option<char>) -> bool {
 fn is_mongodb_collection_key(key: &str) -> bool {
     matches!(
         key,
-        "collection" | "from" | "to" | "renameCollection" | "drop" | "create"
+        "collection"
+            | "find"
+            | "aggregate"
+            | "count"
+            | "from"
+            | "to"
+            | "renameCollection"
+            | "drop"
+            | "create"
     )
 }
 
@@ -643,6 +829,25 @@ fn is_mongodb_field_object_key(key: &str) -> bool {
             | "$push"
             | "$pull"
             | "$addToSet"
+            | "$match"
+            | "$and"
+            | "$or"
+            | "$nor"
+            | "$elemMatch"
+    )
+}
+
+fn is_mongodb_structural_object_key(key: &str) -> bool {
+    matches!(
+        key,
+        "pipeline"
+            | "$group"
+            | "$lookup"
+            | "$facet"
+            | "$bucket"
+            | "$bucketAuto"
+            | "cursor"
+            | "command"
     )
 }
 

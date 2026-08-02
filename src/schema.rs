@@ -35,6 +35,9 @@ pub struct Schema {
     pub id: SchemaId,
     /// 数据库名称
     pub database: String,
+    /// 运行中的数据库服务器版本。用于过滤只在特定版本可用的补全项。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_version: Option<String>,
     /// 表列表
     pub tables: Vec<Table>,
     /// 函数列表
@@ -42,6 +45,29 @@ pub struct Schema {
     /// Schema 定义文件的 URI (可选)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_uri: Option<String>,
+}
+
+impl Schema {
+    pub fn server_version_tuple(&self) -> Option<(u32, u32)> {
+        self.server_version.as_deref().and_then(|version| {
+            let mut components = version
+                .split(|character: char| !character.is_ascii_digit())
+                .filter(|part| !part.is_empty())
+                .filter_map(|part| part.parse::<u32>().ok());
+            components
+                .next()
+                .map(|major| (major, components.next().unwrap_or(0)))
+        })
+    }
+
+    pub fn server_major_version(&self) -> Option<u32> {
+        self.server_version_tuple().map(|(major, _)| major)
+    }
+
+    pub fn supports_server_version(&self, minimum_major: u32, minimum_minor: u32) -> bool {
+        self.server_version_tuple()
+            .is_none_or(|version| version >= (minimum_major, minimum_minor))
+    }
 }
 
 /// 表信息
@@ -495,6 +521,7 @@ mod tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "test_db".to_string(),
+            server_version: None,
             tables: vec![],
             functions: vec![],
             source_uri: None,
@@ -510,6 +537,24 @@ mod tests {
         assert!(manager.get(id).is_none());
     }
 
+    #[test]
+    fn server_versions_support_vendor_prefixes_and_minor_gates() {
+        let mut schema = Schema {
+            id: SchemaId::new(),
+            database: "default".to_string(),
+            server_version: Some("Elasticsearch 8.14.1".to_string()),
+            tables: vec![],
+            functions: vec![],
+            source_uri: None,
+        };
+        assert_eq!(schema.server_version_tuple(), Some((8, 14)));
+        assert!(schema.supports_server_version(8, 0));
+        assert!(!schema.supports_server_version(8, 15));
+
+        schema.server_version = Some("4.2.24-community".to_string());
+        assert_eq!(schema.server_version_tuple(), Some((4, 2)));
+    }
+
     #[tokio::test]
     async fn test_schema_manager_concurrent() {
         let manager = SchemaManager::new();
@@ -518,6 +563,7 @@ mod tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![],
             functions: vec![],
             source_uri: None,
@@ -526,6 +572,7 @@ mod tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![],
             functions: vec![],
             source_uri: None,

@@ -14,6 +14,7 @@ mod schema_inference_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -35,6 +36,7 @@ mod schema_inference_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "orders".to_string(),
                 columns: vec![Column {
@@ -92,6 +94,7 @@ mod schema_inference_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -106,6 +109,7 @@ mod schema_inference_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -149,6 +153,7 @@ mod schema_inference_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "production".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -163,6 +168,7 @@ mod schema_inference_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "test".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -212,6 +218,7 @@ mod schema_priority_tests {
         let explicit_schema = Schema {
             id: SchemaId::new(),
             database: "explicit_db".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -233,6 +240,7 @@ mod schema_priority_tests {
         let inferred_schema = Schema {
             id: SchemaId::new(),
             database: "inferred_db".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -271,6 +279,7 @@ mod schema_priority_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -285,6 +294,7 @@ mod schema_priority_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -313,6 +323,7 @@ mod schema_priority_tests {
         let schema_with_more_tables = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -336,6 +347,7 @@ mod schema_priority_tests {
         let schema_with_fewer_tables = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -373,6 +385,7 @@ mod schema_isolation_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "db1".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -394,6 +407,7 @@ mod schema_isolation_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "db2".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "products".to_string(),
                 columns: vec![Column {
@@ -448,6 +462,7 @@ mod schema_isolation_tests {
                 let schema = Schema {
                     id: SchemaId::new(),
                     database: format!("db_{}", i),
+                    server_version: None,
                     tables: vec![Table {
                         name: format!("table_{}", i),
                         columns: vec![],
@@ -491,6 +506,7 @@ mod schema_isolation_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "production".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -512,6 +528,7 @@ mod schema_isolation_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "test".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![Column {
@@ -555,6 +572,7 @@ mod schema_matching_tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "test_db".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -606,6 +624,7 @@ mod schema_matching_tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "test_db".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -656,6 +675,7 @@ mod schema_matching_tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "test_db".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -710,6 +730,7 @@ mod schema_matching_tests {
         let schema = Schema {
             id: SchemaId::new(),
             database: "test_db".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "users".to_string(),
                 columns: vec![],
@@ -759,6 +780,7 @@ mod schema_inference_integration_tests {
         let schema1 = Schema {
             id: SchemaId::new(),
             database: "ecommerce".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -796,6 +818,7 @@ mod schema_inference_integration_tests {
         let schema2 = Schema {
             id: SchemaId::new(),
             database: "analytics".to_string(),
+            server_version: None,
             tables: vec![Table {
                 name: "events".to_string(),
                 columns: vec![],

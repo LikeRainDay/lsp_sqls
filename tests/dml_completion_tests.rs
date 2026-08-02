@@ -7,6 +7,7 @@ fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
         database: database.to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "webhook".to_string(),
@@ -735,7 +736,11 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     let simple_case_value = complete(dialect, "SELECT CASE owner WHEN ", &schema).await;
     assert!(has_label(&simple_case_value, "NULL"));
     assert!(has_label(&simple_case_value, "TRUE"));
-    assert!(has_label(&simple_case_value, "owner"));
+    assert!(has_label(&simple_case_value, "webhook.owner"));
+    assert!(
+        !has_label(&simple_case_value, "owner"),
+        "Simple CASE without a FROM target must keep the source qualifier: {simple_case_value:?}"
+    );
     assert!(
         !has_label(&simple_case_value, "FROM"),
         "Simple CASE WHEN value should not suggest SELECT continuations: {simple_case_value:?}"
@@ -766,14 +771,16 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     )
     .await;
     assert!(has_label(&simple_case_second_value, "NULL"));
-    assert!(has_label(&simple_case_second_value, "owner"));
+    assert!(has_label(&simple_case_second_value, "webhook.owner"));
+    assert!(!has_label(&simple_case_second_value, "owner"));
     assert!(!has_label(&simple_case_second_value, "THEN"));
     assert!(!has_operator(&simple_case_second_value, "="));
 
     let case_then_result = complete(dialect, "SELECT CASE WHEN owner = 'app' THEN ", &schema).await;
     assert!(has_label(&case_then_result, "NULL"));
     assert!(has_label(&case_then_result, "TRUE"));
-    assert!(has_label(&case_then_result, "owner"));
+    assert!(has_label(&case_then_result, "webhook.owner"));
+    assert!(!has_label(&case_then_result, "owner"));
     assert!(
         !has_label(&case_then_result, "FROM"),
         "CASE THEN result expression should not suggest SELECT continuations: {case_then_result:?}"
@@ -813,7 +820,8 @@ async fn assert_common_dml_completion(dialect: &dyn Dialect, database: &str) {
     )
     .await;
     assert!(has_label(&case_else_result, "NULL"));
-    assert!(has_label(&case_else_result, "owner"));
+    assert!(has_label(&case_else_result, "webhook.owner"));
+    assert!(!has_label(&case_else_result, "owner"));
     assert!(!has_label(&case_else_result, "END"));
 
     let case_else_continuation = complete(

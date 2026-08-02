@@ -113,6 +113,7 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "public".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "users".to_string(),
@@ -322,6 +323,7 @@ async fn test_postgres_completion_keeps_relation_targets_separate_from_column_ta
     let schema = Schema {
         id: SchemaId::new(),
         database: "public".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "form".to_string(),
@@ -505,6 +507,7 @@ async fn test_postgres_completion_uses_utf16_lsp_positions() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "public".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "users".to_string(),
             columns: vec![
@@ -557,6 +560,7 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "shop".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "users".to_string(),
@@ -855,6 +859,7 @@ async fn test_sql_completion_disambiguates_same_named_columns_before_from() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "public".to_string(),
+        server_version: None,
         tables: ["users", "orders"]
             .into_iter()
             .map(|name| Table {
@@ -942,6 +947,7 @@ async fn test_hive_dialect() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "events".to_string(),
@@ -1121,11 +1127,89 @@ async fn test_elasticsearch_dsl_dialect() {
 }
 
 #[tokio::test]
+async fn test_elasticsearch_dsl_filters_completions_by_server_version() {
+    let dialect = ElasticsearchDslDialect::new();
+    let schema = |version: &str| Schema {
+        id: SchemaId::new(),
+        database: "default".to_string(),
+        server_version: Some(version.to_string()),
+        tables: vec![],
+        functions: vec![],
+        source_uri: None,
+    };
+
+    let es6 = schema("6.8.23");
+    let es7_10 = schema("7.10.2");
+    let es7_13 = schema("7.13.4");
+    let es8 = schema("8.14.1");
+    let top_level = "{";
+    let es6_top = dialect
+        .completion(
+            top_level,
+            tower_lsp::lsp_types::Position::new(0, 1),
+            Some(&es6),
+        )
+        .await;
+    let es8_top = dialect
+        .completion(
+            top_level,
+            tower_lsp::lsp_types::Position::new(0, 1),
+            Some(&es8),
+        )
+        .await;
+    assert!(!es6_top.iter().any(|item| item.label == "knn"));
+    assert!(!es6_top.iter().any(|item| item.label == "runtime_mappings"));
+    assert!(es8_top.iter().any(|item| item.label == "knn"));
+    assert!(es8_top.iter().any(|item| item.label == "runtime_mappings"));
+
+    let es7_10_top = dialect
+        .completion(
+            top_level,
+            tower_lsp::lsp_types::Position::new(0, 1),
+            Some(&es7_10),
+        )
+        .await;
+    let es7_13_top = dialect
+        .completion(
+            top_level,
+            tower_lsp::lsp_types::Position::new(0, 1),
+            Some(&es7_13),
+        )
+        .await;
+    assert!(!es7_10_top
+        .iter()
+        .any(|item| item.label == "runtime_mappings"));
+    assert!(es7_13_top
+        .iter()
+        .any(|item| item.label == "runtime_mappings"));
+    assert!(!es7_13_top.iter().any(|item| item.label == "knn"));
+
+    let query = r#"{"query":{""#;
+    let position = tower_lsp::lsp_types::Position::new(0, query.len() as u32);
+    let es6_query = dialect.completion(query, position, Some(&es6)).await;
+    let es8_query = dialect.completion(query, position, Some(&es8)).await;
+    let es7_10_query = dialect.completion(query, position, Some(&es7_10)).await;
+    let es7_13_query = dialect.completion(query, position, Some(&es7_13)).await;
+    assert!(es6_query.iter().any(|item| item.label == "type"));
+    assert!(!es6_query.iter().any(|item| item.label == "combined_fields"));
+    assert!(!es8_query.iter().any(|item| item.label == "type"));
+    assert!(es8_query.iter().any(|item| item.label == "combined_fields"));
+    assert!(es7_10_query.iter().any(|item| item.label == "intervals"));
+    assert!(!es7_10_query
+        .iter()
+        .any(|item| item.label == "combined_fields"));
+    assert!(es7_13_query
+        .iter()
+        .any(|item| item.label == "combined_fields"));
+}
+
+#[tokio::test]
 async fn test_elasticsearch_dsl_schema_aware_fields() {
     let dialect = ElasticsearchDslDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "users".to_string(),
             columns: vec![
@@ -1363,6 +1447,7 @@ async fn test_elasticsearch_console_scopes_fields_to_request_index() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
+        server_version: None,
         tables: vec![
             table("anocs_new", &["gid", "current_only"]),
             table("archive", &["gid", "archive_only"]),
@@ -1477,6 +1562,7 @@ async fn test_clickhouse_dialect() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "default".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "events".to_string(),
@@ -1652,6 +1738,7 @@ async fn test_redis_schema_aware_key_completion_and_hover() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "0".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "user:1".to_string(),
             object_type: Some("hash".to_string()),
@@ -1757,19 +1844,35 @@ async fn test_mongodb_dialect() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "app".to_string(),
-        tables: vec![Table {
-            name: "users".to_string(),
-            columns: vec![Column {
-                name: "email".to_string(),
-                data_type: "string".to_string(),
-                nullable: true,
+        server_version: None,
+        tables: vec![
+            Table {
+                name: "users".to_string(),
+                columns: vec![Column {
+                    name: "email".to_string(),
+                    data_type: "string".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                }],
+                comment: Some("Application users".to_string()),
                 source_location: None,
                 ..Default::default()
-            }],
-            comment: Some("Application users".to_string()),
-            source_location: None,
-            ..Default::default()
-        }],
+            },
+            Table {
+                name: "audit".to_string(),
+                columns: vec![Column {
+                    name: "eventType".to_string(),
+                    data_type: "string".to_string(),
+                    nullable: true,
+                    source_location: None,
+                    ..Default::default()
+                }],
+                comment: Some("Audit events".to_string()),
+                source_location: None,
+                ..Default::default()
+            },
+        ],
         functions: vec![],
         source_uri: None,
     };
@@ -1891,6 +1994,72 @@ async fn test_mongodb_dialect() {
         "MongoDB field completion should not mix command fields: {field_prefix_items:?}"
     );
 
+    let scoped_field_json = r#"{"collection":"users","find":{""#;
+    let scoped_field_items = dialect
+        .completion(
+            scoped_field_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: scoped_field_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(scoped_field_items.iter().any(|item| item.label == "email"));
+    assert!(
+        !scoped_field_items
+            .iter()
+            .any(|item| item.label == "eventType"),
+        "MongoDB completion must not leak fields from another collection: {scoped_field_items:?}"
+    );
+
+    let native_scoped_field_json = r#"{"find":"audit","filter":{""#;
+    let native_scoped_field_items = dialect
+        .completion(
+            native_scoped_field_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: native_scoped_field_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(native_scoped_field_items
+        .iter()
+        .any(|item| item.label == "eventType"));
+    assert!(!native_scoped_field_items
+        .iter()
+        .any(|item| item.label == "email"));
+
+    let operator_json = r#"{"collection":"users","find":{"email":{"$"#;
+    let operator_items = dialect
+        .completion(
+            operator_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: operator_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(operator_items.iter().any(|item| item.label == "$eq"));
+    assert!(operator_items.iter().any(|item| item.label == "$regex"));
+    assert!(!operator_items.iter().any(|item| item.label == "email"));
+
+    let pipeline_json = r#"{"aggregate":"users","pipeline":[{"$"#;
+    let pipeline_items = dialect
+        .completion(
+            pipeline_json,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: pipeline_json.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(pipeline_items.iter().any(|item| item.label == "$match"));
+    assert!(pipeline_items.iter().any(|item| item.label == "$group"));
+
     let document_array_field_json = r#"{"collection":"users","documents":[{"em"#;
     let document_array_field_items = dialect
         .completion(
@@ -1994,12 +2163,57 @@ async fn test_mongodb_dialect() {
 }
 
 #[tokio::test]
+async fn test_mongodb_filters_pipeline_stages_by_server_version() {
+    let dialect = MongoDbDialect::new();
+    let schema = |version: &str| Schema {
+        id: SchemaId::new(),
+        database: "app".to_string(),
+        server_version: Some(version.to_string()),
+        tables: vec![],
+        functions: vec![],
+        source_uri: None,
+    };
+    let pipeline = r#"{"aggregate":"users","pipeline":[{"$"#;
+    let position = tower_lsp::lsp_types::Position::new(0, pipeline.len() as u32);
+
+    let mongo40 = schema("4.0.28");
+    let mongo60 = schema("6.0.18");
+    let old_items = dialect.completion(pipeline, position, Some(&mongo40)).await;
+    let new_items = dialect.completion(pipeline, position, Some(&mongo60)).await;
+
+    assert!(old_items.iter().any(|item| item.label == "$match"));
+    assert!(!old_items.iter().any(|item| item.label == "$set"));
+    assert!(!old_items
+        .iter()
+        .any(|item| item.label == "$setWindowFields"));
+    assert!(new_items.iter().any(|item| item.label == "$set"));
+    assert!(new_items
+        .iter()
+        .any(|item| item.label == "$setWindowFields"));
+    assert!(new_items.iter().any(|item| item.label == "$fill"));
+}
+
+#[tokio::test]
+async fn test_mongodb_accepts_and_formats_whitespace_separated_commands() {
+    let dialect = MongoDbDialect::new();
+    let source = r#"{"collection":"users","find":{}}
+
+{"collection":"orders","countDocuments":{}}"#;
+
+    assert!(dialect.parse(source, None).await.is_empty());
+    let formatted = dialect.format(source).await;
+    assert!(formatted.contains("\n\n{\n  \"collection\": \"orders\""));
+    assert!(!formatted.starts_with('['));
+}
+
+#[tokio::test]
 async fn test_dialect_with_schema() {
     let dialect = MysqlDialect::new();
 
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![Table {
             name: "users".to_string(),
             columns: vec![
@@ -2041,9 +2255,9 @@ async fn test_dialect_with_schema() {
 
     // 应该包含列名（在 SELECT 子句中，应该包含列名）
     // 注意：由于现在使用 AST 上下文分析，在 SELECT 后只返回列名和 SELECT 相关关键字
-    // 检查是否有列名补全（单表查询，不带表前缀）
-    assert!(items.iter().any(|item| item.label == "id"));
-    assert!(items.iter().any(|item| item.label == "name"));
+    // FROM 尚未绑定关系时保留来源限定，避免插入来源不明确的字段。
+    assert!(items.iter().any(|item| item.label == "users.id"));
+    assert!(items.iter().any(|item| item.label == "users.name"));
 }
 
 #[tokio::test]
@@ -2052,6 +2266,7 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "public".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "casbin_api_rule".to_string(),
@@ -2103,7 +2318,9 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
         )
         .await;
     assert!(
-        select_items.iter().any(|item| item.label == "id"),
+        select_items
+            .iter()
+            .any(|item| item.label == "casbin_api_rule.id"),
         "SELECT completion should move to expression candidates: {select_items:?}"
     );
     assert!(
@@ -2220,6 +2437,7 @@ async fn test_schema_function_completion() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![],
         functions: vec![Function {
             name: "calculate_score".to_string(),
@@ -2327,6 +2545,7 @@ async fn test_schema_function_hover() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "test_db".to_string(),
+        server_version: None,
         tables: vec![],
         functions: vec![Function {
             name: "calculate_score".to_string(),
@@ -2436,6 +2655,7 @@ async fn test_intelligent_completion_logging() {
     let schema = Schema {
         id: SchemaId::new(),
         database: "shop".to_string(),
+        server_version: None,
         tables: vec![
             Table {
                 name: "users".to_string(),
@@ -2571,7 +2791,7 @@ async fn test_intelligent_completion_logging() {
 
     // After adding prefix filtering: only columns matching 'na' should be suggested
     assert!(
-        items_cols.iter().any(|item| item.label == "name"),
+        items_cols.iter().any(|item| item.label == "users.name"),
         "Should suggest 'name' column (matches prefix 'na')"
     );
     // created_at should NOT be suggested since it doesn't match prefix 'na'

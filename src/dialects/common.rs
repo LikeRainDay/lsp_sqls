@@ -3,7 +3,8 @@ use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Documentation, Location, Position, Range, Url,
+    CompletionItem, CompletionItemKind, Documentation, InsertTextFormat, Location, Position, Range,
+    Url,
 };
 
 pub(crate) fn format_sql_pretty(source: &str) -> String {
@@ -257,7 +258,7 @@ pub(crate) fn predicate_operator_expected(sql: &str, position: Position) -> bool
 
 pub(crate) fn latest_predicate_clause(sql: &str, position: Position) -> Option<&'static str> {
     let text_before = text_before_position(sql, position).to_ascii_uppercase();
-    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&text_before);
     let statement = &text_before[statement_start..];
 
     ["WHERE", "HAVING", "ON", "WHEN", "SET", "UPDATE"]
@@ -277,7 +278,7 @@ pub(crate) fn order_direction_keywords(
 ) -> Vec<&'static str> {
     let text_before = text_before_position(sql, position);
     let text_upper = text_before.to_ascii_uppercase();
-    let statement_start = text_upper.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&text_before);
     let statement_upper = &text_upper[statement_start..];
 
     let Some(order_position) = statement_upper.rfind("ORDER BY") else {
@@ -357,7 +358,7 @@ pub(crate) fn group_by_continuation_sort_prefix(keyword: &str) -> &'static str {
 pub(crate) fn select_continuation_keywords(sql: &str, position: Position) -> Vec<&'static str> {
     let text_before = text_before_position(sql, position);
     let text_upper = text_before.to_ascii_uppercase();
-    let statement_start = text_upper.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&text_before);
     let statement_upper = &text_upper[statement_start..];
 
     let Some(select_position) = statement_upper.rfind("SELECT") else {
@@ -378,7 +379,7 @@ pub(crate) fn select_continuation_keywords(sql: &str, position: Position) -> Vec
 
 pub(crate) fn expression_value_allows_default(sql: &str, position: Position) -> bool {
     let text_before = text_before_position(sql, position).to_ascii_uppercase();
-    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&text_before);
     let statement = &text_before[statement_start..];
 
     if let Some(set_position) = insert_set_position(statement) {
@@ -409,7 +410,7 @@ pub(crate) fn predicate_continuation_keywords(
     supports_returning: bool,
 ) -> Vec<&'static str> {
     let text_before = text_before_position(sql, position).to_ascii_uppercase();
-    let statement_start = text_before.rfind(';').map(|index| index + 1).unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&text_before);
     let statement = &text_before[statement_start..];
 
     let latest_clause = ["WHERE", "HAVING", "ON", "WHEN", "SET", "UPDATE"]
@@ -462,10 +463,7 @@ pub(crate) fn case_continuation_keywords(sql: &str, position: Position) -> Vec<&
     let text_before = text_before_position(sql, position);
     let raw_text_upper = text_before.to_ascii_uppercase();
     let searchable_text_upper = SqlParser::mask_sql_noise(&raw_text_upper);
-    let statement_start = searchable_text_upper
-        .rfind(';')
-        .map(|index| index + 1)
-        .unwrap_or(0);
+    let statement_start = SqlParser::active_statement_start(&raw_text_upper);
     let searchable_statement = &searchable_text_upper[statement_start..];
 
     let Some(case_position) = previous_keyword_position(searchable_statement, "CASE") else {
@@ -662,6 +660,130 @@ pub(crate) fn create_operator_item(operator: &str, sort_prefix: &str) -> Complet
         tags: None,
         label_details: None,
     }
+}
+
+pub(crate) fn add_column_domain_value_items(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    sql: &str,
+    position: Position,
+    prefix: &str,
+) {
+    let Some(column_name) = predicate_column_before_value(sql, position, prefix) else {
+        return;
+    };
+    let mut values = Vec::new();
+    let tables = if referenced_tables.is_empty() {
+        schema.tables.iter().collect::<Vec<_>>()
+    } else {
+        referenced_tables
+            .iter()
+            .filter_map(|reference| find_table_by_reference(schema, reference))
+            .collect::<Vec<_>>()
+    };
+
+    for table in tables {
+        let Some(column) = table
+            .columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(&column_name))
+        else {
+            continue;
+        };
+        values.extend(sql_type_domain_values(&column.data_type));
+    }
+    values.sort();
+    values.dedup();
+
+    let normalized_prefix = prefix.trim_matches(['\'', '"']).to_ascii_lowercase();
+    for value in values.into_iter().take(64) {
+        if !normalized_prefix.is_empty()
+            && !value.to_ascii_lowercase().starts_with(&normalized_prefix)
+        {
+            continue;
+        }
+        let quoted = format!("'{}'", value.replace('\'', "''"));
+        items.push(CompletionItem {
+            label: value.clone(),
+            kind: Some(CompletionItemKind::ENUM_MEMBER),
+            detail: Some(format!("Domain value for {column_name}")),
+            sort_text: Some(completion_sort_text("0", &value)),
+            filter_text: Some(value),
+            insert_text: Some(quoted),
+            ..CompletionItem::default()
+        });
+    }
+}
+
+fn predicate_column_before_value(sql: &str, position: Position, prefix: &str) -> Option<String> {
+    let mut before = text_before_position(sql, position).trim_end();
+    if !prefix.is_empty() && before.len() >= prefix.len() {
+        let prefix_start = before.len() - prefix.len();
+        if before[prefix_start..].eq_ignore_ascii_case(prefix) {
+            before = before[..prefix_start].trim_end();
+        }
+    }
+    before = before.trim_end_matches(['\'', '"']).trim_end();
+    if before.ends_with('(') {
+        before = before[..before.len() - 1].trim_end();
+        if before.to_ascii_uppercase().ends_with(" IN") {
+            before = before[..before.len() - 3].trim_end();
+        }
+    } else {
+        let operator = before
+            .char_indices()
+            .rev()
+            .find(|(_, character)| matches!(character, '=' | '<' | '>'))
+            .map(|(index, _)| index)?;
+        before = before[..operator].trim_end();
+    }
+
+    let identifier = before
+        .rsplit(|character: char| {
+            !(character.is_ascii_alphanumeric()
+                || matches!(character, '_' | '$' | '.' | '`' | '"' | '[' | ']'))
+        })
+        .next()?
+        .trim_matches(['`', '"', '[', ']']);
+    let column = identifier
+        .rsplit('.')
+        .next()?
+        .trim_matches(['`', '"', '[', ']']);
+    (!column.is_empty()).then(|| column.to_string())
+}
+
+fn sql_type_domain_values(data_type: &str) -> Vec<String> {
+    let normalized = data_type.trim();
+    let lower = normalized.to_ascii_lowercase();
+    if !(lower.starts_with("enum(") || lower.starts_with("set(")) || !normalized.ends_with(')') {
+        return Vec::new();
+    }
+    let Some(open) = normalized.find('(') else {
+        return Vec::new();
+    };
+    let content = &normalized[open + 1..normalized.len() - 1];
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut chars = content.chars().peekable();
+    let mut quoted = false;
+    while let Some(character) = chars.next() {
+        match character {
+            '\'' if quoted && chars.peek() == Some(&'\'') => {
+                current.push('\'');
+                chars.next();
+            }
+            '\'' => {
+                if quoted {
+                    values.push(std::mem::take(&mut current));
+                }
+                quoted = !quoted;
+            }
+            _ if quoted => current.push(character),
+            _ => {}
+        }
+    }
+    values
 }
 
 pub(crate) fn add_operator_items(
@@ -880,6 +1002,174 @@ pub(crate) fn add_schema_tables(
         }
         items.push(create_table_item(table, schema, qualify_with_database));
     }
+}
+
+pub(crate) fn add_foreign_key_join_snippets(
+    items: &mut Vec<CompletionItem>,
+    schema: &Schema,
+    referenced_tables: &[String],
+    aliases: &HashMap<String, String>,
+    prefix: &str,
+    qualify_with_database: bool,
+) {
+    let referenced = referenced_tables
+        .iter()
+        .filter_map(|reference| find_table_by_reference(schema, reference))
+        .collect::<Vec<_>>();
+    if referenced.is_empty() {
+        return;
+    }
+    let used_aliases = aliases
+        .keys()
+        .map(|alias| alias.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+
+    for candidate in &schema.tables {
+        if table_is_referenced(schema, candidate, referenced_tables)
+            || identifier_match_rank(&candidate.name, prefix).is_none()
+        {
+            continue;
+        }
+        let candidate_alias = available_table_alias(&candidate.name, &used_aliases);
+        let relation = if qualify_with_database && !schema.database.is_empty() {
+            format!("{}.{}", schema.database, candidate.name)
+        } else {
+            candidate.name.clone()
+        };
+
+        for existing in &referenced {
+            let existing_reference = aliases
+                .iter()
+                .find_map(|(alias, table)| {
+                    table_matches(schema, existing, table).then_some(alias.as_str())
+                })
+                .unwrap_or(existing.name.as_str());
+
+            for constraint in &candidate.constraints {
+                if !is_foreign_key(constraint)
+                    || constraint
+                        .referenced_table
+                        .as_deref()
+                        .is_none_or(|table| !table_matches(schema, existing, table))
+                {
+                    continue;
+                }
+                push_foreign_key_join_item(
+                    items,
+                    &mut seen,
+                    &relation,
+                    &candidate_alias,
+                    existing_reference,
+                    &constraint.columns,
+                    &constraint.referenced_columns,
+                    constraint,
+                );
+            }
+
+            for constraint in &existing.constraints {
+                if !is_foreign_key(constraint)
+                    || constraint
+                        .referenced_table
+                        .as_deref()
+                        .is_none_or(|table| !table_matches(schema, candidate, table))
+                {
+                    continue;
+                }
+                push_foreign_key_join_item(
+                    items,
+                    &mut seen,
+                    &relation,
+                    &candidate_alias,
+                    existing_reference,
+                    &constraint.referenced_columns,
+                    &constraint.columns,
+                    constraint,
+                );
+            }
+        }
+    }
+}
+
+fn is_foreign_key(constraint: &Constraint) -> bool {
+    constraint
+        .constraint_type
+        .to_ascii_uppercase()
+        .contains("FOREIGN")
+}
+
+fn available_table_alias(table: &str, used: &HashSet<String>) -> String {
+    let mut alias = table
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| part.chars().next())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if alias.is_empty() {
+        alias = table
+            .chars()
+            .find(|ch| ch.is_ascii_alphanumeric())
+            .unwrap_or('t')
+            .to_ascii_lowercase()
+            .to_string();
+    }
+    if !used.contains(&alias) {
+        return alias;
+    }
+    for suffix in 2..100 {
+        let candidate = format!("{alias}{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{alias}_join")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_foreign_key_join_item(
+    items: &mut Vec<CompletionItem>,
+    seen: &mut HashSet<String>,
+    relation: &str,
+    candidate_alias: &str,
+    existing_reference: &str,
+    candidate_columns: &[String],
+    existing_columns: &[String],
+    constraint: &Constraint,
+) {
+    if candidate_columns.is_empty() || candidate_columns.len() != existing_columns.len() {
+        return;
+    }
+    let predicate = candidate_columns
+        .iter()
+        .zip(existing_columns)
+        .map(|(candidate, existing)| {
+            format!("{candidate_alias}.{candidate} = {existing_reference}.{existing}")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let insert_text = format!("{relation} {candidate_alias} ON {predicate}");
+    if !seen.insert(insert_text.to_ascii_lowercase()) {
+        return;
+    }
+    items.push(CompletionItem {
+        label: insert_text.clone(),
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(format!("Foreign-key JOIN via {}", constraint.name)),
+        documentation: constraint
+            .definition
+            .as_ref()
+            .map(|definition| Documentation::String(definition.clone())),
+        sort_text: Some(completion_sort_text("0", relation)),
+        filter_text: Some(
+            relation
+                .split('.')
+                .next_back()
+                .unwrap_or(relation)
+                .to_string(),
+        ),
+        insert_text: Some(insert_text),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    });
 }
 
 pub(crate) fn add_schema_functions(
@@ -1347,6 +1637,7 @@ mod tests {
         Schema {
             id: SchemaId::new(),
             database: "app".to_string(),
+            server_version: None,
             tables: vec![
                 Table {
                     name: "users".to_string(),
@@ -1567,5 +1858,28 @@ mod tests {
             ),
             "SELECT 'it''s  spaced', `my  column`, [also  spaced] FROM t"
         );
+    }
+
+    #[test]
+    fn parser_active_statement_start_recovers_a_second_query_without_a_semicolon() {
+        let sql = "SELECT * FROM first_table\n\nSELECT * FROM second_table WHERE ";
+        let start = SqlParser::active_statement_start(sql);
+
+        assert_eq!(&sql[start..], "SELECT * FROM second_table WHERE ");
+    }
+
+    #[test]
+    fn parser_active_statement_start_preserves_ctes_set_operations_and_sql_noise() {
+        for sql in [
+            "WITH recent AS (\n  SELECT 1\n)\n\nSELECT * FROM recent",
+            "SELECT 1\nUNION ALL\n\nSELECT 2",
+            "SELECT '-- SELECT'\n\n/* SELECT */\nFROM logs",
+        ] {
+            assert_eq!(
+                SqlParser::active_statement_start(sql),
+                0,
+                "should not split: {sql}"
+            );
+        }
     }
 }

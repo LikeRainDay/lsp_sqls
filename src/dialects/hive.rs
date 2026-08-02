@@ -141,6 +141,7 @@ impl Dialect for HiveDialect {
         } else {
             crate::parser::CompletionContext::Default
         };
+        let is_join_clause = context == crate::parser::CompletionContext::JoinClause;
 
         let mut items = Vec::new();
         let keywords = &[
@@ -220,6 +221,21 @@ impl Dialect for HiveDialect {
                     for table in &schema.tables {
                         items.push(self.create_table_item(table));
                     }
+                    if is_join_clause {
+                        if let Some(tree) = &parse_result.tree {
+                            let referenced_tables =
+                                parser.extract_referenced_tables_at_position(tree, sql, position);
+                            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+                            common::add_foreign_key_join_snippets(
+                                &mut items,
+                                schema,
+                                &referenced_tables,
+                                &aliases,
+                                "",
+                                false,
+                            );
+                        }
+                    }
                 }
             }
             crate::parser::CompletionContext::FromContinuationClause => {
@@ -258,23 +274,33 @@ impl Dialect for HiveDialect {
                 }
             }
             crate::parser::CompletionContext::SelectClause => {
+                let prefix = common::cursor_prefix_excluding_keywords(
+                    sql,
+                    position,
+                    &["select", "distinct"],
+                );
                 let select_keywords: Vec<&str> = keywords
                     .iter()
                     .filter(|&&k| matches!(k, "SELECT" | "DISTINCT" | "AS" | "FROM"))
                     .copied()
                     .collect();
                 for keyword in select_keywords {
+                    if !prefix.is_empty() && !keyword.to_lowercase().starts_with(&prefix) {
+                        continue;
+                    }
                     items.push(self.create_keyword_item(keyword));
                 }
-                if let Some(schema) = schema {
-                    for table in &schema.tables {
-                        for column in &table.columns {
-                            items.push(self.create_column_item(
-                                column,
-                                Some(&format!("{}.{}", schema.database, table.name)),
-                            ));
-                        }
-                    }
+                if let (Some(schema), Some(tree)) = (schema, &parse_result.tree) {
+                    let referenced_tables =
+                        common::referenced_table_names_at_position(&parser, tree, sql, position);
+                    common::add_schema_columns(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        referenced_tables.len() != 1,
+                        &prefix,
+                        "0",
+                    );
                 }
             }
             crate::parser::CompletionContext::SelectContinuationClause => {
@@ -327,7 +353,15 @@ impl Dialect for HiveDialect {
                         );
                         let use_table_prefix =
                             !matches!(latest_predicate_clause, Some("SET" | "UPDATE"))
-                                && referenced_tables.len() > 1;
+                                && referenced_tables.len() != 1;
+                        common::add_column_domain_value_items(
+                            &mut items,
+                            schema,
+                            &referenced_tables,
+                            sql,
+                            position,
+                            &prefix,
+                        );
                         common::add_schema_columns(
                             &mut items,
                             schema,
@@ -491,7 +525,7 @@ impl Dialect for HiveDialect {
                         let referenced_tables = common::referenced_table_names_at_position(
                             &parser, tree, sql, position,
                         );
-                        let use_table_prefix = referenced_tables.len() > 1;
+                        let use_table_prefix = referenced_tables.len() != 1;
                         common::add_schema_columns(
                             &mut items,
                             schema,
@@ -642,6 +676,23 @@ impl Dialect for HiveDialect {
             | crate::parser::CompletionContext::InsertConflictActionClause => {}
             crate::parser::CompletionContext::ExpressionValueClause => {
                 let prefix = common::cursor_prefix(sql, position);
+                if let Some(schema) = schema {
+                    let referenced_tables = parse_result
+                        .tree
+                        .as_ref()
+                        .map(|tree| {
+                            common::referenced_table_names_at_position(&parser, tree, sql, position)
+                        })
+                        .unwrap_or_default();
+                    common::add_column_domain_value_items(
+                        &mut items,
+                        schema,
+                        &referenced_tables,
+                        sql,
+                        position,
+                        &prefix,
+                    );
+                }
                 let mut keywords =
                     vec!["NULL", "TRUE", "FALSE", "CURRENT_DATE", "CURRENT_TIMESTAMP"];
                 if common::expression_value_allows_default(sql, position) {
@@ -802,6 +853,11 @@ impl Dialect for HiveDialect {
                     }
                 }
             }
+        }
+
+        if let (Some(schema), Some(tree)) = (schema, parse_result.tree.as_ref()) {
+            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+            common::apply_column_aliases(&mut items, schema, &aliases);
         }
 
         items
