@@ -682,6 +682,32 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
         titles.contains(&"Add non-matching WHERE safety guard"),
         "{actions}"
     );
+
+    let qualify_actions = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 2, "character": 8 },
+                "end": { "line": 2, "character": 8 }
+            },
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor.rewrite"]
+            }
+        }),
+    );
+    assert!(
+        qualify_actions
+            .as_array()
+            .is_some_and(|items| items.iter().any(|action| {
+                action
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .is_some_and(|title| title.starts_with("Qualify column as orders.amount"))
+            })),
+        "{qualify_actions}"
+    );
 }
 
 #[test]

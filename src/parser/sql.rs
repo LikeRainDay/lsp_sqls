@@ -4132,7 +4132,7 @@ pub struct AstNode {
 }
 
 impl SqlParser {
-    fn is_identifier_char(ch: char) -> bool {
+    pub(crate) fn is_identifier_char(ch: char) -> bool {
         ch.is_alphanumeric() || matches!(ch, '_' | '$' | '@' | '#')
     }
 
@@ -5055,10 +5055,7 @@ impl SqlParser {
 
     /// Returns aliases from the innermost query visible at `position` while
     /// retaining their original SQL spelling for safe completion insertion.
-    pub fn relation_aliases_at_position(
-        source: &str,
-        position: Position,
-    ) -> Vec<RelationAlias> {
+    pub fn relation_aliases_at_position(source: &str, position: Position) -> Vec<RelationAlias> {
         let scoped_source = Self::completion_scope_source(source, position);
         Self::extract_relation_alias_entries_from_source(&scoped_source)
     }
@@ -5166,6 +5163,44 @@ impl SqlParser {
     ) -> Vec<String> {
         let scoped_source = Self::completion_scope_source(source, position);
         Self::extract_referenced_tables_from_source(&scoped_source)
+    }
+
+    /// Extracts row-source references in the active query, including CTE
+    /// names. Schema inference deliberately excludes CTEs, but editor
+    /// intentions need them because the position schema contains their local
+    /// projected columns.
+    pub fn extract_row_sources_at_position(
+        &self,
+        _tree: &Tree,
+        source: &str,
+        position: Position,
+    ) -> Vec<String> {
+        let scoped_source = Self::completion_scope_source(source, position);
+        let searchable_source = Self::mask_sql_noise(&scoped_source);
+        let source_upper = searchable_source.to_ascii_uppercase();
+        let mut sources = Vec::new();
+        for keyword in ["FROM", "JOIN", "APPLY", "UPDATE", "INTO"] {
+            let mut search_position = 0;
+            while let Some(position) =
+                Self::next_keyword_position(&source_upper, keyword, search_position)
+            {
+                let after_keyword = position + keyword.len();
+                if let Some((relation, _)) =
+                    Self::read_relation_reference_after(&scoped_source, after_keyword)
+                {
+                    Self::push_table_reference(&mut sources, &relation);
+                }
+                search_position = after_keyword;
+            }
+        }
+        for relation_start in Self::comma_separated_relation_starts(&source_upper) {
+            if let Some((relation, _)) =
+                Self::read_relation_reference_after(&scoped_source, relation_start)
+            {
+                Self::push_table_reference(&mut sources, &relation);
+            }
+        }
+        sources
     }
 
     fn extract_referenced_tables_from_source(source: &str) -> Vec<String> {

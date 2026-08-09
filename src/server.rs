@@ -1824,30 +1824,50 @@ impl LanguageServer for SqlLspServer {
         let Some(dialect) = self.get_dialect_for_file(&uri_string) else {
             return Ok(None);
         };
-        let formatted = dialect.format(&text).await;
         let mut actions = Vec::new();
-        if formatted != text {
-            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title: "Format document with database dialect".to_string(),
-                kind: Some(CodeActionKind::SOURCE),
-                edit: Some(single_document_edit(
-                    uri.clone(),
-                    Range::new(Position::new(0, 0), lsp_position_at_end(&text)),
-                    formatted,
-                )),
-                ..Default::default()
-            }));
+        // Formatting is already exposed through textDocument/formatting. Do
+        // not format the full console for every automatic lightbulb request;
+        // build the source action only when the client explicitly asks for it.
+        if code_action_kind_explicitly_requested(&params.context, &CodeActionKind::SOURCE) {
+            let formatted = dialect.format(&text).await;
+            if formatted != text {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Format document with database dialect".to_string(),
+                    kind: Some(CodeActionKind::SOURCE),
+                    edit: Some(single_document_edit(
+                        uri.clone(),
+                        Range::new(Position::new(0, 0), lsp_position_at_end(&text)),
+                        formatted,
+                    )),
+                    ..Default::default()
+                }));
+            }
         }
-        if let Some(action) = expand_select_star_action(
-            &text,
-            &uri,
-            params.range,
-            self.get_schema_for_file(&uri_string),
-            dialect.name(),
-        ) {
-            actions.push(CodeActionOrCommand::CodeAction(action));
+        if code_action_kind_available(&params.context, &CodeActionKind::REFACTOR_REWRITE) {
+            let schema = self.get_schema_for_position(&uri_string, &text, params.range.start);
+            if let Some(action) =
+                expand_select_star_action(&text, &uri, params.range, schema.clone(), dialect.name())
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+            actions.extend(
+                qualify_identifier_actions(
+                    &text,
+                    &uri,
+                    params.range,
+                    schema.as_ref(),
+                    dialect.name(),
+                )
+                .into_iter()
+                .map(CodeActionOrCommand::CodeAction),
+            );
         }
-        for diagnostic in &params.context.diagnostics {
+        for diagnostic in params
+            .context
+            .diagnostics
+            .iter()
+            .filter(|_| code_action_kind_available(&params.context, &CodeActionKind::QUICKFIX))
+        {
             if matches!(
                 diagnostic.code.as_ref(),
                 Some(NumberOrString::String(code)) if code == "OXIDE001"
@@ -2556,6 +2576,512 @@ fn single_document_edit(uri: Url, range: Range, new_text: String) -> WorkspaceEd
         document_changes: None,
         change_annotations: None,
     }
+}
+
+fn code_action_kind_available(context: &CodeActionContext, kind: &CodeActionKind) -> bool {
+    context.only.as_ref().is_none_or(|only| {
+        only.iter().any(|requested| {
+            kind.as_str() == requested.as_str()
+                || kind
+                    .as_str()
+                    .starts_with(&format!("{}.", requested.as_str()))
+        })
+    })
+}
+
+fn code_action_kind_explicitly_requested(
+    context: &CodeActionContext,
+    kind: &CodeActionKind,
+) -> bool {
+    context.only.as_ref().is_some_and(|only| {
+        only.iter().any(|requested| {
+            kind.as_str() == requested.as_str()
+                || kind
+                    .as_str()
+                    .starts_with(&format!("{}.", requested.as_str()))
+        })
+    })
+}
+
+#[derive(Debug, Clone)]
+struct IdentifierPathSelection {
+    range: Range,
+    raw_parts: Vec<String>,
+    normalized_parts: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ColumnQualificationSource {
+    relation: String,
+    qualifier_label: String,
+    qualifier_sql: String,
+    columns: Vec<String>,
+    is_aliased: bool,
+}
+
+fn identifier_path_end(text: &str, start: usize) -> usize {
+    let mut quote_end: Option<char> = None;
+    let mut index = start;
+    while index < text.len() {
+        let Some(character) = text[index..].chars().next() else {
+            break;
+        };
+        if let Some(closing_quote) = quote_end {
+            index += character.len_utf8();
+            if character == closing_quote {
+                if text[index..].starts_with(closing_quote) {
+                    index += closing_quote.len_utf8();
+                } else {
+                    quote_end = None;
+                }
+            }
+            continue;
+        }
+        match character {
+            '"' | '`' => quote_end = Some(character),
+            '[' => quote_end = Some(']'),
+            _ if is_identifier_path_boundary(character) || character == ':' => break,
+            _ => {}
+        }
+        index += character.len_utf8();
+    }
+    index
+}
+
+fn split_identifier_path_sql(raw: &str, dialect_name: &str) -> Option<(Vec<String>, Vec<String>)> {
+    let mut raw_parts = Vec::new();
+    let mut normalized_parts = Vec::new();
+    let mut index = 0;
+    while index < raw.len() {
+        let start = index;
+        let first = raw[index..].chars().next()?;
+        let (normalized, end) = if matches!(first, '"' | '`' | '[') {
+            if first == '"' && matches!(dialect_name, "mysql" | "hive" | "clickhouse") {
+                return None;
+            }
+            let closing = if first == '[' { ']' } else { first };
+            let mut value = String::new();
+            index += first.len_utf8();
+            let mut closed = false;
+            while index < raw.len() {
+                let character = raw[index..].chars().next()?;
+                index += character.len_utf8();
+                if character == closing {
+                    if raw[index..].starts_with(closing) {
+                        value.push(closing);
+                        index += closing.len_utf8();
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    value.push(character);
+                }
+            }
+            if !closed || value.is_empty() {
+                return None;
+            }
+            (value, index)
+        } else {
+            if !SqlParser::is_identifier_char(first) {
+                return None;
+            }
+            index += first.len_utf8();
+            while index < raw.len() {
+                let character = raw[index..].chars().next()?;
+                if !SqlParser::is_identifier_char(character) {
+                    break;
+                }
+                index += character.len_utf8();
+            }
+            (raw[start..index].to_string(), index)
+        };
+        raw_parts.push(raw[start..end].to_string());
+        normalized_parts.push(normalized);
+        if index == raw.len() {
+            break;
+        }
+        if !raw[index..].starts_with('.') {
+            return None;
+        }
+        index += 1;
+    }
+    (!raw_parts.is_empty()).then_some((raw_parts, normalized_parts))
+}
+
+fn identifier_path_selection(
+    text: &str,
+    request_range: Range,
+    dialect_name: &str,
+) -> Option<IdentifierPathSelection> {
+    let request_start = position_to_byte_offset(text, request_range.start);
+    let request_end = position_to_byte_offset(text, request_range.end);
+    let cursor = request_end.max(request_start).min(text.len());
+    let prefix = text.get(..cursor)?;
+    let start = identifier_path_start_before_cursor(prefix)?;
+    let end = identifier_path_end(text, start);
+    if cursor < start || cursor > end || start >= end {
+        return None;
+    }
+    let raw = text.get(start..end)?.trim();
+    let trim_start = text.get(start..end)?.len() - text.get(start..end)?.trim_start().len();
+    let start = start + trim_start;
+    let end = start + raw.len();
+    let (raw_parts, normalized_parts) = split_identifier_path_sql(raw, dialect_name)?;
+
+    let masked = SqlParser::mask_sql_noise(text);
+    let masked_selection = masked.get(start..end)?;
+    let explicitly_quoted = raw_parts.iter().all(|part| {
+        (part.starts_with('"') && part.ends_with('"'))
+            || (part.starts_with('`') && part.ends_with('`'))
+            || (part.starts_with('[') && part.ends_with(']'))
+    });
+    if masked_selection.trim_matches('.').trim().is_empty() && !explicitly_quoted {
+        return None;
+    }
+
+    Some(IdentifierPathSelection {
+        range: range_for_offsets(text, start, end),
+        raw_parts,
+        normalized_parts,
+    })
+}
+
+fn relation_name_matches(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+        || left
+            .rsplit('.')
+            .next()
+            .zip(right.rsplit('.').next())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+}
+
+fn column_qualification_sources(
+    parser: &SqlParser,
+    tree: &tree_sitter::Tree,
+    text: &str,
+    position: Position,
+    schema: &Schema,
+    dialect_name: &str,
+) -> Vec<ColumnQualificationSource> {
+    let aliases = SqlParser::relation_aliases_at_position(text, position);
+    let byte_position = SqlParser::lsp_position_to_byte_position(text, position);
+    let references = parser.extract_row_sources_at_position(tree, text, byte_position);
+    let mut sources = Vec::new();
+
+    for alias in &aliases {
+        let Some(table) = schema
+            .tables
+            .iter()
+            .find(|table| schema_table_matches(schema, &alias.relation, table))
+        else {
+            continue;
+        };
+        sources.push(ColumnQualificationSource {
+            relation: alias.relation.clone(),
+            qualifier_label: alias.name.clone(),
+            qualifier_sql: alias.sql.clone(),
+            columns: table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            is_aliased: true,
+        });
+    }
+    for reference in references {
+        if aliases
+            .iter()
+            .any(|alias| relation_name_matches(&alias.relation, &reference))
+        {
+            continue;
+        }
+        let Some(table) = schema
+            .tables
+            .iter()
+            .find(|table| schema_table_matches(schema, &reference, table))
+        else {
+            continue;
+        };
+        let qualifier_label = SqlParser::identifier_last_part(&reference);
+        sources.push(ColumnQualificationSource {
+            relation: reference,
+            qualifier_sql: quote_completion_identifier(&qualifier_label, dialect_name),
+            qualifier_label,
+            columns: table
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            is_aliased: false,
+        });
+    }
+    sources.sort_by(|left, right| left.qualifier_label.cmp(&right.qualifier_label));
+    sources.dedup_by(|left, right| {
+        left.qualifier_label
+            .eq_ignore_ascii_case(&right.qualifier_label)
+    });
+    sources
+}
+
+fn source_matches_qualifier(source: &ColumnQualificationSource, qualifier: &str) -> bool {
+    if source.is_aliased {
+        source.qualifier_label.eq_ignore_ascii_case(qualifier)
+    } else {
+        relation_name_matches(&source.relation, qualifier)
+            || source.qualifier_label.eq_ignore_ascii_case(qualifier)
+    }
+}
+
+fn previous_sql_word(source: &str, offset: usize) -> Option<&str> {
+    source[..offset.min(source.len())]
+        .trim_end()
+        .rsplit(|character: char| !character.is_alphanumeric() && character != '_')
+        .find(|word| !word.is_empty())
+}
+
+fn batch_qualify_identifier_action(
+    text: &str,
+    uri: &Url,
+    request_range: Range,
+    sources: &[ColumnQualificationSource],
+    dialect_name: &str,
+) -> Option<CodeAction> {
+    const MAX_BATCH_QUALIFY_BYTES: usize = 256 * 1024;
+    let start = position_to_byte_offset(text, request_range.start);
+    let end = position_to_byte_offset(text, request_range.end);
+    let (start, end) = (start.min(end), start.max(end).min(text.len()));
+    if start >= end || end - start > MAX_BATCH_QUALIFY_BYTES {
+        return None;
+    }
+    let masked = SqlParser::mask_sql_noise(text);
+    let alias_names = sources
+        .iter()
+        .map(|source| source.qualifier_label.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let relation_names = sources
+        .iter()
+        .flat_map(|source| {
+            [
+                source.relation.to_ascii_lowercase(),
+                source
+                    .relation
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&source.relation)
+                    .to_ascii_lowercase(),
+            ]
+        })
+        .collect::<HashSet<_>>();
+    let mut edits = Vec::new();
+    let mut index = start;
+    while index < end {
+        let Some(first) = text[index..].chars().next() else {
+            break;
+        };
+        if !SqlParser::is_identifier_char(first) && !matches!(first, '"' | '`' | '[') {
+            index += first.len_utf8();
+            continue;
+        }
+        let candidate_end = identifier_path_end(text, index).min(end);
+        if candidate_end <= index {
+            index += first.len_utf8();
+            continue;
+        }
+        let raw = &text[index..candidate_end];
+        let Some((raw_parts, normalized_parts)) = split_identifier_path_sql(raw, dialect_name)
+        else {
+            index += first.len_utf8();
+            continue;
+        };
+        index = candidate_end;
+        if normalized_parts.len() != 1 {
+            continue;
+        }
+        let column = &normalized_parts[0];
+        let normalized = column.to_ascii_lowercase();
+        if Keywords::is_keyword(column)
+            || alias_names.contains(&normalized)
+            || relation_names.contains(&normalized)
+        {
+            continue;
+        }
+        let masked_candidate = &masked[candidate_end - raw.len()..candidate_end];
+        let explicitly_quoted = raw_parts[0]
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, '"' | '`' | '['));
+        if masked_candidate.trim().is_empty() && !explicitly_quoted {
+            continue;
+        }
+        if previous_sql_word(&masked, candidate_end - raw.len()).is_some_and(|word| {
+            matches!(
+                word.to_ascii_uppercase().as_str(),
+                "AS" | "FROM" | "JOIN" | "APPLY" | "UPDATE" | "INTO" | "TABLE" | "VIEW"
+            )
+        }) {
+            continue;
+        }
+        if text[candidate_end..]
+            .chars()
+            .find(|character| !character.is_whitespace())
+            == Some('(')
+        {
+            continue;
+        }
+        let matching_sources = sources
+            .iter()
+            .filter(|source| {
+                source
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(column))
+            })
+            .collect::<Vec<_>>();
+        if matching_sources.len() != 1 {
+            continue;
+        }
+        edits.push(TextEdit {
+            range: range_for_offsets(text, candidate_end - raw.len(), candidate_end),
+            new_text: format!("{}.{}", matching_sources[0].qualifier_sql, raw_parts[0]),
+        });
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    let count = edits.len();
+    Some(CodeAction {
+        title: format!(
+            "Qualify {count} selected column{}",
+            if count == 1 { "" } else { "s" }
+        ),
+        kind: Some(CodeActionKind::REFACTOR_REWRITE),
+        edit: Some(WorkspaceEdit {
+            changes: Some(HashMap::from([(uri.clone(), edits)])),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
+}
+
+fn qualify_identifier_actions(
+    text: &str,
+    uri: &Url,
+    request_range: Range,
+    schema: Option<&Schema>,
+    dialect_name: &str,
+) -> Vec<CodeAction> {
+    let Some(schema) = schema else {
+        return Vec::new();
+    };
+    let request_start = position_to_byte_offset(text, request_range.start);
+    let request_end = position_to_byte_offset(text, request_range.end);
+    if request_start != request_end {
+        let mut parser = SqlParser::new();
+        let parsed = parser.parse(text);
+        let Some(tree) = parsed.tree.as_ref() else {
+            return Vec::new();
+        };
+        let sources = column_qualification_sources(
+            &parser,
+            tree,
+            text,
+            request_range.start,
+            schema,
+            dialect_name,
+        );
+        return batch_qualify_identifier_action(text, uri, request_range, &sources, dialect_name)
+            .into_iter()
+            .collect();
+    }
+    let Some(selection) = identifier_path_selection(text, request_range, dialect_name) else {
+        return Vec::new();
+    };
+    let Some(column) = selection.normalized_parts.last() else {
+        return Vec::new();
+    };
+    if Keywords::is_keyword(column) {
+        return Vec::new();
+    }
+    let before = text[..position_to_byte_offset(text, selection.range.start)].trim_end();
+    if before
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .next_back()
+        .is_some_and(|word| word.eq_ignore_ascii_case("AS"))
+    {
+        return Vec::new();
+    }
+
+    let mut parser = SqlParser::new();
+    let parsed = parser.parse(text);
+    let Some(tree) = parsed.tree.as_ref() else {
+        return Vec::new();
+    };
+    let sources = column_qualification_sources(
+        &parser,
+        tree,
+        text,
+        request_range.start,
+        schema,
+        dialect_name,
+    );
+    if sources.is_empty()
+        || sources
+            .iter()
+            .any(|source| source.qualifier_label.eq_ignore_ascii_case(column))
+    {
+        return Vec::new();
+    }
+    let matching_sources = sources
+        .iter()
+        .filter(|source| {
+            source
+                .columns
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(column))
+        })
+        .collect::<Vec<_>>();
+    let column_sql = selection.raw_parts.last().cloned().unwrap_or_default();
+
+    if selection.normalized_parts.len() > 1 {
+        let qualifier =
+            selection.normalized_parts[..selection.normalized_parts.len() - 1].join(".");
+        if matching_sources.len() != 1 || !source_matches_qualifier(matching_sources[0], &qualifier)
+        {
+            return Vec::new();
+        }
+        return vec![CodeAction {
+            title: format!("Remove qualifier from {}", column_sql),
+            kind: Some(CodeActionKind::REFACTOR_REWRITE),
+            edit: Some(single_document_edit(
+                uri.clone(),
+                selection.range,
+                column_sql,
+            )),
+            is_preferred: Some(true),
+            ..Default::default()
+        }];
+    }
+
+    matching_sources
+        .into_iter()
+        .map(|source| {
+            let replacement = format!("{}.{}", source.qualifier_sql, column_sql);
+            CodeAction {
+                title: format!("Qualify column as {replacement}"),
+                kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                edit: Some(single_document_edit(
+                    uri.clone(),
+                    selection.range,
+                    replacement,
+                )),
+                is_preferred: Some(sources.len() == 1),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 fn add_mutation_safety_guard_action(
@@ -4169,22 +4695,24 @@ mod tests {
         add_insert_all_columns_completion, add_referenced_alias_completions,
         apply_completed_sql_context_completion_edits, apply_completion_preferences,
         apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
-        calculate_schema_match_score, completed_sql_context_keyword_at_position,
+        calculate_schema_match_score, code_action_kind_available,
+        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
         completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
         find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, position_to_byte_offset, range_for_offsets,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
-        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES,
+        infer_schema_id_from_tables, position_to_byte_offset, qualify_identifier_actions,
+        range_for_offsets, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, schema_for_table_column_at_position,
+        schema_id_for_file, schema_qualifier_at_position, sql_inspection_diagnostics,
+        table_alias_initials, CompletionPreferences, KeywordCase, TableAliasStyle,
+        LOCAL_RELATION_SCAN_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
     use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
     use tower_lsp::lsp_types::{
-        CompletionItem, CompletionItemKind, CompletionTextEdit, InsertTextFormat, Location,
-        Position, Range, Url,
+        CodeAction, CodeActionContext, CodeActionKind, CompletionItem, CompletionItemKind,
+        CompletionTextEdit, InsertTextFormat, Location, Position, Range, TextEdit, Url,
     };
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
@@ -5132,6 +5660,254 @@ mod tests {
         .expect("quoted star expansion");
         let edit = &action.edit.unwrap().changes.unwrap()[&uri][0];
         assert_eq!(edit.new_text, "id, e.`order`, e.`显示名称`");
+    }
+
+    fn code_action_edits(action: &CodeAction, uri: &Url) -> Vec<TextEdit> {
+        action
+            .edit
+            .as_ref()
+            .and_then(|edit| edit.changes.as_ref())
+            .and_then(|changes| changes.get(uri))
+            .cloned()
+            .expect("code action replacement")
+    }
+
+    fn code_action_replacement(action: &CodeAction, uri: &Url) -> String {
+        code_action_edits(action, uri)[0].new_text.clone()
+    }
+
+    #[test]
+    fn automatic_code_actions_skip_full_document_source_work() {
+        let automatic = CodeActionContext {
+            diagnostics: Vec::new(),
+            only: None,
+            trigger_kind: None,
+        };
+        assert!(code_action_kind_available(
+            &automatic,
+            &CodeActionKind::REFACTOR_REWRITE
+        ));
+        assert!(!code_action_kind_explicitly_requested(
+            &automatic,
+            &CodeActionKind::SOURCE
+        ));
+
+        let source_only = CodeActionContext {
+            diagnostics: Vec::new(),
+            only: Some(vec![CodeActionKind::SOURCE]),
+            trigger_kind: None,
+        };
+        assert!(code_action_kind_explicitly_requested(
+            &source_only,
+            &CodeActionKind::SOURCE
+        ));
+        assert!(!code_action_kind_available(
+            &source_only,
+            &CodeActionKind::REFACTOR_REWRITE
+        ));
+    }
+
+    #[test]
+    fn qualify_identifier_actions_use_the_unique_visible_source() {
+        let sql = "SELECT total FROM app.orders o";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let end = "SELECT total".len();
+        let actions = qualify_identifier_actions(
+            sql,
+            &uri,
+            range_for_offsets(sql, end, end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(code_action_replacement(&actions[0], &uri), "o.total");
+        assert_eq!(actions[0].is_preferred, Some(true));
+    }
+
+    #[test]
+    fn qualify_identifier_actions_remove_only_an_unambiguous_qualifier() {
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let unique_sql = "SELECT o.total FROM app.orders o";
+        let unique_end = "SELECT o.total".len();
+        let actions = qualify_identifier_actions(
+            unique_sql,
+            &uri,
+            range_for_offsets(unique_sql, unique_end, unique_end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(code_action_replacement(&actions[0], &uri), "total");
+
+        let ambiguous_sql =
+            "SELECT o.id FROM app.orders o JOIN app.customers c ON c.id = o.customer_id";
+        let ambiguous_end = "SELECT o.id".len();
+        assert!(qualify_identifier_actions(
+            ambiguous_sql,
+            &uri,
+            range_for_offsets(ambiguous_sql, ambiguous_end, ambiguous_end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn qualify_identifier_actions_offer_each_metadata_backed_ambiguous_source() {
+        let sql = "SELECT id FROM app.orders o JOIN app.customers c ON c.id = o.customer_id";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let end = "SELECT id".len();
+        let actions = qualify_identifier_actions(
+            sql,
+            &uri,
+            range_for_offsets(sql, end, end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        );
+        let replacements = actions
+            .iter()
+            .map(|action| code_action_replacement(action, &uri))
+            .collect::<Vec<_>>();
+
+        assert_eq!(replacements, vec!["c.id", "o.id"]);
+        assert!(actions
+            .iter()
+            .all(|action| action.is_preferred == Some(false)));
+    }
+
+    #[test]
+    fn qualify_identifier_actions_preserve_quoted_aliases_and_columns() {
+        let sql = "SELECT \"total\" FROM app.orders AS \"Order Alias\"";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let end = "SELECT \"total\"".len();
+        let actions = qualify_identifier_actions(
+            sql,
+            &uri,
+            range_for_offsets(sql, end, end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            code_action_replacement(&actions[0], &uri),
+            "\"Order Alias\".\"total\""
+        );
+
+        let mysql_sql = "SELECT `total` FROM app.orders AS `Order Alias`";
+        let mysql_end = "SELECT `total`".len();
+        let mysql_actions = qualify_identifier_actions(
+            mysql_sql,
+            &uri,
+            range_for_offsets(mysql_sql, mysql_end, mysql_end),
+            Some(&completion_schema_with_columns()),
+            "mysql",
+        );
+        assert_eq!(mysql_actions.len(), 1);
+        assert_eq!(
+            code_action_replacement(&mysql_actions[0], &uri),
+            "`Order Alias`.`total`"
+        );
+
+        let mysql_qualified = "SELECT `o`.`total` FROM app.orders AS o";
+        let mysql_qualified_end = "SELECT `o`.`total`".len();
+        let mysql_unqualify = qualify_identifier_actions(
+            mysql_qualified,
+            &uri,
+            range_for_offsets(
+                mysql_qualified,
+                mysql_qualified_end,
+                mysql_qualified_end,
+            ),
+            Some(&completion_schema_with_columns()),
+            "mysql",
+        );
+        assert_eq!(mysql_unqualify.len(), 1);
+        assert_eq!(
+            code_action_replacement(&mysql_unqualify[0], &uri),
+            "`total`"
+        );
+    }
+
+    #[test]
+    fn qualify_identifier_actions_ignore_alias_declarations_and_sql_noise() {
+        let uri = Url::parse("file:///query.sql").unwrap();
+        for (sql, end) in [
+            (
+                "SELECT total AS amount FROM app.orders o",
+                "SELECT total AS amount".len(),
+            ),
+            ("SELECT 'total' FROM app.orders o", "SELECT 'total".len()),
+            (
+                "SELECT total -- amount\nFROM app.orders o",
+                "SELECT total -- amount".len(),
+            ),
+        ] {
+            assert!(
+                qualify_identifier_actions(
+                    sql,
+                    &uri,
+                    range_for_offsets(sql, end, end),
+                    Some(&completion_schema_with_columns()),
+                    "postgres",
+                )
+                .is_empty(),
+                "unexpected intention for {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_qualify_identifier_action_edits_only_unique_metadata_columns() {
+        let sql = "SELECT total, name, id, COUNT(id), 'total' FROM app.orders o JOIN app.customers c ON c.id = o.customer_id";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let start = "SELECT ".len();
+        let end = sql.find(" FROM").unwrap();
+        let actions = qualify_identifier_actions(
+            sql,
+            &uri,
+            range_for_offsets(sql, start, end),
+            Some(&completion_schema_with_columns()),
+            "postgres",
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Qualify 2 selected columns");
+        assert_eq!(
+            code_action_edits(&actions[0], &uri)
+                .into_iter()
+                .map(|edit| edit.new_text)
+                .collect::<Vec<_>>(),
+            vec!["o.total", "c.name"]
+        );
+    }
+
+    #[test]
+    fn qualify_identifier_actions_include_unaliased_cte_row_sources() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables.push(Table {
+            name: "recent".to_string(),
+            columns: vec![Column {
+                name: "total".to_string(),
+                data_type: "bigint".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let sql = "WITH recent AS (SELECT total FROM app.orders) SELECT total FROM recent";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let end = sql.rfind("total").unwrap() + "total".len();
+        let actions = qualify_identifier_actions(
+            sql,
+            &uri,
+            range_for_offsets(sql, end, end),
+            Some(&schema),
+            "postgres",
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(code_action_replacement(&actions[0], &uri), "recent.total");
     }
 
     #[test]
