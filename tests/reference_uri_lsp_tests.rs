@@ -777,6 +777,11 @@ fn completion_models_cte_derived_and_temporary_relation_columns() {
     let temporary_uri = "file:///workspace/local-temp.postgres.sql";
     let temporary_as_uri = "file:///workspace/local-temp-as.postgres.sql";
     let temporary_drop_uri = "file:///workspace/local-temp-drop.postgres.sql";
+    let table_function_uri = "file:///workspace/table-function.postgres.sql";
+    let ordinality_uri = "file:///workspace/table-function-ordinality.postgres.sql";
+    let correlation_uri = "file:///workspace/table-correlation.postgres.sql";
+    let comma_source_uri = "file:///workspace/comma-source.postgres.sql";
+    let table_hint_uri = "file:///workspace/table-hint.sqlserver.sql";
     lsp.notify(
         "workspace/didChangeConfiguration",
         json!({
@@ -784,23 +789,59 @@ fn completion_models_cte_derived_and_temporary_relation_columns() {
                 "schemas": [{
                     "id": schema_id,
                     "database": "app",
-                    "tables": [{
-                        "name": "orders",
-                        "columns": [{
-                            "name": "amount",
-                            "data_type": "numeric",
-                            "nullable": false,
-                            "primary_key": false,
-                            "unique": false,
-                            "indexed": false,
+                    "tables": [
+                        {
+                            "name": "orders",
+                            "columns": [{
+                                "name": "amount",
+                                "data_type": "numeric",
+                                "nullable": false,
+                                "primary_key": false,
+                                "unique": false,
+                                "indexed": false,
+                                "comment": null,
+                                "source_location": null
+                            }],
+                            "indexes": [],
+                            "constraints": [],
                             "comment": null,
                             "source_location": null
-                        }],
-                        "indexes": [],
-                        "constraints": [],
-                        "comment": null,
-                        "source_location": null
-                    }],
+                        },
+                        {
+                            "name": "users",
+                            "columns": (["id", "name", "email"].into_iter().map(|name| json!({
+                                "name": name,
+                                "data_type": "text",
+                                "nullable": false,
+                                "primary_key": false,
+                                "unique": false,
+                                "indexed": false,
+                                "comment": null,
+                                "source_location": null
+                            })).collect::<Vec<_>>()),
+                            "indexes": [],
+                            "constraints": [],
+                            "comment": null,
+                            "source_location": null
+                        },
+                        {
+                            "name": "audit_log",
+                            "columns": (["event_id", "action"].into_iter().map(|name| json!({
+                                "name": name,
+                                "data_type": "text",
+                                "nullable": false,
+                                "primary_key": false,
+                                "unique": false,
+                                "indexed": false,
+                                "comment": null,
+                                "source_location": null
+                            })).collect::<Vec<_>>()),
+                            "indexes": [],
+                            "constraints": [],
+                            "comment": null,
+                            "source_location": null
+                        }
+                    ],
                     "functions": [],
                     "source_uri": null
                 }],
@@ -809,14 +850,24 @@ fn completion_models_cte_derived_and_temporary_relation_columns() {
                     (derived_uri): schema_id,
                     (temporary_uri): schema_id,
                     (temporary_as_uri): schema_id,
-                    (temporary_drop_uri): schema_id
+                    (temporary_drop_uri): schema_id,
+                    (table_function_uri): schema_id,
+                    (ordinality_uri): schema_id,
+                    (correlation_uri): schema_id,
+                    (comma_source_uri): schema_id,
+                    (table_hint_uri): schema_id
                 },
                 "fileDialects": {
                     (cte_uri): "postgres",
                     (derived_uri): "postgres",
                     (temporary_uri): "postgres",
                     (temporary_as_uri): "postgres",
-                    (temporary_drop_uri): "postgres"
+                    (temporary_drop_uri): "postgres",
+                    (table_function_uri): "postgres",
+                    (ordinality_uri): "postgres",
+                    (correlation_uri): "postgres",
+                    (comma_source_uri): "postgres",
+                    (table_hint_uri): "sqlserver"
                 }
             }
         }),
@@ -843,8 +894,38 @@ fn completion_models_cte_derived_and_temporary_relation_columns() {
             "CREATE TEMP TABLE scratch AS SELECT amount AS copied_amount FROM orders; SELECT * FROM scratch s WHERE s.",
             vec!["copied_amount"],
         ),
+        (
+            table_function_uri,
+            "SELECT * FROM generate_series(1, 3) g(value) WHERE g.",
+            vec!["value"],
+        ),
+        (
+            ordinality_uri,
+            "SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(value, ord), orders o WHERE g.",
+            vec!["value", "ord"],
+        ),
+        (
+            correlation_uri,
+            "SELECT * FROM users u(user_id) WHERE u.",
+            vec!["user_id", "name", "email"],
+        ),
+        (
+            comma_source_uri,
+            "SELECT * FROM users u JOIN orders o ON true, audit_log a WHERE a.",
+            vec!["event_id", "action"],
+        ),
+        (
+            table_hint_uri,
+            "SELECT * FROM users u (NOLOCK) WHERE u.",
+            vec!["id", "name", "email"],
+        ),
     ] {
-        lsp.open(uri, "postgres", sql);
+        let language_id = if uri.ends_with(".sqlserver.sql") {
+            "sqlserver"
+        } else {
+            "postgres"
+        };
+        lsp.open(uri, language_id, sql);
         let result = lsp.request(
             "textDocument/completion",
             json!({

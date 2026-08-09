@@ -4767,9 +4767,25 @@ impl SqlParser {
         }
     }
 
-    fn read_relation_alias_after(source: &str, index: usize) -> Option<(String, usize)> {
-        let mut index = Self::skip_whitespace(source, index);
-        if let Some(after_as) = Self::consume_word(source, index, "AS") {
+    fn read_relation_alias_after(
+        source: &str,
+        searchable_source: &str,
+        index: usize,
+    ) -> Option<(String, usize)> {
+        let mut index = Self::skip_whitespace(searchable_source, index);
+        // Table functions place their argument list between the relation name
+        // and alias. PostgreSQL may additionally insert WITH ORDINALITY.
+        if searchable_source[index..].starts_with('(') {
+            index = Self::skip_parenthesized_region(searchable_source, index);
+            if let Some(after_with) = Self::consume_word(searchable_source, index, "WITH") {
+                if let Some(after_ordinality) =
+                    Self::consume_word(searchable_source, after_with, "ORDINALITY")
+                {
+                    index = after_ordinality;
+                }
+            }
+        }
+        if let Some(after_as) = Self::consume_word(searchable_source, index, "AS") {
             index = after_as;
         }
 
@@ -4784,6 +4800,59 @@ impl SqlParser {
         }
 
         Some((alias, next_index))
+    }
+
+    fn comma_separated_relation_starts(source_upper: &str) -> Vec<usize> {
+        const FROM_BOUNDARIES: &[&str] = &[
+            "WHERE",
+            "GROUP",
+            "HAVING",
+            "ORDER",
+            "LIMIT",
+            "OFFSET",
+            "FETCH",
+            "WINDOW",
+            "QUALIFY",
+            "RETURNING",
+            "UNION",
+            "EXCEPT",
+            "INTERSECT",
+        ];
+
+        let mut starts = Vec::new();
+        let mut from_search = 0;
+        while let Some(from_position) =
+            Self::next_keyword_position(source_upper, "FROM", from_search)
+        {
+            let mut index = from_position + "FROM".len();
+            let mut depth = 0usize;
+            while index < source_upper.len() {
+                let Some(ch) = source_upper[index..].chars().next() else {
+                    break;
+                };
+                if depth == 0 {
+                    if matches!(ch, ';' | ')')
+                        || FROM_BOUNDARIES.iter().any(|keyword| {
+                            source_upper[index..].starts_with(keyword)
+                                && Self::is_keyword_at(source_upper, index, keyword)
+                        })
+                    {
+                        break;
+                    }
+                    if ch == ',' {
+                        starts.push(index + ch.len_utf8());
+                    }
+                }
+                match ch {
+                    '(' => depth += 1,
+                    ')' if depth > 0 => depth -= 1,
+                    _ => {}
+                }
+                index += ch.len_utf8();
+            }
+            from_search = (from_position + "FROM".len()).max(index);
+        }
+        starts
     }
 
     fn skip_cte_materialization_hint(source: &str, index: usize) -> usize {
@@ -4886,7 +4955,9 @@ impl SqlParser {
                 if let Some((table_name, after_table)) =
                     Self::read_relation_reference_after(source, after_keyword)
                 {
-                    if let Some((alias, _)) = Self::read_relation_alias_after(source, after_table) {
+                    if let Some((alias, _)) =
+                        Self::read_relation_alias_after(source, &searchable_source, after_table)
+                    {
                         aliases.insert(
                             Self::normalize_identifier(&alias),
                             Self::normalize_relation_reference(&table_name),
@@ -4895,6 +4966,24 @@ impl SqlParser {
                 }
 
                 search_pos = after_keyword;
+            }
+        }
+
+        // FROM clauses may introduce additional row sources with commas,
+        // including after a JOIN expression. Those sources have the same alias
+        // semantics as the first FROM/JOIN relation.
+        for relation_start in Self::comma_separated_relation_starts(&source_upper) {
+            if let Some((table_name, after_table)) =
+                Self::read_relation_reference_after(source, relation_start)
+            {
+                if let Some((alias, _)) =
+                    Self::read_relation_alias_after(source, &searchable_source, after_table)
+                {
+                    aliases.insert(
+                        Self::normalize_identifier(&alias),
+                        Self::normalize_relation_reference(&table_name),
+                    );
+                }
             }
         }
 
@@ -4950,6 +5039,16 @@ impl SqlParser {
                 }
 
                 search_pos = after_keyword;
+            }
+        }
+
+        for relation_start in Self::comma_separated_relation_starts(&source_upper) {
+            if let Some((table_name, _)) =
+                Self::read_relation_reference_after(source, relation_start)
+            {
+                if !Self::is_cte_reference(&table_name, &cte_names) {
+                    Self::push_table_reference(&mut tables, &table_name);
+                }
             }
         }
 
@@ -6529,6 +6628,58 @@ mod tests {
         assert!(references.contains(&"public.recent_orders".to_string()));
         assert!(!references.contains(&"recent_orders".to_string()));
         assert!(!references.contains(&"user_rollup".to_string()));
+    }
+
+    #[test]
+    fn extracts_table_function_aliases_after_arguments_and_ordinality() {
+        for (sql, alias) in [
+            (
+                "SELECT * FROM generate_series(1, 3) g(value) WHERE g.value > 1",
+                "g",
+            ),
+            (
+                "SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS series(value, ord)",
+                "series",
+            ),
+        ] {
+            let mut parser = SqlParser::new();
+            let result = parser.parse(sql);
+            let tree = result.tree.as_ref().expect("SQL should parse");
+            let aliases = parser.extract_aliases(tree, sql);
+
+            assert_eq!(
+                aliases.get(alias).map(String::as_str),
+                Some("generate_series")
+            );
+            assert_eq!(
+                parser.extract_referenced_tables(tree, sql),
+                vec!["generate_series".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn extracts_comma_separated_sources_after_join_expressions() {
+        let sql = "SELECT * FROM users u JOIN orders o ON o.user_id = u.id, audit_log a, generate_series(1, 3) g(value) WHERE a.user_id = u.id";
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+        let aliases = parser.extract_aliases(tree, sql);
+
+        assert_eq!(aliases.get("a").map(String::as_str), Some("audit_log"));
+        assert_eq!(
+            aliases.get("g").map(String::as_str),
+            Some("generate_series")
+        );
+        assert_eq!(
+            parser.extract_referenced_tables(tree, sql),
+            vec![
+                "users".to_string(),
+                "orders".to_string(),
+                "audit_log".to_string(),
+                "generate_series".to_string(),
+            ]
+        );
     }
 
     #[test]

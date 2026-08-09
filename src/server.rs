@@ -2857,8 +2857,24 @@ fn augment_schema_with_local_relations(
         &schema,
         uri,
     ));
+    let mut relation_schema = schema.clone();
+    for table in &local_relations {
+        relation_schema
+            .tables
+            .retain(|candidate| !candidate.name.eq_ignore_ascii_case(&table.name));
+        relation_schema.tables.push(table.clone());
+    }
+    local_relations.extend(correlated_tables_before_cursor(
+        visible,
+        &searchable_upper,
+        &relation_schema,
+        uri,
+    ));
 
-    for table in local_relations.into_iter().rev() {
+    // Apply in discovery order so the most local shape wins. A correlation
+    // column list shadows remote/CTE names positionally, and a CTE shadows a
+    // temporary relation with the same name.
+    for table in local_relations {
         schema
             .tables
             .retain(|candidate| !candidate.name.eq_ignore_ascii_case(&table.name));
@@ -2890,12 +2906,13 @@ fn temporary_tables_before_cursor(
             let definition_start = skip_local_whitespace(source, name_end);
             let source_line = source[..name_start].matches('\n').count() as u32 + 1;
             let (columns, statement_end) = if source[definition_start..].starts_with('(') {
-                let Some(closing) = matching_parenthesis(source, definition_start) else {
+                let Some(closing) = matching_parenthesis_in_searchable(upper, definition_start)
+                else {
                     search = definition_start + 1;
                     continue;
                 };
                 (
-                    split_top_level_ranges(source, definition_start + 1, closing)
+                    split_top_level_ranges_in_searchable(upper, definition_start + 1, closing)
                         .into_iter()
                         .filter_map(|(column_start, column_end)| {
                             parse_temporary_column(
@@ -3006,10 +3023,10 @@ fn cte_tables_before_cursor(source: &str, upper: &str, schema: &Schema, uri: &st
             cursor = skip_local_whitespace(source, name_end);
             let mut explicit_columns = Vec::new();
             if source[cursor..].starts_with('(') {
-                let Some(closing) = matching_parenthesis(source, cursor) else {
+                let Some(closing) = matching_parenthesis_in_searchable(upper, cursor) else {
                     break;
                 };
-                explicit_columns = split_top_level_ranges(source, cursor + 1, closing)
+                explicit_columns = split_top_level_ranges_in_searchable(upper, cursor + 1, closing)
                     .into_iter()
                     .filter_map(|(start, _)| {
                         read_local_identifier_after(source, start).map(|(name, _, _)| name)
@@ -3024,7 +3041,7 @@ fn cte_tables_before_cursor(source: &str, upper: &str, schema: &Schema, uri: &st
             if !source[cursor..].starts_with('(') {
                 break;
             }
-            let Some(closing) = matching_parenthesis(source, cursor) else {
+            let Some(closing) = matching_parenthesis_in_searchable(upper, cursor) else {
                 break;
             };
             let body = &source[cursor + 1..closing];
@@ -3077,7 +3094,7 @@ fn derived_tables_before_cursor(
                 search = opening;
                 continue;
             }
-            let Some(closing) = matching_parenthesis(source, opening) else {
+            let Some(closing) = matching_parenthesis_in_searchable(upper, opening) else {
                 search = opening + 1;
                 continue;
             };
@@ -3102,22 +3119,178 @@ fn derived_tables_before_cursor(
                 search = alias_end;
                 continue;
             }
+            let source_line = source[..alias_offset].matches('\n').count() as u32 + 1;
+            let columns = merge_local_column_aliases(
+                infer_query_output_columns(body, schema, uri, source_line),
+                correlation_column_names_after(source, upper, alias_end).unwrap_or_default(),
+                uri,
+                source_line,
+            );
             tables.push(local_relation_table(
                 alias,
                 "DERIVED TABLE",
-                infer_query_output_columns(
-                    body,
-                    schema,
-                    uri,
-                    source[..alias_offset].matches('\n').count() as u32 + 1,
-                ),
+                columns,
                 uri,
-                source[..alias_offset].matches('\n').count() as u32 + 1,
+                source_line,
             ));
             search = alias_end;
         }
     }
     tables
+}
+
+fn correlated_tables_before_cursor(
+    source: &str,
+    upper: &str,
+    schema: &Schema,
+    uri: &str,
+) -> Vec<Table> {
+    let mut tables = Vec::new();
+    for source_start in local_relation_source_starts(upper) {
+        let mut cursor = skip_local_whitespace(source, source_start);
+        for modifier in ["LATERAL", "ONLY"] {
+            let advanced = skip_optional_keyword_sequence(source, cursor, &[modifier]);
+            if advanced != cursor {
+                cursor = advanced;
+            }
+        }
+        let Some((reference, reference_start, reference_end)) =
+            read_local_identifier_path_after(source, cursor)
+        else {
+            continue;
+        };
+        cursor = skip_local_whitespace(source, reference_end);
+        let is_table_function = source[cursor..].starts_with('(');
+        if is_table_function {
+            let Some(closing) = matching_parenthesis_in_searchable(upper, cursor) else {
+                continue;
+            };
+            cursor = skip_local_whitespace(source, closing + 1);
+            let after_ordinality =
+                skip_optional_keyword_sequence(source, cursor, &["WITH", "ORDINALITY"]);
+            if after_ordinality != cursor {
+                cursor = after_ordinality;
+            }
+        }
+        let after_as = skip_optional_keyword_sequence(source, cursor, &["AS"]);
+        if after_as != cursor {
+            cursor = after_as;
+        }
+        let Some((alias, alias_start, alias_end)) = read_local_identifier_after(source, cursor)
+        else {
+            continue;
+        };
+        if Keywords::is_keyword(&alias) {
+            continue;
+        }
+        cursor = skip_local_whitespace(source, alias_end);
+        // SQL Server table hints are not PostgreSQL correlation columns. WITH
+        // makes the distinction unambiguous; the legacy `(NOLOCK)` form is
+        // filtered by the known hint vocabulary below.
+        if upper[cursor..].starts_with("WITH") && local_keyword_boundary(upper, cursor, "WITH") {
+            continue;
+        }
+        let Some(column_aliases) = correlation_column_names_after(source, upper, cursor) else {
+            continue;
+        };
+        if column_aliases.is_empty() || is_sqlserver_table_hint_list(&column_aliases) {
+            continue;
+        }
+
+        let table_name = SqlParser::identifier_last_part(&reference);
+        let base_columns = schema
+            .tables
+            .iter()
+            .find(|table| SqlParser::table_name_matches(&reference, &schema.database, &table.name))
+            .map(|table| table.columns.clone())
+            .unwrap_or_default();
+        let source_line = source[..alias_start.min(reference_start)]
+            .matches('\n')
+            .count() as u32
+            + 1;
+        let columns = merge_local_column_aliases(base_columns, column_aliases, uri, source_line);
+        tables.push(local_relation_table(
+            table_name,
+            if is_table_function {
+                "TABLE FUNCTION"
+            } else {
+                "CORRELATED TABLE"
+            },
+            columns,
+            uri,
+            source_line,
+        ));
+    }
+    tables
+}
+
+fn merge_local_column_aliases(
+    mut columns: Vec<Column>,
+    aliases: Vec<String>,
+    uri: &str,
+    line: u32,
+) -> Vec<Column> {
+    if columns.is_empty() {
+        return aliases
+            .into_iter()
+            .map(|name| local_relation_column(name, "unknown", uri, line))
+            .collect();
+    }
+    for (column, alias) in columns.iter_mut().zip(aliases) {
+        column.name = alias;
+        column.comment = Some("Column renamed by a correlation list".to_string());
+        column.source_location = Some((uri.to_string(), line));
+    }
+    columns
+}
+
+fn correlation_column_names_after(source: &str, upper: &str, start: usize) -> Option<Vec<String>> {
+    let opening = skip_local_whitespace(source, start);
+    if !source[opening..].starts_with('(') {
+        return None;
+    }
+    let closing = matching_parenthesis_in_searchable(upper, opening)?;
+    let mut names = Vec::new();
+    for (item_start, item_end) in split_top_level_ranges_in_searchable(upper, opening + 1, closing)
+    {
+        let (name, _, name_end) = read_local_identifier_after(source, item_start)?;
+        if !upper[name_end..item_end].trim().is_empty() {
+            return None;
+        }
+        names.push(name);
+    }
+    Some(names)
+}
+
+fn is_sqlserver_table_hint_list(names: &[String]) -> bool {
+    const TABLE_HINTS: &[&str] = &[
+        "FORCESEEK",
+        "FORCESCAN",
+        "HOLDLOCK",
+        "INDEX",
+        "NOEXPAND",
+        "NOLOCK",
+        "NOWAIT",
+        "PAGLOCK",
+        "READCOMMITTED",
+        "READCOMMITTEDLOCK",
+        "READPAST",
+        "READUNCOMMITTED",
+        "REPEATABLEREAD",
+        "ROWLOCK",
+        "SERIALIZABLE",
+        "SNAPSHOT",
+        "SPATIAL_WINDOW_MAX_CELLS",
+        "TABLOCK",
+        "TABLOCKX",
+        "UPDLOCK",
+        "XLOCK",
+    ];
+    names.iter().any(|name| {
+        TABLE_HINTS
+            .iter()
+            .any(|hint| name.eq_ignore_ascii_case(hint))
+    })
 }
 
 fn infer_query_output_columns(
@@ -3256,6 +3429,90 @@ fn read_local_identifier_after(source: &str, start: usize) -> Option<(String, us
     Some((source[start..end].to_string(), start, end))
 }
 
+fn read_local_identifier_path_after(source: &str, start: usize) -> Option<(String, usize, usize)> {
+    let (first, path_start, mut path_end) = read_local_identifier_after(source, start)?;
+    let mut parts = vec![first];
+    loop {
+        let dot = skip_local_whitespace(source, path_end);
+        if !source[dot..].starts_with('.') {
+            break;
+        }
+        let Some((part, _, part_end)) = read_local_identifier_after(source, dot + 1) else {
+            break;
+        };
+        parts.push(part);
+        path_end = part_end;
+    }
+    Some((parts.join("."), path_start, path_end))
+}
+
+fn local_relation_source_starts(source_upper: &str) -> Vec<usize> {
+    const FROM_BOUNDARIES: &[&str] = &[
+        "WHERE",
+        "GROUP",
+        "HAVING",
+        "ORDER",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "WINDOW",
+        "QUALIFY",
+        "RETURNING",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+    ];
+    let mut starts = Vec::new();
+    for keyword in ["FROM", "JOIN"] {
+        let mut search = 0;
+        while let Some(relative) = source_upper[search..].find(keyword) {
+            let position = search + relative;
+            if local_keyword_boundary(source_upper, position, keyword) {
+                starts.push(position + keyword.len());
+            }
+            search = position + keyword.len();
+        }
+    }
+    let mut from_search = 0;
+    while let Some(relative) = source_upper[from_search..].find("FROM") {
+        let from_position = from_search + relative;
+        if !local_keyword_boundary(source_upper, from_position, "FROM") {
+            from_search = from_position + "FROM".len();
+            continue;
+        }
+        let mut cursor = from_position + "FROM".len();
+        let mut depth = 0u32;
+        while cursor < source_upper.len() {
+            let Some(character) = source_upper[cursor..].chars().next() else {
+                break;
+            };
+            if depth == 0 {
+                if matches!(character, ';' | ')')
+                    || FROM_BOUNDARIES.iter().any(|keyword| {
+                        source_upper[cursor..].starts_with(keyword)
+                            && local_keyword_boundary(source_upper, cursor, keyword)
+                    })
+                {
+                    break;
+                }
+                if character == ',' {
+                    starts.push(cursor + character.len_utf8());
+                }
+            }
+            match character {
+                '(' => depth += 1,
+                ')' if depth > 0 => depth -= 1,
+                _ => {}
+            }
+            cursor += character.len_utf8();
+        }
+        from_search = (from_position + "FROM".len()).max(cursor);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
 fn skip_local_whitespace(source: &str, mut offset: usize) -> usize {
     offset = offset.min(source.len());
     while offset < source.len() {
@@ -3292,11 +3549,10 @@ fn local_keyword_boundary(source_upper: &str, start: usize, keyword: &str) -> bo
         && !after.is_some_and(|character| character.is_alphanumeric() || character == '_')
 }
 
-fn matching_parenthesis(source: &str, opening: usize) -> Option<usize> {
-    if !source[opening..].starts_with('(') {
+fn matching_parenthesis_in_searchable(searchable: &str, opening: usize) -> Option<usize> {
+    if !searchable[opening..].starts_with('(') {
         return None;
     }
-    let searchable = SqlParser::mask_sql_noise(source);
     let mut nesting = 0u32;
     for (relative, character) in searchable[opening..].char_indices() {
         match character {
@@ -3315,6 +3571,14 @@ fn matching_parenthesis(source: &str, opening: usize) -> Option<usize> {
 
 fn split_top_level_ranges(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     let searchable = SqlParser::mask_sql_noise(source);
+    split_top_level_ranges_in_searchable(&searchable, start, end)
+}
+
+fn split_top_level_ranges_in_searchable(
+    searchable: &str,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut segment_start = start;
     let mut nesting = 0u32;
@@ -3897,6 +4161,11 @@ mod tests {
                         data_type: "text".to_string(),
                         ..Default::default()
                     },
+                    Column {
+                        name: "email".to_string(),
+                        data_type: "text".to_string(),
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }],
@@ -3980,6 +4249,88 @@ mod tests {
         );
 
         assert!(!augmented.tables.iter().any(|table| table.name == "recent"));
+    }
+
+    #[test]
+    fn local_relation_augmentation_models_dbx_correlation_column_shapes() {
+        let cases = [
+            (
+                "SELECT * FROM generate_series(1, 3) g(value) WHERE g.",
+                "generate_series",
+                vec!["value"],
+                "TABLE FUNCTION",
+            ),
+            (
+                "SELECT * FROM generate_series(1, 3) WITH ORDINALITY AS g(value, ord), users u WHERE g.",
+                "generate_series",
+                vec!["value", "ord"],
+                "TABLE FUNCTION",
+            ),
+            (
+                "SELECT * FROM users u(user_id) WHERE u.",
+                "users",
+                vec!["user_id", "name", "email"],
+                "CORRELATED TABLE",
+            ),
+            (
+                "SELECT * FROM (SELECT id, name FROM users) u(user_id, display_name) WHERE u.",
+                "u",
+                vec!["user_id", "display_name"],
+                "DERIVED TABLE",
+            ),
+        ];
+
+        for (sql, table_name, expected_columns, object_type) in cases {
+            let augmented = augment_schema_with_local_relations(
+                semantic_test_schema(),
+                sql,
+                lsp_position_at_end(sql),
+                "oxide://query/correlation.postgres.sql",
+            );
+            let table = augmented
+                .tables
+                .iter()
+                .find(|table| table.name == table_name)
+                .unwrap_or_else(|| panic!("missing {table_name}: {:?}", augmented.tables));
+            assert_eq!(
+                table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                expected_columns
+            );
+            assert_eq!(table.object_type.as_deref(), Some(object_type));
+        }
+    }
+
+    #[test]
+    fn sqlserver_table_hints_preserve_remote_column_shapes() {
+        for sql in [
+            "SELECT * FROM users u (NOLOCK) WHERE u.",
+            "SELECT * FROM users u WITH (UPDLOCK, ROWLOCK) WHERE u.",
+        ] {
+            let augmented = augment_schema_with_local_relations(
+                semantic_test_schema(),
+                sql,
+                lsp_position_at_end(sql),
+                "oxide://query/hints.sqlserver.sql",
+            );
+            let users = augmented
+                .tables
+                .iter()
+                .find(|table| table.name == "users")
+                .expect("remote users table");
+            assert_eq!(
+                users
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["id", "name", "email"]
+            );
+            assert_ne!(users.object_type.as_deref(), Some("CORRELATED TABLE"));
+        }
     }
 
     #[tokio::test]
