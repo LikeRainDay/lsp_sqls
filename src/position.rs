@@ -98,14 +98,19 @@ pub fn cursor_token_prefix(
     let position = lsp_position_to_byte_position(source, position);
     let line = source.split('\n').nth(position.line as usize).unwrap_or("");
     let byte_index = position.character.min(line.len() as u32) as usize;
-    let bytes = line.as_bytes();
-    let mut start = byte_index.min(bytes.len());
+    let mut start = byte_index.min(line.len());
 
-    while start > 0 && is_token_char(bytes[start - 1] as char) {
-        start -= 1;
+    while start > 0 {
+        let Some(character) = line[..start].chars().next_back() else {
+            break;
+        };
+        if !is_token_char(character) {
+            break;
+        }
+        start -= character.len_utf8();
     }
 
-    line[start..byte_index.min(bytes.len())]
+    line[start..byte_index.min(line.len())]
         .trim_matches('"')
         .trim_matches('\'')
         .to_ascii_lowercase()
@@ -151,6 +156,17 @@ mod tests {
                 line: 1,
                 character: "SELECT '😀'".encode_utf16().count() as u32,
             }
+        );
+    }
+
+    #[test]
+    fn cursor_prefix_keeps_unicode_identifier_boundaries() {
+        let source = "SELECT 订单金";
+        assert_eq!(
+            cursor_token_prefix(source, lsp_position_at_end(source), |character| {
+                character.is_alphanumeric() || character == '_'
+            }),
+            "订单金"
         );
     }
 }

@@ -979,19 +979,15 @@ impl SqlParser {
     }
 
     fn byte_offset_for_position(source: &str, position: Position) -> usize {
-        let lines: Vec<&str> = source.lines().collect();
-        let mut cursor_offset = 0;
-
-        for (line_idx, line) in lines.iter().enumerate() {
-            if line_idx < position.line as usize {
-                cursor_offset += line.len() + 1;
-            } else if line_idx == position.line as usize {
-                cursor_offset += position.character.min(line.len() as u32) as usize;
-                break;
+        let byte_position = Self::lsp_position_to_byte_position(source, position);
+        let mut line_start = 0usize;
+        for (line_index, line) in source.split_inclusive('\n').enumerate() {
+            if line_index == byte_position.line as usize {
+                return (line_start + byte_position.character as usize).min(source.len());
             }
+            line_start += line.len();
         }
-
-        cursor_offset.min(source.len())
+        source.len()
     }
 
     fn analyze_completed_keyword_context(
@@ -4080,7 +4076,7 @@ pub struct AstNode {
 
 impl SqlParser {
     fn is_identifier_char(ch: char) -> bool {
-        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$')
+        ch.is_alphanumeric() || matches!(ch, '_' | '$' | '@' | '#')
     }
 
     fn push_masked_char(output: &mut String, ch: char) {
@@ -4352,7 +4348,11 @@ impl SqlParser {
     }
 
     fn next_statement_end(searchable_source: &str, cursor_offset: usize) -> usize {
-        searchable_source[cursor_offset.min(searchable_source.len())..]
+        let mut cursor_offset = cursor_offset.min(searchable_source.len());
+        while !searchable_source.is_char_boundary(cursor_offset) {
+            cursor_offset = cursor_offset.saturating_sub(1);
+        }
+        searchable_source[cursor_offset..]
             .find(';')
             .map(|relative| cursor_offset + relative)
             .unwrap_or(searchable_source.len())
@@ -4583,7 +4583,10 @@ impl SqlParser {
     fn consume_word(source: &str, index: usize, word: &str) -> Option<usize> {
         let index = Self::skip_whitespace(source, index);
         let end = index + word.len();
-        if end > source.len() || !source[index..end].eq_ignore_ascii_case(word) {
+        if !source
+            .get(index..end)
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(word))
+        {
             return None;
         }
 
@@ -6336,6 +6339,21 @@ mod tests {
         assert!(references.contains(&"public.users".to_string()));
         assert!(references.contains(&"shop.orders".to_string()));
         assert!(references.contains(&"audit.events".to_string()));
+    }
+
+    #[test]
+    fn extracts_unquoted_unicode_relation_references() {
+        let sql = "SELECT o.金额 FROM 销售.订单 o WHERE o.状态 = '完成'";
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+
+        let aliases = parser.extract_aliases(tree, sql);
+        assert_eq!(aliases.get("o"), Some(&"销售.订单".to_string()));
+        assert_eq!(
+            parser.extract_referenced_tables(tree, sql),
+            vec!["销售.订单".to_string()]
+        );
     }
 
     #[test]

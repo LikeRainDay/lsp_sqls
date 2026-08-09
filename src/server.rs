@@ -686,6 +686,196 @@ fn apply_completion_preferences(
     }
 }
 
+fn keyword_with_completion_case(keyword: &str, keyword_case: KeywordCase) -> String {
+    match keyword_case {
+        KeywordCase::Upper | KeywordCase::Preserve => keyword.to_ascii_uppercase(),
+        KeywordCase::Lower => keyword.to_ascii_lowercase(),
+    }
+}
+
+const SQL_COMPLETION_IDENTIFIER_KEYWORDS: &[&str] = &[
+    "all",
+    "alter",
+    "and",
+    "as",
+    "by",
+    "case",
+    "check",
+    "constraint",
+    "create",
+    "default",
+    "delete",
+    "distinct",
+    "drop",
+    "else",
+    "end",
+    "except",
+    "false",
+    "foreign",
+    "from",
+    "group",
+    "having",
+    "index",
+    "insert",
+    "intersect",
+    "into",
+    "join",
+    "key",
+    "limit",
+    "not",
+    "null",
+    "offset",
+    "on",
+    "or",
+    "order",
+    "primary",
+    "recursive",
+    "references",
+    "returning",
+    "select",
+    "set",
+    "table",
+    "then",
+    "true",
+    "union",
+    "unique",
+    "update",
+    "using",
+    "values",
+    "view",
+    "when",
+    "where",
+    "with",
+];
+
+fn quote_completion_identifier(identifier: &str, dialect_name: &str) -> String {
+    if ((identifier.starts_with('"') && identifier.ends_with('"'))
+        || (identifier.starts_with('`') && identifier.ends_with('`'))
+        || (identifier.starts_with('[') && identifier.ends_with(']')))
+        && identifier.len() >= 2
+    {
+        return identifier.to_string();
+    }
+    let simple_lower = identifier
+        .chars()
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_lowercase())
+        && identifier.chars().skip(1).all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '_' | '$')
+        });
+    if simple_lower
+        && !SQL_COMPLETION_IDENTIFIER_KEYWORDS
+            .iter()
+            .any(|keyword| identifier.eq_ignore_ascii_case(keyword))
+    {
+        return identifier.to_string();
+    }
+
+    if matches!(dialect_name, "mysql" | "hive" | "clickhouse") {
+        format!("`{}`", identifier.replace('`', "``"))
+    } else {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+}
+
+fn add_insert_all_columns_completion(
+    text: &str,
+    position: Position,
+    schema: Option<&Schema>,
+    items: &mut Vec<CompletionItem>,
+    preferences: &CompletionPreferences,
+    dialect_name: &str,
+) {
+    let Some(schema) = schema else {
+        return;
+    };
+    let cursor = position_to_byte_offset(text, position);
+    let Some(text_before_cursor) = text.get(..cursor) else {
+        return;
+    };
+    let statement_start = SqlParser::active_statement_start(text_before_cursor);
+    let statement = &text_before_cursor[statement_start..];
+    let masked = SqlParser::mask_sql_noise(statement);
+    let trimmed = masked.trim_end();
+    if !trimmed.ends_with('(') {
+        return;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    let Some(insert_offset) = upper.rfind("INSERT INTO") else {
+        return;
+    };
+    let open_offset = trimmed.len().saturating_sub(1);
+    let insert_tail = &upper[insert_offset + "INSERT INTO".len()..open_offset];
+    if ["VALUES", "VALUE", "SELECT", "SET"]
+        .iter()
+        .any(|keyword| contains_sql_keyword(insert_tail, keyword))
+        || insert_tail
+            .chars()
+            .any(|character| matches!(character, '(' | ')' | ','))
+    {
+        return;
+    }
+
+    let mut parser = SqlParser::new();
+    let parse_result = parser.parse(statement);
+    let Some(tree) = parse_result.tree.as_ref() else {
+        return;
+    };
+    let references = parser.extract_referenced_tables_at_position(
+        tree,
+        statement,
+        lsp_position_at_end(statement),
+    );
+    let Some(reference) = references.last() else {
+        return;
+    };
+    let Some(table) = schema
+        .tables
+        .iter()
+        .find(|table| SqlParser::table_name_matches(reference, &schema.database, &table.name))
+    else {
+        return;
+    };
+    if table.columns.is_empty() {
+        return;
+    }
+
+    let label = format!("{}.*", table.name);
+    if items.iter().any(|item| item.label == label) {
+        return;
+    }
+    let columns = table
+        .columns
+        .iter()
+        .map(|column| quote_completion_identifier(&column.name, dialect_name))
+        .collect::<Vec<_>>();
+    let values = columns
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("${{{}:value}}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values_keyword = keyword_with_completion_case("VALUES", preferences.keyword_case);
+    let insert_text = format!("{}) {values_keyword} ({values})", columns.join(", "));
+    items.push(CompletionItem {
+        label,
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(format!(
+            "{} columns: {}) {} (value, ...)",
+            columns.len(),
+            columns.join(", "),
+            values_keyword
+        )),
+        sort_text: Some(format!("0:0000:{}", table.name.to_ascii_lowercase())),
+        filter_text: Some(table.name.clone()),
+        insert_text: Some(insert_text),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    });
+}
+
 fn update_completion_text_edit(item: &mut CompletionItem, transform: &impl Fn(&str) -> String) {
     match item.text_edit.as_mut() {
         Some(CompletionTextEdit::Edit(edit)) => edit.new_text = transform(&edit.new_text),
@@ -1294,14 +1484,30 @@ impl LanguageServer for SqlLspServer {
                     params.context.as_ref(),
                 )
                 .await;
+            let preferences = self
+                .completion_preferences
+                .read()
+                .map(|preferences| preferences.clone())
+                .unwrap_or_default();
+            if matches!(
+                dialect.name(),
+                "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
+            ) {
+                add_insert_all_columns_completion(
+                    &text,
+                    position,
+                    schema.as_ref(),
+                    &mut items,
+                    &preferences,
+                    dialect.name(),
+                );
+            }
             apply_completed_sql_context_completion_edits(&text, position, &mut items);
             apply_qualified_identifier_completion_edits(&text, position, &mut items);
-            if matches!(dialect.name(), "postgres" | "mysql" | "hive" | "clickhouse") {
-                let preferences = self
-                    .completion_preferences
-                    .read()
-                    .map(|preferences| preferences.clone())
-                    .unwrap_or_default();
+            if matches!(
+                dialect.name(),
+                "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
+            ) {
                 apply_completion_preferences(&text, position, &mut items, &preferences);
             }
             return Ok(Some(CompletionResponse::Array(items)));
@@ -1575,6 +1781,7 @@ impl LanguageServer for SqlLspServer {
             &uri,
             params.range,
             self.get_schema_for_file(&uri_string),
+            dialect.name(),
         ) {
             actions.push(CodeActionOrCommand::CodeAction(action));
         }
@@ -2323,6 +2530,7 @@ fn expand_select_star_action(
     uri: &Url,
     request_range: Range,
     schema: Option<Schema>,
+    dialect_name: &str,
 ) -> Option<CodeAction> {
     let schema = schema?;
     let selection_start = position_to_byte_offset(text, request_range.start);
@@ -2334,12 +2542,24 @@ fn expand_select_star_action(
     })?;
     let prefix = text[..star].to_ascii_uppercase();
     let select_start = prefix.rfind("SELECT")?;
-    if text[select_start + "SELECT".len()..star]
-        .chars()
-        .any(|character| !character.is_whitespace())
+    let mut projection_prefix = text[select_start + "SELECT".len()..star].trim();
+    if projection_prefix
+        .get(.."DISTINCT".len())
+        .is_some_and(|value| value.eq_ignore_ascii_case("DISTINCT"))
     {
-        return None;
+        projection_prefix = projection_prefix["DISTINCT".len()..].trim();
     }
+    let qualifier_sql = if projection_prefix.is_empty() {
+        None
+    } else if projection_prefix.ends_with('.') {
+        let qualifier = projection_prefix.trim_end_matches('.').trim();
+        (!qualifier.is_empty()).then_some(qualifier.to_string())
+    } else {
+        return None;
+    };
+    let qualifier = qualifier_sql
+        .as_deref()
+        .map(SqlParser::normalize_identifier);
     let statement_start = text[..star].rfind(';').map_or(0, |offset| offset + 1);
     let statement_end = text[star..]
         .find(';')
@@ -2348,26 +2568,81 @@ fn expand_select_star_action(
     let mut parser = SqlParser::new();
     let parse_result = parser.parse(statement);
     let tree = parse_result.tree.as_ref()?;
-    let tables = parser.extract_tables(tree, statement);
-    if tables.len() != 1 {
+    let references = parser.extract_referenced_tables(tree, statement);
+    let aliases = parser.extract_aliases(tree, statement);
+    let mut sources = Vec::<(&Table, String)>::new();
+
+    if let Some(qualifier) = qualifier.as_deref() {
+        let target = aliases
+            .get(qualifier)
+            .map(String::as_str)
+            .unwrap_or(qualifier);
+        let table = schema
+            .tables
+            .iter()
+            .find(|table| SqlParser::table_name_matches(target, &schema.database, &table.name))?;
+        sources.push((table, qualifier_sql.clone()?));
+    } else {
+        if references.is_empty() {
+            return None;
+        }
+        let mut used_aliases = HashSet::new();
+        for reference in references {
+            let table = schema.tables.iter().find(|table| {
+                SqlParser::table_name_matches(&reference, &schema.database, &table.name)
+            })?;
+            let mut matching_aliases = aliases
+                .iter()
+                .filter(|(alias, target)| {
+                    !used_aliases.contains(*alias)
+                        && SqlParser::table_name_matches(target, &schema.database, &table.name)
+                })
+                .map(|(alias, _)| alias.clone())
+                .collect::<Vec<_>>();
+            matching_aliases.sort();
+            let source_qualifier = matching_aliases
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| SqlParser::identifier_last_part(&reference));
+            used_aliases.insert(source_qualifier.clone());
+            sources.push((table, source_qualifier));
+        }
+    }
+    if sources.is_empty() || sources.iter().any(|(table, _)| table.columns.is_empty()) {
         return None;
     }
-    let table_reference = &tables[0];
-    let table = schema.tables.iter().find(|table| {
-        SqlParser::table_name_matches(table_reference, &schema.database, &table.name)
-    })?;
-    if table.columns.is_empty() {
-        return None;
+
+    let qualified_expansion = qualifier.is_none() && sources.len() > 1;
+    let mut replacement_columns = Vec::new();
+    for (table, source_qualifier) in &sources {
+        for (index, column) in table.columns.iter().enumerate() {
+            let column_name = if qualifier.is_some() {
+                // The original `alias.` remains before the replacement range.
+                if index == 0 {
+                    quote_completion_identifier(&column.name, dialect_name)
+                } else {
+                    format!(
+                        "{}.{}",
+                        quote_completion_identifier(source_qualifier, dialect_name),
+                        quote_completion_identifier(&column.name, dialect_name)
+                    )
+                }
+            } else if qualified_expansion {
+                format!(
+                    "{}.{}",
+                    quote_completion_identifier(source_qualifier, dialect_name),
+                    quote_completion_identifier(&column.name, dialect_name)
+                )
+            } else {
+                quote_completion_identifier(&column.name, dialect_name)
+            };
+            replacement_columns.push(column_name);
+        }
     }
-    let replacement = table
-        .columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let replacement = replacement_columns.join(", ");
     let range = range_for_offsets(text, star, star + 1);
     Some(CodeAction {
-        title: format!("Expand * to {} columns", table.columns.len()),
+        title: format!("Expand * to {} columns", replacement_columns.len()),
         kind: Some(CodeActionKind::REFACTOR_REWRITE),
         edit: Some(single_document_edit(uri.clone(), range, replacement)),
         is_preferred: Some(true),
@@ -3551,20 +3826,23 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_completed_sql_context_completion_edits, apply_completion_preferences,
-        apply_qualified_identifier_completion_edits, calculate_schema_match_score,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
+        add_insert_all_columns_completion, apply_completed_sql_context_completion_edits,
+        apply_completion_preferences, apply_qualified_identifier_completion_edits,
+        calculate_schema_match_score, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, position_to_byte_offset, range_for_offsets,
         rewrite_current_document_location_uri, rewrite_current_document_location_uris,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
         TableAliasStyle,
     };
+    use crate::position::lsp_position_at_end;
     use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
     use tower_lsp::lsp_types::{
-        CompletionItem, CompletionItemKind, CompletionTextEdit, Location, Position, Range, Url,
+        CompletionItem, CompletionItemKind, CompletionTextEdit, InsertTextFormat, Location,
+        Position, Range, Url,
     };
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
@@ -4095,6 +4373,160 @@ mod tests {
             table_alias_initials("audit.userAccounts"),
             Some("ua".to_string())
         );
+    }
+
+    fn completion_schema_with_columns() -> Schema {
+        Schema {
+            id: SchemaId::new(),
+            database: "app".to_string(),
+            server_version: None,
+            tables: vec![
+                Table {
+                    name: "orders".to_string(),
+                    columns: ["id", "customer_id", "total"]
+                        .into_iter()
+                        .map(|name| Column {
+                            name: name.to_string(),
+                            data_type: "bigint".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+                Table {
+                    name: "customers".to_string(),
+                    columns: ["id", "name"]
+                        .into_iter()
+                        .map(|name| Column {
+                            name: name.to_string(),
+                            data_type: "text".to_string(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                },
+            ],
+            functions: Vec::new(),
+            source_uri: None,
+        }
+    }
+
+    #[test]
+    fn insert_all_columns_completion_adds_values_tab_stops() {
+        let sql = "INSERT INTO app.orders (";
+        let mut items = Vec::new();
+        add_insert_all_columns_completion(
+            sql,
+            lsp_position_at_end(sql),
+            Some(&completion_schema_with_columns()),
+            &mut items,
+            &CompletionPreferences {
+                keyword_case: KeywordCase::Lower,
+                table_alias: TableAliasStyle::None,
+            },
+            "postgres",
+        );
+
+        let item = items
+            .iter()
+            .find(|item| item.label == "orders.*")
+            .expect("all-column completion");
+        assert_eq!(
+            item.insert_text.as_deref(),
+            Some("id, customer_id, total) values (${1:value}, ${2:value}, ${3:value})")
+        );
+        assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+
+        let nested_expression = "INSERT INTO app.orders (COALESCE(";
+        let mut nested_items = Vec::new();
+        add_insert_all_columns_completion(
+            nested_expression,
+            lsp_position_at_end(nested_expression),
+            Some(&completion_schema_with_columns()),
+            &mut nested_items,
+            &CompletionPreferences::default(),
+            "postgres",
+        );
+        assert!(nested_items.is_empty());
+    }
+
+    #[test]
+    fn generated_column_lists_quote_reserved_and_unicode_identifiers() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables.push(Table {
+            name: "事件".to_string(),
+            columns: ["id", "order", "显示名称"]
+                .into_iter()
+                .map(|name| Column {
+                    name: name.to_string(),
+                    data_type: "text".to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+        let insert_sql = "INSERT INTO app.事件 (";
+        let mut items = Vec::new();
+        add_insert_all_columns_completion(
+            insert_sql,
+            lsp_position_at_end(insert_sql),
+            Some(&schema),
+            &mut items,
+            &CompletionPreferences::default(),
+            "mysql",
+        );
+        assert_eq!(
+            items[0].insert_text.as_deref(),
+            Some("id, `order`, `显示名称`) VALUES (${1:value}, ${2:value}, ${3:value})")
+        );
+
+        let select_sql = "SELECT e.* FROM app.事件 e";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let star = select_sql.find('*').unwrap();
+        let action = expand_select_star_action(
+            select_sql,
+            &uri,
+            range_for_offsets(select_sql, star, star + 1),
+            Some(schema),
+            "mysql",
+        )
+        .expect("quoted star expansion");
+        let edit = &action.edit.unwrap().changes.unwrap()[&uri][0];
+        assert_eq!(edit.new_text, "id, e.`order`, e.`显示名称`");
+    }
+
+    #[test]
+    fn select_star_expansion_qualifies_columns_from_multiple_sources() {
+        let sql = "SELECT * FROM app.orders o JOIN app.customers c ON c.id = o.customer_id";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let star = sql.find('*').unwrap();
+        let action = expand_select_star_action(
+            sql,
+            &uri,
+            range_for_offsets(sql, star, star + 1),
+            Some(completion_schema_with_columns()),
+            "postgres",
+        )
+        .expect("star expansion");
+        let edit = &action.edit.unwrap().changes.unwrap()[&uri][0];
+        assert_eq!(edit.new_text, "o.id, o.customer_id, o.total, c.id, c.name");
+    }
+
+    #[test]
+    fn qualified_star_expansion_preserves_the_typed_alias() {
+        let sql = "SELECT o.* FROM app.orders AS o";
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let star = sql.find('*').unwrap();
+        let action = expand_select_star_action(
+            sql,
+            &uri,
+            range_for_offsets(sql, star, star + 1),
+            Some(completion_schema_with_columns()),
+            "postgres",
+        )
+        .expect("qualified star expansion");
+        let edit = &action.edit.unwrap().changes.unwrap()[&uri][0];
+        assert_eq!(edit.new_text, "id, o.customer_id, o.total");
     }
 
     #[test]
