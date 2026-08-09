@@ -686,6 +686,68 @@ fn apply_completion_preferences(
     }
 }
 
+fn add_referenced_alias_completions(
+    text: &str,
+    position: Position,
+    items: &mut Vec<CompletionItem>,
+) {
+    if relation_alias_context_at_position(text, position) {
+        return;
+    }
+    let offset = position_to_byte_offset(text, position);
+    let Some(text_before) = text.get(..offset) else {
+        return;
+    };
+    let Some(prefix_start) = identifier_path_start_before_cursor(text_before) else {
+        return;
+    };
+    let prefix_sql = text_before[prefix_start..].trim();
+    if prefix_sql.is_empty() || prefix_sql.contains('.') {
+        return;
+    }
+    let masked = SqlParser::mask_sql_noise(text_before);
+    if masked
+        .get(prefix_start..)
+        .is_none_or(|prefix| prefix.trim().is_empty())
+    {
+        return;
+    }
+    let prefix = prefix_sql
+        .trim_start_matches(['"', '`', '['])
+        .trim_end_matches(['"', '`', ']'])
+        .to_ascii_lowercase();
+    if prefix.is_empty() {
+        return;
+    }
+
+    // Alias discovery is a bounded, text-only scope scan.  It deliberately
+    // avoids constructing a second tree-sitter parse after the dialect has
+    // already produced its semantic completion candidates.
+    let aliases = SqlParser::relation_aliases_at_position(text, position);
+    for alias in aliases {
+        let normalized = alias.name.to_ascii_lowercase();
+        let initials = table_alias_initials(&alias.name).unwrap_or_default();
+        if !normalized.starts_with(&prefix) && !initials.starts_with(&prefix) {
+            continue;
+        }
+        if items.iter().any(|item| {
+            item.kind == Some(CompletionItemKind::VARIABLE)
+                && item.label.eq_ignore_ascii_case(&alias.name)
+        }) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: alias.name.clone(),
+            kind: Some(CompletionItemKind::VARIABLE),
+            detail: Some(format!("Table alias · {}", alias.relation)),
+            filter_text: Some(alias.name.clone()),
+            insert_text: Some(alias.sql),
+            sort_text: Some(format!("-2:alias:{}", normalized)),
+            ..Default::default()
+        });
+    }
+}
+
 fn keyword_with_completion_case(keyword: &str, keyword_case: KeywordCase) -> String {
     match keyword_case {
         KeywordCase::Upper | KeywordCase::Preserve => keyword.to_ascii_uppercase(),
@@ -1501,6 +1563,7 @@ impl LanguageServer for SqlLspServer {
                     dialect.name(),
                 );
             }
+            add_referenced_alias_completions(&text, position, &mut items);
             apply_completed_sql_context_completion_edits(&text, position, &mut items);
             apply_qualified_identifier_completion_edits(&text, position, &mut items);
             if matches!(
@@ -4103,17 +4166,17 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_insert_all_columns_completion, apply_completed_sql_context_completion_edits,
-        apply_completion_preferences, apply_qualified_identifier_completion_edits,
-        augment_schema_with_local_relations, calculate_schema_match_score,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
-        range_for_offsets, rewrite_current_document_location_uri,
-        rewrite_current_document_location_uris, schema_for_table_column_at_position,
-        schema_id_for_file, schema_qualifier_at_position, sql_inspection_diagnostics,
-        table_alias_initials, CompletionPreferences, KeywordCase, TableAliasStyle,
-        LOCAL_RELATION_SCAN_MAX_BYTES,
+        add_insert_all_columns_completion, add_referenced_alias_completions,
+        apply_completed_sql_context_completion_edits, apply_completion_preferences,
+        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
+        calculate_schema_match_score, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, position_to_byte_offset, range_for_offsets,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
+        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -4864,6 +4927,49 @@ mod tests {
             panic!("keyword completion should keep its text edit");
         };
         assert_eq!(edit.new_text, " select");
+    }
+
+    #[test]
+    fn completion_includes_visible_relation_alias_as_a_first_class_item() {
+        let sql = "SELECT us FROM app.users AS us WHERE us.id > 0";
+        let position = Position::new(0, "SELECT us".len() as u32);
+        let mut items = Vec::new();
+
+        add_referenced_alias_completions(sql, position, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "us");
+        assert_eq!(items[0].kind, Some(CompletionItemKind::VARIABLE));
+        assert_eq!(items[0].insert_text.as_deref(), Some("us"));
+        assert_eq!(items[0].detail.as_deref(), Some("Table alias · app.users"));
+    }
+
+    #[test]
+    fn relation_alias_completion_preserves_quoted_alias_sql() {
+        let sql = "SELECT ua FROM app.users AS \"User Alias\"";
+        let position = Position::new(0, "SELECT ua".len() as u32);
+        let mut items = Vec::new();
+
+        add_referenced_alias_completions(sql, position, &mut items);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "User Alias");
+        assert_eq!(items[0].insert_text.as_deref(), Some("\"User Alias\""));
+    }
+
+    #[test]
+    fn relation_alias_completion_stays_out_of_relation_targets_and_sql_noise() {
+        for (sql, position) in [
+            ("SELECT * FROM us", Position::new(0, 16)),
+            ("SELECT '-- us' FROM app.users us", Position::new(0, 12)),
+        ] {
+            let mut items = Vec::new();
+            add_referenced_alias_completions(sql, position, &mut items);
+            assert!(
+                items.is_empty(),
+                "unexpected alias completion for {sql}: {items:?}"
+            );
+        }
     }
 
     #[test]

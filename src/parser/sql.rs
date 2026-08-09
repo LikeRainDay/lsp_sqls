@@ -144,6 +144,19 @@ pub struct ParseResult {
     pub source: String,
 }
 
+/// A relation alias visible in the current SQL query scope.
+///
+/// `name` is normalized for semantic lookup while `sql` preserves the exact
+/// identifier spelling and quoting used by the document.  Keeping both avoids
+/// changing the meaning of aliases such as PostgreSQL `u` versus `"U"` when a
+/// completion item is inserted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationAlias {
+    pub name: String,
+    pub sql: String,
+    pub relation: String,
+}
+
 /// SQL 解析器（基于 Tree-sitter）
 pub struct SqlParser {
     parser: Parser,
@@ -4834,12 +4847,15 @@ impl SqlParser {
         }
     }
 
-    fn read_relation_alias_after(
+    fn read_relation_alias_with_span_after(
         source: &str,
         searchable_source: &str,
         index: usize,
-    ) -> Option<(String, usize)> {
-        let mut index = Self::skip_whitespace(searchable_source, index);
+    ) -> Option<(String, usize, usize)> {
+        // Quoted identifiers are intentionally masked in `searchable_source`.
+        // Whitespace navigation must therefore use the original SQL or it can
+        // skip across a quoted alias and land on the following clause.
+        let mut index = Self::skip_whitespace(source, index);
         // Table functions place their argument list between the relation name
         // and alias. PostgreSQL may additionally insert WITH ORDINALITY.
         if searchable_source[index..].starts_with('(') {
@@ -4856,7 +4872,8 @@ impl SqlParser {
             index = after_as;
         }
 
-        let (alias, next_index) = Self::read_identifier_part(source, index)?;
+        let alias_start = Self::skip_whitespace(source, index);
+        let (alias, next_index) = Self::read_identifier_part(source, alias_start)?;
         if Keywords::is_keyword(&alias)
             || matches!(
                 alias.to_ascii_uppercase().as_str(),
@@ -4866,7 +4883,7 @@ impl SqlParser {
             return None;
         }
 
-        Some((alias, next_index))
+        Some((alias, alias_start, next_index))
     }
 
     fn comma_separated_relation_starts(source_upper: &str) -> Vec<usize> {
@@ -5036,8 +5053,25 @@ impl SqlParser {
         aliases
     }
 
+    /// Returns aliases from the innermost query visible at `position` while
+    /// retaining their original SQL spelling for safe completion insertion.
+    pub fn relation_aliases_at_position(
+        source: &str,
+        position: Position,
+    ) -> Vec<RelationAlias> {
+        let scoped_source = Self::completion_scope_source(source, position);
+        Self::extract_relation_alias_entries_from_source(&scoped_source)
+    }
+
     fn extract_aliases_from_source(source: &str) -> HashMap<String, String> {
-        let mut aliases = HashMap::new();
+        Self::extract_relation_alias_entries_from_source(source)
+            .into_iter()
+            .map(|alias| (alias.name, alias.relation))
+            .collect()
+    }
+
+    fn extract_relation_alias_entries_from_source(source: &str) -> Vec<RelationAlias> {
+        let mut aliases = HashMap::<String, RelationAlias>::new();
         let searchable_source = Self::mask_sql_noise(source);
         let source_upper = searchable_source.to_ascii_uppercase();
 
@@ -5054,12 +5088,21 @@ impl SqlParser {
                 if let Some((table_name, after_table)) =
                     Self::read_relation_reference_after(source, after_keyword)
                 {
-                    if let Some((alias, _)) =
-                        Self::read_relation_alias_after(source, &searchable_source, after_table)
+                    if let Some((alias, alias_start, alias_end)) =
+                        Self::read_relation_alias_with_span_after(
+                            source,
+                            &searchable_source,
+                            after_table,
+                        )
                     {
+                        let name = Self::normalize_identifier(&alias);
                         aliases.insert(
-                            Self::normalize_identifier(&alias),
-                            Self::normalize_relation_reference(&table_name),
+                            name.clone(),
+                            RelationAlias {
+                                name,
+                                sql: source[alias_start..alias_end].to_string(),
+                                relation: Self::normalize_relation_reference(&table_name),
+                            },
                         );
                     }
                 }
@@ -5075,17 +5118,28 @@ impl SqlParser {
             if let Some((table_name, after_table)) =
                 Self::read_relation_reference_after(source, relation_start)
             {
-                if let Some((alias, _)) =
-                    Self::read_relation_alias_after(source, &searchable_source, after_table)
+                if let Some((alias, alias_start, alias_end)) =
+                    Self::read_relation_alias_with_span_after(
+                        source,
+                        &searchable_source,
+                        after_table,
+                    )
                 {
+                    let name = Self::normalize_identifier(&alias);
                     aliases.insert(
-                        Self::normalize_identifier(&alias),
-                        Self::normalize_relation_reference(&table_name),
+                        name.clone(),
+                        RelationAlias {
+                            name,
+                            sql: source[alias_start..alias_end].to_string(),
+                            relation: Self::normalize_relation_reference(&table_name),
+                        },
                     );
                 }
             }
         }
 
+        let mut aliases = aliases.into_values().collect::<Vec<_>>();
+        aliases.sort_by(|left, right| left.name.cmp(&right.name));
         aliases
     }
 
