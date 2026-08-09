@@ -1,3 +1,4 @@
+mod builtin_signatures;
 pub mod dialect;
 pub mod dialects;
 pub mod parser;

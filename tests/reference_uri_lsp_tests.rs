@@ -522,11 +522,18 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
                         },
                         {
                             "name": "calculate",
-                            "parameters": [{
-                                "name": "value",
-                                "data_type": "integer",
-                                "optional": false
-                            }],
+                            "parameters": [
+                                {
+                                    "name": "value",
+                                    "data_type": "integer",
+                                    "optional": false
+                                },
+                                {
+                                    "name": "precision",
+                                    "data_type": "integer",
+                                    "optional": true
+                                }
+                            ],
                             "return_type": "integer",
                             "description": "Calculate an integer result"
                         }
@@ -538,15 +545,15 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
             }
         }),
     );
-    let sql = "SELECT * FROM orders;\nSELECT calculate(\n  amount\n) FROM orders;\nUPDATE orders SET amount = 1;";
+    let sql = "SELECT * FROM orders;\nSELECT calculate(\n  amount,\n  2\n) FROM orders;\nUPDATE orders SET amount = 1;";
     lsp.open(uri, "postgres", sql);
 
-    let call_line = "SELECT calculate(";
+    let call_line = "  amount,";
     let signature = lsp.request(
         "textDocument/signatureHelp",
         json!({
             "textDocument": { "uri": uri },
-            "position": { "line": 1, "character": call_line.len() }
+            "position": { "line": 2, "character": call_line.len() }
         }),
     );
     assert_eq!(
@@ -556,6 +563,20 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
             .map(Vec::len),
         Some(2),
         "{signature}"
+    );
+    assert_eq!(
+        signature.get("activeSignature").and_then(Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        signature.get("activeParameter").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert!(
+        signature["signatures"][0]["label"]
+            .as_str()
+            .is_some_and(|label| label.contains("precision")),
+        "the overload accepting the active parameter should be ranked first: {signature}"
     );
 
     let semantic_tokens = lsp.request(
@@ -578,7 +599,7 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
             "textDocument": { "uri": uri },
             "range": {
                 "start": { "line": 0, "character": 0 },
-                "end": { "line": 4, "character": 29 }
+                "end": { "line": 5, "character": 29 }
             }
         }),
     );
@@ -707,6 +728,40 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
                     .is_some_and(|title| title.starts_with("Qualify column as orders.amount"))
             })),
         "{qualify_actions}"
+    );
+}
+
+#[test]
+fn signature_help_falls_back_to_dialect_builtins_without_schema_metadata() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let uri = "file:///workspace/builtin.sqlserver.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": { (uri): "sqlserver" }
+            }
+        }),
+    );
+    let sql = "SELECT JSON_VALUE(payload, ";
+    lsp.open(uri, "sql", sql);
+
+    let signature = lsp.request(
+        "textDocument/signatureHelp",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": sql.len() }
+        }),
+    );
+    assert_eq!(
+        signature["signatures"][0]["label"].as_str(),
+        Some("JSON_VALUE(expression, path)")
+    );
+    assert_eq!(
+        signature.get("activeParameter").and_then(Value::as_u64),
+        Some(1)
     );
 }
 

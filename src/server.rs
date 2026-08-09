@@ -1,3 +1,4 @@
+use crate::builtin_signatures::{builtin_signatures_for, BuiltinSignature};
 use crate::dialect::Dialect;
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
@@ -19,6 +20,8 @@ const PROJECT_SQL_INDEX_MAX_BYTES: usize = 512 * 1024;
 const PROJECT_SQL_INDEX_MAX_DOCUMENTS: usize = 256;
 const PROJECT_SQL_INDEX_MAX_OCCURRENCES: usize = 10_000;
 const PROJECT_SQL_INDEX_MAX_RESULTS: usize = 2_000;
+const SIGNATURE_HELP_MAX_SCAN_BYTES: usize = 64 * 1024;
+const SIGNATURE_HELP_MAX_OVERLOADS: usize = 50;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum ProjectSqlSymbolKind {
@@ -294,6 +297,17 @@ impl SqlLspServer {
         self.inferred_file_dialects
             .get(uri)
             .and_then(|dialect_name| self.dialect_registry.get_by_name(dialect_name.value()))
+    }
+
+    fn dialect_identity_for_file(&self, uri: &str) -> Option<String> {
+        self.configured_file_dialects
+            .get(uri)
+            .map(|dialect| dialect.value().clone())
+            .or_else(|| {
+                self.inferred_file_dialects
+                    .get(uri)
+                    .map(|dialect| dialect.value().clone())
+            })
     }
 
     /// 获取文件的 Schema
@@ -1955,43 +1969,54 @@ impl LanguageServer for SqlLspServer {
             .to_string();
         let position = params.text_document_position_params.position;
         let text = self.document_manager.get(&uri).unwrap_or_default();
-        let Some((routine_name, active_parameter)) = routine_call_at_position(&text, position)
-        else {
+        let Some(call) = routine_call_at_position(&text, position) else {
             return Ok(None);
         };
-        let Some(schema) = self.get_schema_for_position(&uri, &text, position) else {
-            return Ok(None);
-        };
-        let signatures = schema
-            .functions
-            .iter()
-            .filter(|function| function.name.eq_ignore_ascii_case(&routine_name))
-            .map(|function| SignatureInformation {
-                label: function.signature(),
-                documentation: Some(Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: function.markdown_documentation(),
-                })),
-                parameters: Some(
-                    function
-                        .parameters
-                        .iter()
-                        .map(|parameter| ParameterInformation {
-                            label: ParameterLabel::Simple(if parameter.name.trim().is_empty() {
-                                parameter.data_type.clone()
-                            } else {
-                                format!("{} {}", parameter.name, parameter.data_type)
-                            }),
-                            documentation: None,
-                        })
-                        .collect(),
-                ),
-                active_parameter: Some(active_parameter),
+        let schema = self.get_schema_for_position(&uri, &text, position);
+        let mut live_overloads = schema
+            .as_ref()
+            .map(|schema| {
+                schema
+                    .functions
+                    .iter()
+                    .filter(|function| routine_names_match(&function.name, &call.name))
+                    .collect::<Vec<_>>()
             })
+            .unwrap_or_default();
+        live_overloads.sort_by_key(|function| !live_overload_accepts_call(function, &call));
+        live_overloads.truncate(SIGNATURE_HELP_MAX_OVERLOADS);
+
+        let mut signatures = live_overloads
+            .iter()
+            .filter(|_| call.active_group == 0)
+            .map(|function| live_signature_information(function, &call))
             .collect::<Vec<_>>();
+        if signatures.is_empty() {
+            let dialect = self
+                .dialect_identity_for_file(&uri)
+                .or_else(|| {
+                    self.get_dialect_for_file(&uri)
+                        .map(|dialect| dialect.name().into())
+                })
+                .unwrap_or_else(|| self.default_dialect_name());
+            let mut builtins = builtin_signatures_for(
+                &dialect,
+                &call.name,
+                schema.as_ref().and_then(Schema::server_version_tuple),
+            );
+            builtins.sort_by_key(|signature| !builtin_overload_accepts_call(signature, &call));
+            builtins.truncate(SIGNATURE_HELP_MAX_OVERLOADS);
+            signatures = builtins
+                .iter()
+                .filter_map(|signature| builtin_signature_information(signature, &call, &dialect))
+                .collect();
+        }
         if signatures.is_empty() {
             return Ok(None);
         }
+        let active_parameter = signatures[0]
+            .active_parameter
+            .unwrap_or(call.active_parameter);
         Ok(Some(SignatureHelp {
             signatures,
             active_signature: Some(0),
@@ -3228,12 +3253,93 @@ fn identifier_range_at_position(text: &str, position: Position, dialect: &str) -
     })
 }
 
-fn routine_call_at_position(text: &str, position: Position) -> Option<(String, u32)> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RoutineCallContext {
+    name: String,
+    active_group: u32,
+    active_parameter: u32,
+    current_argument_has_content: bool,
+}
+
+fn previous_char_start(text: &str, end: usize) -> Option<usize> {
+    text.get(..end)?
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+}
+
+fn matching_open_parenthesis(masked: &str, close: usize) -> Option<usize> {
+    let mut nesting = 0u32;
+    for (index, character) in masked.get(..=close)?.char_indices().rev() {
+        match character {
+            ')' => nesting += 1,
+            '(' => {
+                nesting = nesting.checked_sub(1)?;
+                if nesting == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn routine_name_before(text: &str, end: usize) -> Option<String> {
+    let mut name_end = end.min(text.len());
+    while name_end > 0
+        && text[..name_end]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        name_end = previous_char_start(text, name_end)?;
+    }
+    let token_start = identifier_path_start_before_cursor(text.get(..name_end)?)?;
+    let raw = text.get(token_start..name_end)?.trim();
+    if raw.is_empty() || raw.starts_with('\'') {
+        return None;
+    }
+    let name = SqlParser::identifier_last_part(raw);
+    (!name.is_empty()).then_some(name)
+}
+
+fn routine_name_and_group(text: &str, masked: &str, mut opening: usize) -> Option<(String, u32)> {
+    let mut active_group = 0u32;
+    loop {
+        let mut before = opening;
+        while before > 0
+            && text[..before]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            before = previous_char_start(text, before)?;
+        }
+        let previous = previous_char_start(text, before)?;
+        if masked.as_bytes().get(previous) == Some(&b')') {
+            opening = matching_open_parenthesis(masked, previous)?;
+            active_group = active_group.checked_add(1)?;
+            if active_group > 3 {
+                return None;
+            }
+            continue;
+        }
+        return routine_name_before(text, before).map(|name| (name, active_group));
+    }
+}
+
+fn routine_call_at_position(text: &str, position: Position) -> Option<RoutineCallContext> {
     let offset = position_to_byte_offset(text, position).min(text.len());
-    let before = &text[..offset];
+    let mut scan_start = offset.saturating_sub(SIGNATURE_HELP_MAX_SCAN_BYTES);
+    while scan_start < offset && !text.is_char_boundary(scan_start) {
+        scan_start += 1;
+    }
+    let before = text.get(scan_start..offset)?;
+    let masked = SqlParser::mask_sql_noise(before);
     let mut nesting = 0u32;
     let mut opening = None;
-    for (index, character) in before.char_indices().rev() {
+    for (index, character) in masked.char_indices().rev() {
         match character {
             ')' => nesting += 1,
             '(' if nesting > 0 => nesting -= 1,
@@ -3245,54 +3351,155 @@ fn routine_call_at_position(text: &str, position: Position) -> Option<(String, u
         }
     }
     let opening = opening?;
-    let mut name_end = opening;
-    while name_end > 0
-        && text[..name_end]
-            .chars()
-            .next_back()
-            .is_some_and(char::is_whitespace)
-    {
-        name_end -= text[..name_end].chars().next_back()?.len_utf8();
-    }
-    let mut name_start = name_end;
-    while name_start > 0 {
-        let character = text[..name_start].chars().next_back()?;
-        if !(character.is_alphanumeric() || matches!(character, '_' | '.' | '"' | '`')) {
-            break;
-        }
-        name_start -= character.len_utf8();
-    }
-    let routine_name = text[name_start..name_end]
-        .trim_matches(|character| matches!(character, '"' | '`'))
-        .rsplit('.')
-        .next()?
-        .to_string();
-    if routine_name.is_empty() {
-        return None;
-    }
+    let (name, active_group) = routine_name_and_group(before, &masked, opening)?;
 
     let mut active_parameter = 0u32;
     let mut nested = 0u32;
-    let mut quote = None;
-    for character in text[opening + 1..offset].chars() {
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(character, '\'' | '"') {
-            quote = Some(character);
-            continue;
-        }
+    let mut current_argument_start = opening + 1;
+    for (relative, character) in masked[opening + 1..].char_indices() {
         match character {
             '(' | '[' | '{' => nested += 1,
             ')' | ']' | '}' if nested > 0 => nested -= 1,
-            ',' if nested == 0 => active_parameter += 1,
+            ',' if nested == 0 => {
+                active_parameter += 1;
+                current_argument_start = opening + 1 + relative + character.len_utf8();
+            }
+            ';' if nested == 0 => return None,
             _ => {}
         }
     }
-    Some((routine_name, active_parameter))
+    let current_argument_has_content = sql_fragment_has_content(&before[current_argument_start..]);
+    Some(RoutineCallContext {
+        name,
+        active_group,
+        active_parameter,
+        current_argument_has_content,
+    })
+}
+
+fn sql_fragment_has_content(fragment: &str) -> bool {
+    let mut offset = 0usize;
+    while offset < fragment.len() {
+        let rest = &fragment[offset..];
+        let Some(character) = rest.chars().next() else {
+            return false;
+        };
+        if character.is_whitespace() {
+            offset += character.len_utf8();
+            continue;
+        }
+        if rest.starts_with("--")
+            || (rest.starts_with('#') && !rest.starts_with("#>") && !rest.starts_with("#-"))
+        {
+            let Some(newline) = rest.find('\n') else {
+                return false;
+            };
+            offset += newline + 1;
+            continue;
+        }
+        if rest.starts_with("/*") {
+            let Some(end) = rest.get(2..).and_then(|tail| tail.find("*/")) else {
+                return false;
+            };
+            offset += 2 + end + 2;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn routine_names_match(candidate: &str, requested: &str) -> bool {
+    SqlParser::identifier_last_part(candidate).eq_ignore_ascii_case(requested)
+}
+
+fn live_overload_accepts_call(
+    function: &crate::schema::Function,
+    call: &RoutineCallContext,
+) -> bool {
+    if call.active_group != 0 {
+        return false;
+    }
+    let parameters = &function.parameters;
+    if parameters.is_empty() {
+        return call.active_parameter == 0 && !call.current_argument_has_content;
+    }
+    call.active_parameter < parameters.len() as u32
+}
+
+fn builtin_group_accepts_call(parameters: &[&str], call: &RoutineCallContext) -> bool {
+    if parameters.is_empty() {
+        return call.active_parameter == 0 && !call.current_argument_has_content;
+    }
+    call.active_parameter < parameters.len() as u32
+        || parameters
+            .last()
+            .is_some_and(|parameter| parameter.trim_start().starts_with("..."))
+}
+
+fn builtin_overload_accepts_call(signature: &BuiltinSignature, call: &RoutineCallContext) -> bool {
+    signature
+        .parameter_groups
+        .get(call.active_group as usize)
+        .is_some_and(|parameters| builtin_group_accepts_call(parameters, call))
+}
+
+fn clamped_active_parameter(parameter_count: usize, requested: u32) -> Option<u32> {
+    (parameter_count > 0).then(|| requested.min(parameter_count.saturating_sub(1) as u32))
+}
+
+fn live_signature_information(
+    function: &crate::schema::Function,
+    call: &RoutineCallContext,
+) -> SignatureInformation {
+    SignatureInformation {
+        label: function.signature(),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: function.markdown_documentation(),
+        })),
+        parameters: Some(
+            function
+                .parameters
+                .iter()
+                .map(|parameter| ParameterInformation {
+                    label: ParameterLabel::Simple(parameter.signature_label()),
+                    documentation: None,
+                })
+                .collect(),
+        ),
+        active_parameter: clamped_active_parameter(
+            function.parameters.len(),
+            call.active_parameter,
+        ),
+    }
+}
+
+fn builtin_signature_information(
+    signature: &BuiltinSignature,
+    call: &RoutineCallContext,
+    dialect: &str,
+) -> Option<SignatureInformation> {
+    let parameters = signature.parameter_groups.get(call.active_group as usize)?;
+    Some(SignatureInformation {
+        label: signature.label(),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!(
+                "**Built-in signature** for the active `{dialect}` SQL profile. Live routine metadata takes precedence when available."
+            ),
+        })),
+        parameters: Some(
+            parameters
+                .iter()
+                .map(|parameter| ParameterInformation {
+                    label: ParameterLabel::Simple((*parameter).to_string()),
+                    documentation: None,
+                })
+                .collect(),
+        ),
+        active_parameter: clamped_active_parameter(parameters.len(), call.active_parameter),
+    })
 }
 
 fn single_document_edit(uri: Url, range: Range, new_text: String) -> WorkspaceEdit {
@@ -5466,17 +5673,20 @@ mod tests {
         code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
         completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
         find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, position_to_byte_offset, project_sql_symbol_occurrences,
-        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
+        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
+        range_for_offsets, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
-        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, TableAliasStyle,
-        LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
+        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, RoutineCallContext,
+        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
-    use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
+    use crate::schema::{
+        Column, Function, FunctionParameter, Schema, SchemaId, SchemaManager, Table,
+    };
     use dashmap::DashMap;
     use tower_lsp::lsp_types::{
         CodeAction, CodeActionContext, CodeActionKind, CompletionItem, CompletionItemKind,
@@ -5516,6 +5726,90 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn signature_call_context_ignores_nested_sql_noise() {
+        let sql = "SELECT calc(inner(1, 2), 'a,''b)', $$,)$$, /* , ) */ ";
+        assert_eq!(
+            routine_call_at_position(sql, lsp_position_at_end(sql)),
+            Some(RoutineCallContext {
+                name: "calc".to_string(),
+                active_group: 0,
+                active_parameter: 3,
+                current_argument_has_content: false,
+            })
+        );
+
+        let literal = "SELECT calc('value'";
+        assert!(
+            routine_call_at_position(literal, lsp_position_at_end(literal))
+                .is_some_and(|call| call.current_argument_has_content)
+        );
+    }
+
+    #[test]
+    fn signature_call_context_selects_nested_and_quoted_routines() {
+        let nested = "SELECT outer(inner('),', ";
+        assert_eq!(
+            routine_call_at_position(nested, lsp_position_at_end(nested)),
+            Some(RoutineCallContext {
+                name: "inner".to_string(),
+                active_group: 0,
+                active_parameter: 1,
+                current_argument_has_content: false,
+            })
+        );
+
+        let quoted = "SELECT [dbo].[计算](";
+        assert_eq!(
+            routine_call_at_position(quoted, lsp_position_at_end(quoted)).map(|call| call.name),
+            Some("计算".to_string())
+        );
+    }
+
+    #[test]
+    fn signature_call_context_supports_parametric_function_groups() {
+        let sql = "SELECT quantilesTDigest(0.5, 0.9)(value, ";
+        assert_eq!(
+            routine_call_at_position(sql, lsp_position_at_end(sql)),
+            Some(RoutineCallContext {
+                name: "quantilesTDigest".to_string(),
+                active_group: 1,
+                active_parameter: 1,
+                current_argument_has_content: false,
+            })
+        );
+    }
+
+    #[test]
+    fn signature_overload_fit_prioritizes_a_available_parameter_slot() {
+        let call = RoutineCallContext {
+            name: "calculate".to_string(),
+            active_group: 0,
+            active_parameter: 1,
+            current_argument_has_content: false,
+        };
+        let one_parameter = Function {
+            name: "calculate".to_string(),
+            routine_type: Some("function".to_string()),
+            parameters: vec![FunctionParameter {
+                name: "value".to_string(),
+                data_type: "numeric".to_string(),
+                optional: false,
+            }],
+            return_type: "numeric".to_string(),
+            description: None,
+        };
+        let mut two_parameters = one_parameter.clone();
+        two_parameters.parameters.push(FunctionParameter {
+            name: "precision".to_string(),
+            data_type: "integer".to_string(),
+            optional: true,
+        });
+
+        assert!(!live_overload_accepts_call(&one_parameter, &call));
+        assert!(live_overload_accepts_call(&two_parameters, &call));
     }
 
     fn semantic_test_schema() -> Schema {

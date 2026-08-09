@@ -230,3 +230,31 @@ fn test_procedure_documentation_uses_routine_type() {
     assert!(documentation.contains("**Routine type**: `procedure`"));
     assert!(!documentation.contains("**Returns**"));
 }
+
+#[test]
+fn optional_parameters_are_visible_in_signature_labels() {
+    let function = Function {
+        name: "round_amount".to_string(),
+        routine_type: Some("function".to_string()),
+        parameters: vec![
+            FunctionParameter {
+                name: "value".to_string(),
+                data_type: "numeric".to_string(),
+                optional: false,
+            },
+            FunctionParameter {
+                name: "precision".to_string(),
+                data_type: "integer".to_string(),
+                optional: true,
+            },
+        ],
+        return_type: "numeric".to_string(),
+        description: None,
+    };
+
+    assert_eq!(
+        function.signature(),
+        "round_amount(value numeric, [precision integer])"
+    );
+    assert!(function.markdown_documentation().contains("(optional)"));
+}

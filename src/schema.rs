@@ -195,6 +195,25 @@ pub struct FunctionParameter {
     pub optional: bool,
 }
 
+impl FunctionParameter {
+    pub fn signature_label(&self) -> String {
+        let data_type = self.data_type.trim();
+        let name = self.name.trim();
+        let label = if name.is_empty() {
+            data_type.to_string()
+        } else if data_type.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {data_type}")
+        };
+        if self.optional {
+            format!("[{label}]")
+        } else {
+            label
+        }
+    }
+}
+
 impl Function {
     pub fn routine_kind(&self) -> &'static str {
         match self.routine_type.as_deref().map(str::to_ascii_lowercase) {
@@ -207,17 +226,7 @@ impl Function {
         let args = self
             .parameters
             .iter()
-            .map(|parameter| {
-                let data_type = parameter.data_type.trim();
-                let name = parameter.name.trim();
-                if name.is_empty() {
-                    data_type.to_string()
-                } else if data_type.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{name} {data_type}")
-                }
-            })
+            .map(FunctionParameter::signature_label)
             .collect::<Vec<_>>()
             .join(", ");
 
