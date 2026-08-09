@@ -748,6 +748,26 @@ fn signature_help_falls_back_to_dialect_builtins_without_schema_metadata() {
     let sql = "SELECT JSON_VALUE(payload, ";
     lsp.open(uri, "sql", sql);
 
+    let completion = lsp.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": sql.len() },
+            "context": { "triggerKind": 1 }
+        }),
+    );
+    assert!(
+        completion
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("label").and_then(Value::as_str) == Some("JSON_VALUE")
+                    && item.get("insertText").and_then(Value::as_str)
+                        == Some("JSON_VALUE(${1:expression}, ${2:path})")
+                    && item.get("insertTextFormat").and_then(Value::as_u64) == Some(2)
+            })),
+        "{completion}"
+    );
+
     let signature = lsp.request(
         "textDocument/signatureHelp",
         json!({

@@ -1113,6 +1113,13 @@ impl SqlParser {
         source: &str,
         position: Position,
     ) -> CompletionContext {
+        Self::completion_context_from_text(source, position)
+    }
+
+    /// Determine completion context through the bounded text heuristics only.
+    /// Callers that already paid for dialect parsing can use this without
+    /// constructing a second tree-sitter parser on the typing hot path.
+    pub fn completion_context_from_text(source: &str, position: Position) -> CompletionContext {
         let cursor_offset = Self::byte_offset_for_position(source, position);
         // Extract text before cursor
         let text_before = if cursor_offset <= source.len() {

@@ -1,4 +1,6 @@
-use crate::builtin_signatures::{builtin_signatures_for, BuiltinSignature};
+use crate::builtin_signatures::{
+    builtin_signature_catalog_for, builtin_signatures_for, BuiltinSignature,
+};
 use crate::dialect::Dialect;
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
@@ -22,6 +24,7 @@ const PROJECT_SQL_INDEX_MAX_OCCURRENCES: usize = 10_000;
 const PROJECT_SQL_INDEX_MAX_RESULTS: usize = 2_000;
 const SIGNATURE_HELP_MAX_SCAN_BYTES: usize = 64 * 1024;
 const SIGNATURE_HELP_MAX_OVERLOADS: usize = 50;
+const BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS: usize = 100;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum ProjectSqlSymbolKind {
@@ -987,6 +990,152 @@ fn apply_completion_preferences(
     }
 }
 
+fn builtin_function_context(text: &str, position: Position) -> Option<String> {
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let mut scan_start = offset.saturating_sub(SIGNATURE_HELP_MAX_SCAN_BYTES);
+    while scan_start < offset && !text.is_char_boundary(scan_start) {
+        scan_start += 1;
+    }
+    let window = text.get(scan_start..offset)?;
+    let masked = SqlParser::mask_sql_noise(window);
+    if let Some((last_non_whitespace, character)) = window
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_whitespace())
+    {
+        let masked_character = masked[last_non_whitespace..].chars().next()?;
+        if !character.is_whitespace() && masked_character == ' ' {
+            return None;
+        }
+    }
+
+    let context = SqlParser::completion_context_from_text(window, lsp_position_at_end(window));
+    if !matches!(
+        context,
+        crate::parser::CompletionContext::SelectClause
+            | crate::parser::CompletionContext::WhereClause
+            | crate::parser::CompletionContext::ExpressionValueClause
+            | crate::parser::CompletionContext::CaseResultClause
+            | crate::parser::CompletionContext::JoinConditionClause
+            | crate::parser::CompletionContext::OrderByClause
+            | crate::parser::CompletionContext::GroupByClause
+            | crate::parser::CompletionContext::HavingClause
+            | crate::parser::CompletionContext::InsertValueClause
+    ) {
+        return None;
+    }
+
+    let prefix_start = identifier_path_start_before_cursor(window).unwrap_or(window.len());
+    let raw_prefix = window.get(prefix_start..)?.trim();
+    if raw_prefix.contains('.')
+        || raw_prefix.starts_with(['"', '\'', '`', '['])
+        || raw_prefix.ends_with([']', '"', '`'])
+    {
+        return None;
+    }
+    Some(SqlParser::identifier_last_part(raw_prefix).to_ascii_lowercase())
+}
+
+fn snippet_placeholder_label(parameter: &str) -> String {
+    parameter
+        .trim()
+        .trim_start_matches("...")
+        .trim_end_matches('?')
+        .replace('\\', "\\\\")
+        .replace('$', "\\$")
+        .replace('}', "\\}")
+}
+
+fn builtin_function_snippet(signature: &BuiltinSignature) -> String {
+    let mut placeholder = 1usize;
+    let groups = signature
+        .parameter_groups
+        .iter()
+        .map(|parameters| {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| {
+                    let label = snippet_placeholder_label(parameter);
+                    let value = format!("${{{placeholder}:{label}}}");
+                    placeholder += 1;
+                    value
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({parameters})")
+        })
+        .collect::<String>();
+    format!("{}{groups}", signature.name)
+}
+
+fn completion_item_is_live_routine(item: &CompletionItem) -> bool {
+    item.kind == Some(CompletionItemKind::FUNCTION)
+        && item.detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("Function:") || detail.starts_with("Procedure:")
+        })
+}
+
+fn add_builtin_function_completions(
+    text: &str,
+    position: Position,
+    dialect: &str,
+    schema: Option<&Schema>,
+    items: &mut Vec<CompletionItem>,
+) {
+    let Some(prefix) = builtin_function_context(text, position) else {
+        return;
+    };
+    let mut catalog =
+        builtin_signature_catalog_for(dialect, schema.and_then(Schema::server_version_tuple))
+            .into_iter()
+            .filter(|signature| {
+                prefix.is_empty() || signature.name.to_ascii_lowercase().starts_with(&prefix)
+            })
+            .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS)
+            .collect::<Vec<_>>();
+    if catalog.is_empty() {
+        return;
+    }
+
+    let live_names = items
+        .iter()
+        .filter(|item| completion_item_is_live_routine(item))
+        .map(|item| SqlParser::identifier_last_part(&item.label).to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let catalog_names = catalog
+        .iter()
+        .map(|signature| signature.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    items.retain(|item| {
+        item.kind != Some(CompletionItemKind::FUNCTION)
+            || !catalog_names
+                .contains(&SqlParser::identifier_last_part(&item.label).to_ascii_lowercase())
+            || completion_item_is_live_routine(item)
+    });
+
+    catalog.retain(|signature| !live_names.contains(&signature.name.to_ascii_lowercase()));
+    items.extend(catalog.into_iter().map(|signature| CompletionItem {
+        label: signature.name.to_string(),
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: Some(format!("Built-in function: {}", signature.label())),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!(
+                "Built-in function signature for the active `{dialect}` SQL profile. Live routine metadata takes precedence when available."
+            ),
+        })),
+        sort_text: Some(format!(
+            "1:builtin:{}:{}",
+            signature.name.to_ascii_lowercase(),
+            signature.label().to_ascii_lowercase()
+        )),
+        filter_text: Some(signature.name.to_string()),
+        insert_text: Some(builtin_function_snippet(&signature)),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    }));
+}
+
 fn add_referenced_alias_completions(
     text: &str,
     position: Position,
@@ -1847,6 +1996,16 @@ impl LanguageServer for SqlLspServer {
                     params.context.as_ref(),
                 )
                 .await;
+            let dialect_identity = self
+                .dialect_identity_for_file(&uri)
+                .unwrap_or_else(|| dialect.name().to_string());
+            add_builtin_function_completions(
+                completion_text,
+                completion_position,
+                &dialect_identity,
+                schema.as_ref(),
+                &mut items,
+            );
             let preferences = self
                 .completion_preferences
                 .read()
@@ -5666,21 +5825,22 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_insert_all_columns_completion, add_referenced_alias_completions,
-        apply_completed_sql_context_completion_edits, apply_completion_preferences,
-        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
-        calculate_schema_match_score, code_action_kind_available,
-        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
-        completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
-        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
-        range_for_offsets, rewrite_current_document_location_uri,
-        rewrite_current_document_location_uris, routine_call_at_position,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
-        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, RoutineCallContext,
-        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
+        add_builtin_function_completions, add_insert_all_columns_completion,
+        add_referenced_alias_completions, apply_completed_sql_context_completion_edits,
+        apply_completion_preferences, apply_qualified_identifier_completion_edits,
+        augment_schema_with_local_relations, calculate_schema_match_score,
+        code_action_kind_available, code_action_kind_explicitly_requested,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
+        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables,
+        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
+        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
+        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
+        CompletionPreferences, KeywordCase, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES,
+        PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -5726,6 +5886,79 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn builtin_function_completion_is_expression_scoped_and_snippet_aware() {
+        let sql = "SELECT con";
+        let mut items = vec![CompletionItem {
+            label: "CONCAT".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("String function: concatenate".to_string()),
+            ..Default::default()
+        }];
+        add_builtin_function_completions(sql, lsp_position_at_end(sql), "mysql", None, &mut items);
+        let concat = items
+            .iter()
+            .find(|item| item.label == "CONCAT")
+            .expect("catalog CONCAT completion");
+        assert_eq!(
+            concat.insert_text.as_deref(),
+            Some("CONCAT(${1:value}, ${2:values})")
+        );
+        assert_eq!(concat.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        assert_eq!(
+            items.iter().filter(|item| item.label == "CONCAT").count(),
+            1,
+            "the richer catalog item should replace a legacy hard-coded item"
+        );
+
+        let relation_sql = "SELECT * FROM con";
+        let mut relation_items = Vec::new();
+        add_builtin_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "mysql",
+            None,
+            &mut relation_items,
+        );
+        assert!(relation_items.is_empty());
+
+        let literal_sql = "SELECT 'con";
+        let mut literal_items = Vec::new();
+        add_builtin_function_completions(
+            literal_sql,
+            lsp_position_at_end(literal_sql),
+            "mysql",
+            None,
+            &mut literal_items,
+        );
+        assert!(literal_items.is_empty());
+    }
+
+    #[test]
+    fn live_routine_completion_takes_precedence_over_builtin_catalog() {
+        let sql = "SELECT con";
+        let live = CompletionItem {
+            label: "CONCAT".to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("Function: CONCAT(value text) -> text".to_string()),
+            insert_text: Some("CONCAT()".to_string()),
+            ..Default::default()
+        };
+        let mut items = vec![live.clone()];
+        add_builtin_function_completions(sql, lsp_position_at_end(sql), "mysql", None, &mut items);
+        assert_eq!(
+            items.iter().filter(|item| item.label == "CONCAT").count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "CONCAT")
+                .and_then(|item| item.detail.as_deref()),
+            live.detail.as_deref()
+        );
     }
 
     #[test]

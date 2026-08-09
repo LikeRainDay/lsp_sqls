@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BuiltinSignature {
     pub name: &'static str,
@@ -244,14 +246,26 @@ fn clickhouse_signatures(name: &str) -> Vec<BuiltinSignature> {
         .unwrap_or_default()
 }
 
-pub(crate) fn builtin_signatures_for(
-    dialect: &str,
-    name: &str,
-    server_version: Option<(u32, u32)>,
-) -> Vec<BuiltinSignature> {
-    let normalized_dialect = dialect.to_ascii_lowercase();
-    if matches!(
-        normalized_dialect.as_str(),
+fn clickhouse_signature_catalog() -> Vec<BuiltinSignature> {
+    [
+        "toStartOfInterval",
+        "quantilesTDigest",
+        "arrayJoin",
+        "formatDateTime",
+        "toDate",
+        "toDateTime",
+        "tuple",
+        "map",
+        "multiIf",
+    ]
+    .into_iter()
+    .flat_map(clickhouse_signatures)
+    .collect()
+}
+
+fn is_non_sql_dialect(dialect: &str) -> bool {
+    matches!(
+        dialect,
         "mongodb"
             | "mongo"
             | "redis"
@@ -261,7 +275,67 @@ pub(crate) fn builtin_signatures_for(
             | "es-dsl"
             | "eql"
             | "es-eql"
-    ) {
+    )
+}
+
+fn dialect_signature_entries(
+    dialect: &str,
+) -> Option<&'static [(&'static str, &'static [&'static str])]> {
+    match dialect {
+        "mysql" | "mariadb" => Some(MYSQL_SIGNATURES),
+        "postgres" | "postgresql" | "pgsql" | "psql" => Some(POSTGRES_SIGNATURES),
+        "sqlite" | "sqlite3" | "turso" | "cloudflare-d1" => Some(SQLITE_SIGNATURES),
+        "sqlserver" => Some(SQLSERVER_SIGNATURES),
+        "manticoresearch" => Some(MANTICORE_SIGNATURES),
+        _ => None,
+    }
+}
+
+pub(crate) fn builtin_signature_catalog_for(
+    dialect: &str,
+    server_version: Option<(u32, u32)>,
+) -> Vec<BuiltinSignature> {
+    let normalized_dialect = dialect.to_ascii_lowercase();
+    if is_non_sql_dialect(&normalized_dialect) {
+        return Vec::new();
+    }
+
+    let mut signatures = if matches!(normalized_dialect.as_str(), "clickhouse" | "ch") {
+        clickhouse_signature_catalog()
+    } else {
+        Vec::new()
+    };
+    if let Some(entries) = dialect_signature_entries(&normalized_dialect) {
+        signatures.extend(
+            entries
+                .iter()
+                .filter(|(name, _)| version_allows(&normalized_dialect, name, server_version))
+                .map(|(name, parameters)| BuiltinSignature::single(name, parameters)),
+        );
+    }
+    let existing_names = signatures
+        .iter()
+        .map(|signature| signature.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    signatures.extend(
+        COMMON_SIGNATURES
+            .iter()
+            .filter(|(name, _)| {
+                !existing_names.contains(&name.to_ascii_lowercase())
+                    && version_allows(&normalized_dialect, name, server_version)
+            })
+            .map(|(name, parameters)| BuiltinSignature::single(name, parameters)),
+    );
+    signatures
+}
+
+pub(crate) fn builtin_signatures_for(
+    dialect: &str,
+    name: &str,
+    server_version: Option<(u32, u32)>,
+) -> Vec<BuiltinSignature> {
+    let normalized_dialect = dialect.to_ascii_lowercase();
+    if is_non_sql_dialect(&normalized_dialect) {
         return Vec::new();
     }
 
@@ -272,16 +346,7 @@ pub(crate) fn builtin_signatures_for(
         }
     }
 
-    let dialect_entries = match normalized_dialect.as_str() {
-        "mysql" | "mariadb" => Some(MYSQL_SIGNATURES),
-        "postgres" | "postgresql" | "pgsql" | "psql" => Some(POSTGRES_SIGNATURES),
-        "sqlite" | "sqlite3" | "turso" | "cloudflare-d1" => Some(SQLITE_SIGNATURES),
-        "sqlserver" => Some(SQLSERVER_SIGNATURES),
-        "manticoresearch" => Some(MANTICORE_SIGNATURES),
-        _ => None,
-    };
-
-    let signature = dialect_entries
+    let signature = dialect_signature_entries(&normalized_dialect)
         .and_then(|entries| lookup(entries, name))
         .or_else(|| lookup(COMMON_SIGNATURES, name));
     signature
@@ -294,7 +359,7 @@ pub(crate) fn builtin_signatures_for(
 
 #[cfg(test)]
 mod tests {
-    use super::builtin_signatures_for;
+    use super::{builtin_signature_catalog_for, builtin_signatures_for};
 
     #[test]
     fn dialect_override_wins_over_common_signature() {
@@ -317,5 +382,25 @@ mod tests {
             .expect("ClickHouse parametric aggregate");
         assert_eq!(signature.parameter_groups.len(), 2);
         assert_eq!(signature.parameter_groups[1], ["expression"]);
+    }
+
+    #[test]
+    fn completion_catalog_deduplicates_dialect_overrides() {
+        let catalog = builtin_signature_catalog_for("sqlserver", Some((16, 0)));
+        let convert = catalog
+            .iter()
+            .filter(|signature| signature.name.eq_ignore_ascii_case("convert"))
+            .collect::<Vec<_>>();
+        assert_eq!(convert.len(), 1);
+        assert_eq!(convert[0].parameter_groups[0], ["type", "expression"]);
+    }
+
+    #[test]
+    fn completion_catalog_applies_version_gates_and_non_sql_boundaries() {
+        let catalog = builtin_signature_catalog_for("sqlserver", Some((12, 0)));
+        assert!(!catalog
+            .iter()
+            .any(|signature| signature.name == "JSON_VALUE"));
+        assert!(builtin_signature_catalog_for("mongodb", None).is_empty());
     }
 }
