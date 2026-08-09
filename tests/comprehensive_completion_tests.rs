@@ -61,6 +61,7 @@ async fn test_comprehensive_completion_scenarios() {
     // Shared Schema for tests
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "shop".to_string(),
         server_version: None,
         tables: vec![

@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::{CompletionItemKind, Position};
 fn schema() -> Schema {
     Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "app".to_string(),
         server_version: None,
         tables: vec![Table {

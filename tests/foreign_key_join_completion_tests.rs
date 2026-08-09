@@ -9,6 +9,7 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: database.to_string(),
         server_version: None,
         tables: vec![

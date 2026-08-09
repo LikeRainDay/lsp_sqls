@@ -834,7 +834,7 @@ fn add_insert_all_columns_completion(
     let Some(table) = schema
         .tables
         .iter()
-        .find(|table| SqlParser::table_name_matches(reference, &schema.database, &table.name))
+        .find(|table| schema_table_matches(schema, reference, table))
     else {
         return;
     };
@@ -1040,15 +1040,13 @@ fn apply_qualified_identifier_completion_edits(
 }
 
 fn calculate_schema_match_score(tables: &[String], schema: &Schema) -> i32 {
-    use crate::parser::SqlParser;
-
     let mut score = 0;
 
     for table_name in tables {
         if schema
             .tables
             .iter()
-            .any(|table| SqlParser::table_name_matches(table_name, &schema.database, &table.name))
+            .any(|table| schema_table_matches(schema, table_name, table))
         {
             score += 10;
         }
@@ -1057,9 +1055,10 @@ fn calculate_schema_match_score(tables: &[String], schema: &Schema) -> i32 {
     let matched_count = tables
         .iter()
         .filter(|table_name| {
-            schema.tables.iter().any(|table| {
-                SqlParser::table_name_matches(table_name, &schema.database, &table.name)
-            })
+            schema
+                .tables
+                .iter()
+                .any(|table| schema_table_matches(schema, table_name, table))
         })
         .count();
 
@@ -2264,9 +2263,9 @@ fn ambiguous_column_diagnostics(
         .tables
         .iter()
         .filter(|table| {
-            referenced.iter().any(|reference| {
-                SqlParser::table_name_matches(reference, &schema.database, &table.name)
-            })
+            referenced
+                .iter()
+                .any(|reference| schema_table_matches(schema, reference, table))
         })
         .collect::<Vec<_>>();
     if referenced_tables.len() < 2 {
@@ -2580,7 +2579,7 @@ fn expand_select_star_action(
         let table = schema
             .tables
             .iter()
-            .find(|table| SqlParser::table_name_matches(target, &schema.database, &table.name))?;
+            .find(|table| schema_table_matches(&schema, target, table))?;
         sources.push((table, qualifier_sql.clone()?));
     } else {
         if references.is_empty() {
@@ -2588,14 +2587,14 @@ fn expand_select_star_action(
         }
         let mut used_aliases = HashSet::new();
         for reference in references {
-            let table = schema.tables.iter().find(|table| {
-                SqlParser::table_name_matches(&reference, &schema.database, &table.name)
-            })?;
+            let table = schema
+                .tables
+                .iter()
+                .find(|table| schema_table_matches(&schema, &reference, table))?;
             let mut matching_aliases = aliases
                 .iter()
                 .filter(|(alias, target)| {
-                    !used_aliases.contains(*alias)
-                        && SqlParser::table_name_matches(target, &schema.database, &table.name)
+                    !used_aliases.contains(*alias) && schema_table_matches(&schema, target, table)
                 })
                 .map(|(alias, _)| alias.clone())
                 .collect::<Vec<_>>();
@@ -3191,7 +3190,7 @@ fn correlated_tables_before_cursor(
         let base_columns = schema
             .tables
             .iter()
-            .find(|table| SqlParser::table_name_matches(&reference, &schema.database, &table.name))
+            .find(|table| schema_table_matches(schema, &reference, table))
             .map(|table| table.columns.clone())
             .unwrap_or_default();
         let source_line = source[..alias_start.min(reference_start)]
@@ -3307,9 +3306,10 @@ fn infer_query_output_columns(
             if let Some(tree) = parser.parse(query).tree {
                 let references = parser.extract_referenced_tables(&tree, query);
                 for table in &schema.tables {
-                    if references.iter().any(|reference| {
-                        SqlParser::table_name_matches(reference, &schema.database, &table.name)
-                    }) {
+                    if references
+                        .iter()
+                        .any(|reference| schema_table_matches(schema, reference, table))
+                    {
                         columns.extend(table.columns.clone());
                     }
                 }
@@ -3929,24 +3929,48 @@ fn schema_qualifier_at_position(text: &str, position: Position) -> Option<String
     SqlParser::column_qualifier_before_position(text, byte_position)
 }
 
+fn schema_table_matches(schema: &Schema, reference: &str, table: &Table) -> bool {
+    SqlParser::table_name_matches_with_catalog(
+        reference,
+        schema.catalog.as_deref(),
+        &schema.database,
+        &table.name,
+    )
+}
+
 fn find_schema_by_qualifier(schema_manager: &SchemaManager, qualifier: &str) -> Option<Schema> {
     let normalized_qualifier = SqlParser::normalize_identifier(qualifier);
     if normalized_qualifier.is_empty() {
         return None;
     }
 
+    let qualifier_has_catalog = normalized_qualifier.contains('.');
+    let mut matched_schema = None;
     for schema_id in schema_manager.list_ids() {
         let Some(schema) = schema_manager.get(schema_id) else {
             continue;
         };
-        if SqlParser::normalize_identifier(&schema.database)
-            .eq_ignore_ascii_case(&normalized_qualifier)
-        {
-            return Some(schema);
+        let normalized_database = SqlParser::normalize_identifier(&schema.database);
+        let normalized_namespace = schema
+            .catalog
+            .as_deref()
+            .map(SqlParser::normalize_identifier)
+            .filter(|catalog| !catalog.is_empty())
+            .map(|catalog| format!("{catalog}.{normalized_database}"))
+            .unwrap_or_else(|| normalized_database.clone());
+        let is_match = normalized_namespace.eq_ignore_ascii_case(&normalized_qualifier)
+            || (!qualifier_has_catalog
+                && normalized_database.eq_ignore_ascii_case(&normalized_qualifier));
+        if !is_match {
+            continue;
         }
+        if matched_schema.is_some() {
+            return None;
+        }
+        matched_schema = Some(schema);
     }
 
-    None
+    matched_schema
 }
 
 fn find_schema_by_table_reference(
@@ -3960,9 +3984,10 @@ fn find_schema_by_table_reference(
             continue;
         };
 
-        let has_table = schema.tables.iter().any(|table| {
-            SqlParser::table_name_matches(table_reference, &schema.database, &table.name)
-        });
+        let has_table = schema
+            .tables
+            .iter()
+            .any(|table| schema_table_matches(&schema, table_reference, table));
         if !has_table {
             continue;
         }
@@ -4102,6 +4127,7 @@ mod tests {
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
         Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: database.to_string(),
             server_version: None,
             tables: tables
@@ -4136,6 +4162,7 @@ mod tests {
     fn semantic_test_schema() -> Schema {
         Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "app".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -4480,6 +4507,7 @@ mod tests {
         };
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "app".to_string(),
             server_version: None,
             tables: vec![
@@ -4882,6 +4910,7 @@ mod tests {
     fn completion_schema_with_columns() -> Schema {
         Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "app".to_string(),
             server_version: None,
             tables: vec![
@@ -5278,6 +5307,33 @@ mod tests {
             Some(audit_id)
         );
         assert!(find_schema_by_table_reference(&manager, "users").is_none());
+    }
+
+    #[test]
+    fn finds_catalog_qualified_schema_without_cross_catalog_leakage() {
+        let manager = SchemaManager::new();
+        let mut app = test_schema("dbo", &["users"]);
+        app.catalog = Some("AppDb".to_string());
+        let app_id = manager.register(app);
+        let mut audit = test_schema("dbo", &["users"]);
+        audit.catalog = Some("AuditDb".to_string());
+        let audit_id = manager.register(audit);
+
+        assert_eq!(
+            find_schema_by_qualifier(&manager, "AppDb.dbo").map(|schema| schema.id),
+            Some(app_id)
+        );
+        assert_eq!(
+            find_schema_by_table_reference(&manager, "[ServerOne].[AuditDb].[dbo].[users]")
+                .map(|schema| schema.id),
+            Some(audit_id)
+        );
+        assert_eq!(
+            find_schema_by_table_reference(&manager, "AppDb..users").map(|schema| schema.id),
+            Some(app_id)
+        );
+        assert!(find_schema_by_qualifier(&manager, "dbo").is_none());
+        assert!(find_schema_by_table_reference(&manager, "dbo.users").is_none());
     }
 
     #[test]

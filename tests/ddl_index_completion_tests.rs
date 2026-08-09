@@ -24,6 +24,7 @@ fn index(name: &str, columns: &[&str], unique: bool) -> Index {
 fn schema(database: &str) -> Schema {
     Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: database.to_string(),
         server_version: None,
         tables: vec![

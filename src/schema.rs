@@ -33,6 +33,10 @@ impl Default for SchemaId {
 pub struct Schema {
     /// Schema ID
     pub id: SchemaId,
+    /// Optional catalog/database namespace above the SQL schema. This is
+    /// required to disambiguate same-named schemas and tables across catalogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     /// 数据库名称
     pub database: String,
     /// 运行中的数据库服务器版本。用于过滤只在特定版本可用的补全项。
@@ -520,6 +524,7 @@ mod tests {
 
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test_db".to_string(),
             server_version: None,
             tables: vec![],
@@ -538,9 +543,28 @@ mod tests {
     }
 
     #[test]
+    fn schema_configuration_retains_optional_catalog_namespace() {
+        let id = SchemaId::new();
+        let schema: Schema = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "catalog": "AppDb",
+            "database": "dbo",
+            "server_version": "16.0",
+            "tables": [],
+            "functions": [],
+            "source_uri": null
+        }))
+        .expect("catalog-aware schema configuration");
+
+        assert_eq!(schema.catalog.as_deref(), Some("AppDb"));
+        assert_eq!(schema.database, "dbo");
+    }
+
+    #[test]
     fn server_versions_support_vendor_prefixes_and_minor_gates() {
         let mut schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "default".to_string(),
             server_version: Some("Elasticsearch 8.14.1".to_string()),
             tables: vec![],
@@ -562,6 +586,7 @@ mod tests {
 
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![],
@@ -571,6 +596,7 @@ mod tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![],

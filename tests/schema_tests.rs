@@ -45,6 +45,7 @@ fn test_schema_manager_basic() {
 
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![],
@@ -69,6 +70,7 @@ fn test_schema_manager_multiple_schemas() {
 
     let schema1 = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "db1".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -84,6 +86,7 @@ fn test_schema_manager_multiple_schemas() {
 
     let schema2 = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "db2".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -120,6 +123,7 @@ async fn test_schema_manager_concurrent() {
         let handle = task::spawn(async move {
             let schema = Schema {
                 id: SchemaId::new(),
+                catalog: None,
                 database: format!("db_{}", i),
                 server_version: None,
                 tables: vec![],
@@ -144,6 +148,7 @@ async fn test_schema_manager_concurrent() {
 fn test_schema_with_tables_and_columns() {
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -183,6 +188,7 @@ fn test_schema_with_tables_and_columns() {
 fn test_schema_with_functions() {
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![],

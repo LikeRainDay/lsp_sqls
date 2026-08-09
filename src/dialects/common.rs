@@ -1245,13 +1245,19 @@ pub(crate) fn add_schema_columns(
                 None
             };
             let mut item = create_column_item(column, table_name);
+            let namespace = schema
+                .catalog
+                .as_deref()
+                .map(|catalog| format!("{catalog}.{}", schema.database))
+                .unwrap_or_else(|| schema.database.clone());
             item.detail = Some(format!(
                 "Column: {}.{}.{} ({})",
-                schema.database, table.name, column.name, column.data_type
+                namespace, table.name, column.name, column.data_type
             ));
             item.data = Some(json!({
                 "oxide": {
                     "kind": "column",
+                    "catalog": schema.catalog,
                     "schema": schema.database,
                     "table": table.name,
                     "column": column.name,
@@ -1342,7 +1348,16 @@ pub(crate) fn apply_column_aliases(
         let matching_aliases = aliases
             .iter()
             .filter(|(_, reference)| {
-                SqlParser::table_name_matches(reference, &source.schema, &source.table)
+                SqlParser::table_name_matches_with_catalog(
+                    reference,
+                    source.catalog.as_deref(),
+                    &source.schema,
+                    &source.table,
+                ) && source
+                    .catalog
+                    .as_deref()
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case(schema.catalog.as_deref().unwrap_or_default())
                     && source.schema.eq_ignore_ascii_case(&schema.database)
             })
             .map(|(alias, _)| alias.clone())
@@ -1372,6 +1387,7 @@ pub(crate) fn apply_column_aliases(
 }
 
 struct CompletionColumnSource {
+    catalog: Option<String>,
     schema: String,
     table: String,
     column: String,
@@ -1383,6 +1399,10 @@ fn completion_column_source(item: &CompletionItem) -> Option<CompletionColumnSou
         return None;
     }
     Some(CompletionColumnSource {
+        catalog: source
+            .get("catalog")
+            .and_then(|catalog| catalog.as_str())
+            .map(str::to_string),
         schema: source.get("schema")?.as_str()?.to_string(),
         table: source.get("table")?.as_str()?.to_string(),
         column: source.get("column")?.as_str()?.to_string(),
@@ -1539,7 +1559,12 @@ pub(crate) fn add_schema_indexes(
 }
 
 pub(crate) fn table_matches(schema: &Schema, table: &Table, reference: &str) -> bool {
-    SqlParser::table_name_matches(reference, &schema.database, &table.name)
+    SqlParser::table_name_matches_with_catalog(
+        reference,
+        schema.catalog.as_deref(),
+        &schema.database,
+        &table.name,
+    )
 }
 
 pub(crate) fn table_is_referenced(schema: &Schema, table: &Table, references: &[String]) -> bool {
@@ -1636,6 +1661,7 @@ mod tests {
     fn test_schema() -> Schema {
         Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "app".to_string(),
             server_version: None,
             tables: vec![

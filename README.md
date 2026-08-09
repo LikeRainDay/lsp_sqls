@@ -398,6 +398,7 @@ Configure schemas via `workspace/didChangeConfiguration`:
 ```typescript
 interface Schema {
   id: string; // UUID
+  catalog?: string; // Optional catalog/database above the SQL schema
   database: string; // Database name
   source_uri?: string; // Optional schema file URI
   tables: Table[];

@@ -13,6 +13,7 @@ mod schema_inference_tests {
         // 创建多个 schema
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -35,6 +36,7 @@ mod schema_inference_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -93,6 +95,7 @@ mod schema_inference_tests {
         // 创建多个包含相同表名的 schema
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -108,6 +111,7 @@ mod schema_inference_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -152,6 +156,7 @@ mod schema_inference_tests {
 
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "production".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -167,6 +172,7 @@ mod schema_inference_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -217,6 +223,7 @@ mod schema_priority_tests {
         // 创建两个 schema，一个明确指定，一个通过推断
         let explicit_schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "explicit_db".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -239,6 +246,7 @@ mod schema_priority_tests {
 
         let inferred_schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "inferred_db".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -278,6 +286,7 @@ mod schema_priority_tests {
         // 测试最后注册的 schema 优先级（如果需要实现这种策略）
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -293,6 +302,7 @@ mod schema_priority_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -322,6 +332,7 @@ mod schema_priority_tests {
         // 测试按表数量匹配的优先级策略
         let schema_with_more_tables = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![
@@ -346,6 +357,7 @@ mod schema_priority_tests {
 
         let schema_with_fewer_tables = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -384,6 +396,7 @@ mod schema_isolation_tests {
         // 创建两个不同的 schema，模拟不同文件使用不同 schema
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db1".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -406,6 +419,7 @@ mod schema_isolation_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "db2".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -461,6 +475,7 @@ mod schema_isolation_tests {
             let handle = task::spawn(async move {
                 let schema = Schema {
                     id: SchemaId::new(),
+                    catalog: None,
                     database: format!("db_{}", i),
                     server_version: None,
                     tables: vec![Table {
@@ -505,6 +520,7 @@ mod schema_isolation_tests {
         // 测试不同 schema 中有相同表名的情况
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "production".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -527,6 +543,7 @@ mod schema_isolation_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -571,6 +588,7 @@ mod schema_matching_tests {
 
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test_db".to_string(),
             server_version: None,
             tables: vec![
@@ -623,6 +641,7 @@ mod schema_matching_tests {
 
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test_db".to_string(),
             server_version: None,
             tables: vec![
@@ -674,6 +693,7 @@ mod schema_matching_tests {
 
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test_db".to_string(),
             server_version: None,
             tables: vec![
@@ -729,6 +749,7 @@ mod schema_matching_tests {
 
         let schema = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "test_db".to_string(),
             server_version: None,
             tables: vec![Table {
@@ -779,6 +800,7 @@ mod schema_inference_integration_tests {
         // 创建多个 schema
         let schema1 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "ecommerce".to_string(),
             server_version: None,
             tables: vec![
@@ -817,6 +839,7 @@ mod schema_inference_integration_tests {
 
         let schema2 = Schema {
             id: SchemaId::new(),
+            catalog: None,
             database: "analytics".to_string(),
             server_version: None,
             tables: vec![Table {

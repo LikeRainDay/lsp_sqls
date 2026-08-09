@@ -3920,7 +3920,13 @@ impl SqlParser {
         let token = Self::identifier_path_token_before_cursor(text_before)?;
 
         if token.ends_with('.') {
-            let qualifier = Self::normalize_identifier(token.trim_end_matches('.'));
+            let qualifier_token = token.strip_suffix('.').unwrap_or(token);
+            let qualifier_token = if qualifier_token.ends_with('.') {
+                format!("{qualifier_token}dbo")
+            } else {
+                qualifier_token.to_string()
+            };
+            let qualifier = Self::normalize_identifier(&qualifier_token);
             return (!qualifier.is_empty()).then_some(qualifier);
         }
 
@@ -3957,6 +3963,18 @@ impl SqlParser {
 
     /// Compare a referenced table name with a schema table.
     pub fn table_name_matches(reference: &str, database: &str, table_name: &str) -> bool {
+        Self::table_name_matches_with_catalog(reference, None, database, table_name)
+    }
+
+    /// Compare a referenced table name with a catalog-aware schema table.
+    /// Leading server segments are allowed, while the catalog/schema suffix
+    /// must match when the SQL reference supplies it.
+    pub fn table_name_matches_with_catalog(
+        reference: &str,
+        catalog: Option<&str>,
+        database: &str,
+        table_name: &str,
+    ) -> bool {
         let reference_parts = Self::identifier_parts(reference);
         let table = Self::normalize_identifier(table_name);
         let database = Self::normalize_identifier(database);
@@ -3966,8 +3984,20 @@ impl SqlParser {
             parts if parts.len() >= 2 => {
                 let referenced_table = parts.last().unwrap();
                 let referenced_database = &parts[parts.len() - 2];
-                Self::identifier_eq(referenced_table, &table)
-                    && (database.is_empty() || Self::identifier_eq(referenced_database, &database))
+                if !Self::identifier_eq(referenced_table, &table)
+                    || (!database.is_empty()
+                        && !Self::identifier_eq(referenced_database, &database))
+                {
+                    return false;
+                }
+
+                let Some(catalog) = catalog
+                    .map(Self::normalize_identifier)
+                    .filter(|catalog| !catalog.is_empty())
+                else {
+                    return true;
+                };
+                parts.len() < 3 || Self::identifier_eq(&parts[parts.len() - 3], &catalog)
             }
             _ => false,
         }
@@ -3988,12 +4018,20 @@ impl SqlParser {
     }
 
     fn identifier_parts(identifier: &str) -> Vec<String> {
-        identifier
+        let identifier = identifier
             .trim()
-            .trim_matches(|ch: char| matches!(ch, ',' | ';' | '(' | ')'))
-            .split('.')
-            .map(Self::unquote_identifier_part)
-            .filter(|part| !part.is_empty())
+            .trim_matches(|ch: char| matches!(ch, ',' | ';' | '(' | ')'));
+        let raw_parts = identifier.split('.').collect::<Vec<_>>();
+        raw_parts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, part)| {
+                let normalized = Self::unquote_identifier_part(part);
+                if !normalized.is_empty() {
+                    return Some(normalized);
+                }
+                (index > 0 && index + 1 < raw_parts.len()).then(|| "dbo".to_string())
+            })
             .collect()
     }
 
@@ -4711,6 +4749,12 @@ impl SqlParser {
                 break;
             }
             index += 1;
+            let next_part = Self::skip_whitespace(source, index);
+            if source[next_part..].starts_with('.') {
+                parts.push("dbo".to_string());
+                index = next_part;
+                continue;
+            }
             let Some((part, next_index)) = Self::read_identifier_part(source, index) else {
                 break;
             };
@@ -4776,6 +4820,12 @@ impl SqlParser {
                 return Some((parts.join("."), after_part));
             }
             index = dot_index + 1;
+            let next_part = Self::skip_whitespace(source, index);
+            if source[next_part..].starts_with('.') {
+                parts.push("dbo".to_string());
+                index = next_part;
+                continue;
+            }
             let Some((part, next_index)) = Self::read_identifier_part(source, index) else {
                 return Some((parts.join("."), after_part));
             };
@@ -5197,6 +5247,51 @@ mod tests {
             Some("catalog.public")
         );
         assert_eq!(SqlParser::identifier_qualifier("calculate_score"), None);
+    }
+
+    #[test]
+    fn normalizes_sqlserver_catalog_and_default_schema_paths() {
+        assert_eq!(
+            SqlParser::normalize_identifier("[BarDB]..[orders]"),
+            "BarDB.dbo.orders"
+        );
+        assert!(SqlParser::table_name_matches_with_catalog(
+            "[ServerOne].[AppDb].[dbo].[Users]",
+            Some("AppDb"),
+            "dbo",
+            "Users",
+        ));
+        assert!(SqlParser::table_name_matches_with_catalog(
+            "AppDb..Users",
+            Some("AppDb"),
+            "dbo",
+            "Users",
+        ));
+        assert!(!SqlParser::table_name_matches_with_catalog(
+            "[ServerOne].[OtherDb].[dbo].[Users]",
+            Some("AppDb"),
+            "dbo",
+            "Users",
+        ));
+
+        let sql = "SELECT * FROM [ServerOne].[AppDb].[dbo].[Users] u JOIN BarDB..Orders o ON o.user_id = u.id";
+        let mut parser = SqlParser::new();
+        let tree = parser.parse(sql).tree.expect("SQL should parse");
+        assert_eq!(
+            parser.extract_referenced_tables(&tree, sql),
+            vec![
+                "ServerOne.AppDb.dbo.Users".to_string(),
+                "BarDB.dbo.Orders".to_string(),
+            ]
+        );
+        assert_eq!(
+            SqlParser::column_qualifier_before_position(
+                "SELECT * FROM BarDB..",
+                position_at_end("SELECT * FROM BarDB.."),
+            )
+            .as_deref(),
+            Some("BarDB.dbo")
+        );
     }
 
     #[test]

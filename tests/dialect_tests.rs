@@ -112,6 +112,7 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
     let dialect = PostgresDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "public".to_string(),
         server_version: None,
         tables: vec![
@@ -347,6 +348,7 @@ async fn test_postgres_completion_keeps_relation_targets_separate_from_column_ta
     let dialect = PostgresDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "public".to_string(),
         server_version: None,
         tables: vec![
@@ -531,6 +533,7 @@ async fn test_postgres_completion_uses_utf16_lsp_positions() {
     let dialect = PostgresDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "public".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -584,6 +587,7 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
     let dialect = MysqlDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "shop".to_string(),
         server_version: None,
         tables: vec![
@@ -883,6 +887,7 @@ async fn test_mysql_schema_aware_select_completion_filters_referenced_tables() {
 async fn test_sql_completion_disambiguates_same_named_columns_before_from() {
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "public".to_string(),
         server_version: None,
         tables: ["users", "orders"]
@@ -971,6 +976,7 @@ async fn test_hive_dialect() {
 
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "default".to_string(),
         server_version: None,
         tables: vec![
@@ -1156,6 +1162,7 @@ async fn test_elasticsearch_dsl_filters_completions_by_server_version() {
     let dialect = ElasticsearchDslDialect::new();
     let schema = |version: &str| Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "default".to_string(),
         server_version: Some(version.to_string()),
         tables: vec![],
@@ -1233,6 +1240,7 @@ async fn test_elasticsearch_dsl_schema_aware_fields() {
     let dialect = ElasticsearchDslDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "default".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -1471,6 +1479,7 @@ async fn test_elasticsearch_console_scopes_fields_to_request_index() {
     };
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "default".to_string(),
         server_version: None,
         tables: vec![
@@ -1586,6 +1595,7 @@ async fn test_clickhouse_dialect() {
 
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "default".to_string(),
         server_version: None,
         tables: vec![
@@ -1762,6 +1772,7 @@ async fn test_redis_schema_aware_key_completion_and_hover() {
     let dialect = RedisDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "0".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -1868,6 +1879,7 @@ async fn test_mongodb_dialect() {
 
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "app".to_string(),
         server_version: None,
         tables: vec![
@@ -2192,6 +2204,7 @@ async fn test_mongodb_filters_pipeline_stages_by_server_version() {
     let dialect = MongoDbDialect::new();
     let schema = |version: &str| Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "app".to_string(),
         server_version: Some(version.to_string()),
         tables: vec![],
@@ -2232,11 +2245,98 @@ async fn test_mongodb_accepts_and_formats_whitespace_separated_commands() {
 }
 
 #[tokio::test]
+async fn sqlserver_catalog_qualified_alias_completion_is_exact() {
+    let registry = DialectRegistry::new();
+    let dialect = registry
+        .get_by_name("sqlserver")
+        .expect("SQL Server dialect");
+    let schema = Schema {
+        id: SchemaId::new(),
+        catalog: Some("AppDb".to_string()),
+        database: "dbo".to_string(),
+        server_version: Some("16.0".to_string()),
+        tables: vec![Table {
+            name: "Users".to_string(),
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "bigint".to_string(),
+                    ..Default::default()
+                },
+                Column {
+                    name: "display_name".to_string(),
+                    data_type: "nvarchar".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        functions: Vec::new(),
+        source_uri: None,
+    };
+
+    for sql in [
+        "SELECT * FROM [ServerOne].[AppDb].[dbo].[Users] u WHERE u.",
+        "SELECT * FROM AppDb..Users u WHERE u.",
+    ] {
+        let items = dialect
+            .completion(
+                sql,
+                tower_lsp::lsp_types::Position {
+                    line: 0,
+                    character: sql.encode_utf16().count() as u32,
+                },
+                Some(&schema),
+            )
+            .await;
+        assert!(
+            items.iter().any(|item| item.label == "display_name"),
+            "catalog-qualified alias should resolve AppDb.dbo.Users: {items:?}"
+        );
+    }
+
+    let table_sql = "SELECT * FROM AppDb..";
+    let table_items = dialect
+        .completion(
+            table_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: table_sql.encode_utf16().count() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        table_items.iter().any(|item| item.label.ends_with("Users")),
+        "double-dot table completion should use AppDb.dbo metadata: {table_items:?}"
+    );
+
+    let wrong_catalog_sql = "SELECT * FROM [ServerOne].[OtherDb].[dbo].[Users] u WHERE u.";
+    let wrong_catalog_items = dialect
+        .completion(
+            wrong_catalog_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: wrong_catalog_sql.encode_utf16().count() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        !wrong_catalog_items
+            .iter()
+            .any(|item| item.label == "display_name"),
+        "a different catalog must not reuse same-named dbo.Users metadata"
+    );
+}
+
+#[tokio::test]
 async fn test_dialect_with_schema() {
     let dialect = MysqlDialect::new();
 
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![Table {
@@ -2290,6 +2390,7 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
     let dialect = PostgresDialect::new();
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "public".to_string(),
         server_version: None,
         tables: vec![
@@ -2461,6 +2562,7 @@ async fn test_postgres_completion_at_clause_keywords_matches_editor_flow() {
 async fn test_schema_function_completion() {
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![],
@@ -2569,6 +2671,7 @@ fn hover_contents_to_string(contents: &tower_lsp::lsp_types::HoverContents) -> S
 async fn test_schema_function_hover() {
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "test_db".to_string(),
         server_version: None,
         tables: vec![],
@@ -2679,6 +2782,7 @@ async fn test_intelligent_completion_logging() {
     // Shared Schema for tests
     let schema = Schema {
         id: SchemaId::new(),
+        catalog: None,
         database: "shop".to_string(),
         server_version: None,
         tables: vec![
