@@ -15,6 +15,62 @@ use tower_lsp::{Client, LanguageServer};
 
 const CURRENT_SQL_DOCUMENT_URI: &str = "file:///current.sql";
 const CURRENT_JSON_DOCUMENT_URI: &str = "file:///current.json";
+const PROJECT_SQL_INDEX_MAX_BYTES: usize = 512 * 1024;
+const PROJECT_SQL_INDEX_MAX_DOCUMENTS: usize = 256;
+const PROJECT_SQL_INDEX_MAX_OCCURRENCES: usize = 10_000;
+const PROJECT_SQL_INDEX_MAX_RESULTS: usize = 2_000;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ProjectSqlSymbolKind {
+    Table,
+    View,
+    Function,
+    Procedure,
+}
+
+impl ProjectSqlSymbolKind {
+    fn symbol_kind(self) -> SymbolKind {
+        match self {
+            Self::Table | Self::View => SymbolKind::CLASS,
+            Self::Function => SymbolKind::FUNCTION,
+            Self::Procedure => SymbolKind::METHOD,
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Table => "Project table",
+            Self::View => "Project view",
+            Self::Function => "Project function",
+            Self::Procedure => "Project procedure",
+        }
+    }
+
+    fn is_routine(self) -> bool {
+        matches!(self, Self::Function | Self::Procedure)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ProjectSqlSymbolRole {
+    Definition,
+    Reference,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectSqlSymbolOccurrence {
+    name: String,
+    normalized_name: String,
+    kind: ProjectSqlSymbolKind,
+    role: ProjectSqlSymbolRole,
+    range: Range,
+}
+
+#[derive(Clone)]
+struct CachedProjectSqlIndex {
+    revision: u64,
+    occurrences: Vec<ProjectSqlSymbolOccurrence>,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +166,7 @@ fn rewrite_current_document_location_uris(locations: &mut [Location], document_u
 #[derive(Clone)]
 struct DocumentManager {
     documents: Arc<DashMap<String, String>>,
+    revisions: Arc<DashMap<String, u64>>,
 }
 
 #[derive(Clone)]
@@ -122,11 +179,16 @@ impl DocumentManager {
     fn new() -> Self {
         Self {
             documents: Arc::new(DashMap::new()),
+            revisions: Arc::new(DashMap::new()),
         }
     }
 
     fn update(&self, uri: String, text: String) {
-        self.documents.insert(uri, text);
+        self.documents.insert(uri.clone(), text);
+        self.revisions
+            .entry(uri)
+            .and_modify(|revision| *revision = revision.saturating_add(1))
+            .or_insert(1);
     }
 
     fn get(&self, uri: &str) -> Option<String> {
@@ -140,8 +202,13 @@ impl DocumentManager {
             .collect()
     }
 
+    fn revision(&self, uri: &str) -> Option<u64> {
+        self.revisions.get(uri).map(|revision| *revision)
+    }
+
     fn remove(&self, uri: &str) {
         self.documents.remove(uri);
+        self.revisions.remove(uri);
     }
 }
 
@@ -168,6 +235,7 @@ pub struct SqlLspServer {
     /// 文档管理器
     document_manager: DocumentManager,
     analysis_cache: Arc<DashMap<String, CachedSqlAnalysis>>,
+    project_sql_index_cache: Arc<DashMap<String, CachedProjectSqlIndex>>,
 }
 
 impl SqlLspServer {
@@ -186,6 +254,7 @@ impl SqlLspServer {
             document_languages: Arc::new(DashMap::new()),
             document_manager: DocumentManager::new(),
             analysis_cache: Arc::new(DashMap::new()),
+            project_sql_index_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -309,6 +378,224 @@ impl SqlLspServer {
             },
         );
         Some(tree)
+    }
+
+    fn project_sql_index_for_document(
+        &self,
+        uri: &str,
+        text: &str,
+    ) -> Vec<ProjectSqlSymbolOccurrence> {
+        let revision = self.document_manager.revision(uri).unwrap_or_default();
+        if let Some(cached) = self.project_sql_index_cache.get(uri) {
+            if cached.revision == revision {
+                return cached.occurrences.clone();
+            }
+        }
+        let occurrences = project_sql_symbol_occurrences(text);
+        if self.document_manager.revision(uri) == Some(revision)
+            && self
+                .document_manager
+                .get(uri)
+                .as_deref()
+                .is_some_and(|current| current == text)
+        {
+            self.project_sql_index_cache.insert(
+                uri.to_string(),
+                CachedProjectSqlIndex {
+                    revision,
+                    occurrences: occurrences.clone(),
+                },
+            );
+        }
+        occurrences
+    }
+
+    fn project_sql_documents(&self) -> Vec<(String, String)> {
+        let mut documents = self.document_manager.entries();
+        documents.sort_by(|left, right| left.0.cmp(&right.0));
+        documents.truncate(PROJECT_SQL_INDEX_MAX_DOCUMENTS);
+        documents
+    }
+
+    fn project_sql_symbol_at_position(
+        &self,
+        uri: &str,
+        text: &str,
+        position: Position,
+    ) -> Option<ProjectSqlSymbolOccurrence> {
+        self.project_sql_index_for_document(uri, text)
+            .into_iter()
+            .find(|occurrence| range_contains_position(occurrence.range, position))
+    }
+
+    fn matching_project_sql_locations(
+        &self,
+        origin_uri: &str,
+        origin_dialect: &str,
+        origin_schema_id: Option<SchemaId>,
+        target: &ProjectSqlSymbolOccurrence,
+        include_declarations: bool,
+    ) -> Vec<Location> {
+        let mut locations = Vec::new();
+        for (candidate_uri, candidate_text) in self.project_sql_documents() {
+            let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
+                continue;
+            };
+            if candidate_dialect.name() != origin_dialect
+                || !documents_share_project_sql_scope(
+                    origin_uri,
+                    &candidate_uri,
+                    origin_schema_id,
+                    self.get_schema_for_file(&candidate_uri)
+                        .as_ref()
+                        .map(|schema| schema.id),
+                )
+            {
+                continue;
+            }
+            let Ok(candidate_url) = Url::parse(&candidate_uri) else {
+                continue;
+            };
+            for occurrence in self.project_sql_index_for_document(&candidate_uri, &candidate_text) {
+                if (!include_declarations && occurrence.role == ProjectSqlSymbolRole::Definition)
+                    || !project_sql_symbols_match(target, &occurrence)
+                {
+                    continue;
+                }
+                locations.push(Location {
+                    uri: candidate_url.clone(),
+                    range: occurrence.range,
+                });
+                if locations.len() >= PROJECT_SQL_INDEX_MAX_RESULTS {
+                    return locations;
+                }
+            }
+        }
+        locations
+    }
+
+    fn project_sql_definition(
+        &self,
+        origin_uri: &str,
+        origin_dialect: &str,
+        origin_schema_id: Option<SchemaId>,
+        target: &ProjectSqlSymbolOccurrence,
+    ) -> Option<Location> {
+        for (candidate_uri, candidate_text) in self.project_sql_documents() {
+            let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
+                continue;
+            };
+            if candidate_dialect.name() != origin_dialect
+                || !documents_share_project_sql_scope(
+                    origin_uri,
+                    &candidate_uri,
+                    origin_schema_id,
+                    self.get_schema_for_file(&candidate_uri)
+                        .as_ref()
+                        .map(|schema| schema.id),
+                )
+            {
+                continue;
+            }
+            let Ok(candidate_url) = Url::parse(&candidate_uri) else {
+                continue;
+            };
+            if let Some(definition) = self
+                .project_sql_index_for_document(&candidate_uri, &candidate_text)
+                .into_iter()
+                .find(|occurrence| {
+                    occurrence.role == ProjectSqlSymbolRole::Definition
+                        && project_sql_symbols_match(target, occurrence)
+                })
+            {
+                return Some(Location {
+                    uri: candidate_url,
+                    range: definition.range,
+                });
+            }
+        }
+        None
+    }
+
+    fn project_sql_symbol_is_renameable(
+        &self,
+        uri: &str,
+        dialect: &str,
+        schema: Option<&Schema>,
+        target: &ProjectSqlSymbolOccurrence,
+    ) -> bool {
+        if target.kind.is_routine() {
+            let metadata_matches = schema.map_or(0, |schema| {
+                schema
+                    .functions
+                    .iter()
+                    .filter(|function| function.name.eq_ignore_ascii_case(&target.name))
+                    .count()
+            });
+            let project_definitions = self.project_sql_definition_count(
+                uri,
+                dialect,
+                schema.map(|schema| schema.id),
+                target,
+            );
+            return metadata_matches <= 1
+                && project_definitions <= 1
+                && (metadata_matches == 1 || project_definitions == 1);
+        }
+        let metadata_match = schema.is_some_and(|schema| {
+            schema.tables.iter().any(|table| {
+                SqlParser::table_name_matches_with_catalog(
+                    &target.normalized_name,
+                    schema.catalog.as_deref(),
+                    &schema.database,
+                    &table.name,
+                )
+            })
+        });
+        metadata_match
+            || self
+                .project_sql_definition(uri, dialect, schema.map(|schema| schema.id), target)
+                .is_some()
+    }
+
+    fn project_sql_definition_count(
+        &self,
+        origin_uri: &str,
+        origin_dialect: &str,
+        origin_schema_id: Option<SchemaId>,
+        target: &ProjectSqlSymbolOccurrence,
+    ) -> usize {
+        let mut count = 0;
+        for (candidate_uri, candidate_text) in self.project_sql_documents() {
+            let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
+                continue;
+            };
+            if candidate_dialect.name() != origin_dialect
+                || !documents_share_project_sql_scope(
+                    origin_uri,
+                    &candidate_uri,
+                    origin_schema_id,
+                    self.get_schema_for_file(&candidate_uri)
+                        .as_ref()
+                        .map(|schema| schema.id),
+                )
+            {
+                continue;
+            }
+            count += self
+                .project_sql_index_for_document(&candidate_uri, &candidate_text)
+                .into_iter()
+                .filter(|occurrence| {
+                    occurrence.role == ProjectSqlSymbolRole::Definition
+                        && project_sql_symbols_match(target, occurrence)
+                })
+                .take(2 - count)
+                .count();
+            if count >= 2 {
+                return count;
+            }
+        }
+        count
     }
 
     pub async fn inline_completion_context(
@@ -1525,6 +1812,7 @@ impl LanguageServer for SqlLspServer {
         self.inferred_file_dialects.remove(&uri);
         self.inferred_file_schemas.remove(&uri);
         self.analysis_cache.remove(&uri);
+        self.project_sql_index_cache.remove(&uri);
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -1615,6 +1903,16 @@ impl LanguageServer for SqlLspServer {
                 rewrite_current_document_location_uri(&mut location, &document_uri);
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             }
+            if let Some(target) = self.project_sql_symbol_at_position(&uri, &text, position) {
+                if let Some(location) = self.project_sql_definition(
+                    &uri,
+                    dialect.name(),
+                    schema.as_ref().map(|schema| schema.id),
+                    &target,
+                ) {
+                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                }
+            }
         }
 
         Ok(None)
@@ -1624,6 +1922,7 @@ impl LanguageServer for SqlLspServer {
         let document_uri = params.text_document_position.text_document.uri;
         let uri = document_uri.to_string();
         let position = params.text_document_position.position;
+        let include_declarations = params.context.include_declaration;
 
         let text = self.document_manager.get(&uri).unwrap_or_default();
 
@@ -1631,44 +1930,17 @@ impl LanguageServer for SqlLspServer {
             let schema = self.get_schema_for_position(&uri, &text, position);
             let mut locations = dialect.references(&text, position, schema.as_ref()).await;
             rewrite_current_document_location_uris(&mut locations, &document_uri);
-            if locations.is_empty() {
-                return Ok(Some(locations));
+            if let Some(target) = self.project_sql_symbol_at_position(&uri, &text, position) {
+                locations = self.matching_project_sql_locations(
+                    &uri,
+                    dialect.name(),
+                    schema.as_ref().map(|schema| schema.id),
+                    &target,
+                    include_declarations,
+                );
             }
-
-            if let Some(identifier) = identifier_at_position(&text, position, dialect.name()) {
-                let schema_id = schema.as_ref().map(|schema| schema.id);
-                for (candidate_uri, candidate_text) in self.document_manager.entries() {
-                    if candidate_uri == uri {
-                        continue;
-                    }
-                    let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
-                        continue;
-                    };
-                    if candidate_dialect.name() != dialect.name() {
-                        continue;
-                    }
-                    if let Some(expected_schema_id) = schema_id {
-                        if self
-                            .get_schema_for_file(&candidate_uri)
-                            .is_none_or(|candidate_schema| {
-                                candidate_schema.id != expected_schema_id
-                            })
-                        {
-                            continue;
-                        }
-                    }
-                    let Ok(candidate_url) = Url::parse(&candidate_uri) else {
-                        continue;
-                    };
-                    locations.extend(identifier_references(
-                        &candidate_text,
-                        &identifier,
-                        dialect.name(),
-                        &candidate_url,
-                    ));
-                }
-                deduplicate_locations(&mut locations);
-            }
+            deduplicate_locations(&mut locations);
+            locations.truncate(PROJECT_SQL_INDEX_MAX_RESULTS);
             return Ok(Some(locations));
         }
 
@@ -1739,18 +2011,22 @@ impl LanguageServer for SqlLspServer {
         if !supports_semantic_rename(dialect.name()) {
             return Ok(None);
         }
+        if let Some(target) = self.project_sql_symbol_at_position(&uri, &text, params.position) {
+            let schema = self.get_schema_for_position(&uri, &text, params.position);
+            return Ok(self
+                .project_sql_symbol_is_renameable(&uri, dialect.name(), schema.as_ref(), &target)
+                .then_some(PrepareRenameResponse::Range(target.range)));
+        }
+        let Some(range) = cte_identifier_range_at_position(&text, params.position, dialect.name())
+        else {
+            return Ok(None);
+        };
         let schema = self.get_schema_for_position(&uri, &text, params.position);
-        if dialect
+        Ok((!dialect
             .references(&text, params.position, schema.as_ref())
             .await
-            .is_empty()
-        {
-            return Ok(None);
-        }
-        Ok(
-            identifier_range_at_position(&text, params.position, dialect.name())
-                .map(PrepareRenameResponse::Range),
-        )
+            .is_empty())
+        .then_some(PrepareRenameResponse::Range(range)))
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -1765,47 +2041,53 @@ impl LanguageServer for SqlLspServer {
             return Ok(None);
         }
         let schema = self.get_schema_for_position(&uri, &text, position);
-        if dialect
-            .references(&text, position, schema.as_ref())
-            .await
-            .is_empty()
+        let target = self.project_sql_symbol_at_position(&uri, &text, position);
+        if target.is_none()
+            && cte_identifier_range_at_position(&text, position, dialect.name()).is_some()
         {
-            return Ok(None);
+            let mut locations = dialect.references(&text, position, schema.as_ref()).await;
+            let Ok(document_uri) = Url::parse(&uri) else {
+                return Ok(None);
+            };
+            rewrite_current_document_location_uris(&mut locations, &document_uri);
+            deduplicate_locations(&mut locations);
+            let edits = locations
+                .into_iter()
+                .map(|location| TextEdit {
+                    range: location.range,
+                    new_text: params.new_name.clone(),
+                })
+                .collect::<Vec<_>>();
+            if edits.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(WorkspaceEdit {
+                changes: Some(HashMap::from([(document_uri, edits)])),
+                document_changes: None,
+                change_annotations: None,
+            }));
         }
-        let Some(identifier) = identifier_at_position(&text, position, dialect.name()) else {
+        let Some(target) = target else {
             return Ok(None);
         };
-        let schema_id = schema.as_ref().map(|schema| schema.id);
+        if !self.project_sql_symbol_is_renameable(&uri, dialect.name(), schema.as_ref(), &target) {
+            return Ok(None);
+        }
         let mut changes = HashMap::new();
-        for (candidate_uri, candidate_text) in self.document_manager.entries() {
-            let Some(candidate_dialect) = self.get_dialect_for_file(&candidate_uri) else {
-                continue;
-            };
-            if candidate_dialect.name() != dialect.name() {
-                continue;
-            }
-            if let Some(expected_schema_id) = schema_id {
-                if self
-                    .get_schema_for_file(&candidate_uri)
-                    .is_none_or(|candidate_schema| candidate_schema.id != expected_schema_id)
-                {
-                    continue;
-                }
-            }
-            let Ok(candidate_url) = Url::parse(&candidate_uri) else {
-                continue;
-            };
-            let edits =
-                identifier_references(&candidate_text, &identifier, dialect.name(), &candidate_url)
-                    .into_iter()
-                    .map(|location| TextEdit {
-                        range: location.range,
-                        new_text: params.new_name.clone(),
-                    })
-                    .collect::<Vec<_>>();
-            if !edits.is_empty() {
-                changes.insert(candidate_url, edits);
-            }
+        for location in self.matching_project_sql_locations(
+            &uri,
+            dialect.name(),
+            schema.as_ref().map(|schema| schema.id),
+            &target,
+            true,
+        ) {
+            changes
+                .entry(location.uri)
+                .or_insert_with(Vec::new)
+                .push(TextEdit {
+                    range: location.range,
+                    new_text: params.new_name.clone(),
+                });
         }
         if changes.is_empty() {
             return Ok(None);
@@ -1929,7 +2211,12 @@ impl LanguageServer for SqlLspServer {
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri.to_string();
         let text = self.document_manager.get(&uri).unwrap_or_default();
-        let symbols = document_symbols(&text, self.get_schema_for_file(&uri).as_ref());
+        let project_symbols = self.project_sql_index_for_document(&uri, &text);
+        let symbols = document_symbols(
+            &text,
+            self.get_schema_for_file(&uri).as_ref(),
+            &project_symbols,
+        );
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
@@ -2053,6 +2340,40 @@ impl LanguageServer for SqlLspServer {
                 }
             }
         }
+        for (uri, text) in self.project_sql_documents() {
+            let Ok(location_uri) = Url::parse(&uri) else {
+                continue;
+            };
+            let container_name = project_sql_symbol_container(&location_uri);
+            for occurrence in self.project_sql_index_for_document(&uri, &text) {
+                if occurrence.role != ProjectSqlSymbolRole::Definition
+                    || !workspace_symbol_matches(
+                        &query,
+                        &occurrence.name,
+                        &format!("{} {}", occurrence.normalized_name, container_name),
+                    )
+                {
+                    continue;
+                }
+                symbols.push(SymbolInformation {
+                    name: occurrence.name,
+                    kind: occurrence.kind.symbol_kind(),
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: location_uri.clone(),
+                        range: occurrence.range,
+                    },
+                    container_name: Some(container_name.clone()),
+                });
+                if symbols.len() >= PROJECT_SQL_INDEX_MAX_RESULTS {
+                    break;
+                }
+            }
+            if symbols.len() >= PROJECT_SQL_INDEX_MAX_RESULTS {
+                break;
+            }
+        }
         symbols.sort_by(|left, right| {
             workspace_symbol_rank(&query, &left.name)
                 .cmp(&workspace_symbol_rank(&query, &right.name))
@@ -2062,6 +2383,11 @@ impl LanguageServer for SqlLspServer {
                         .cmp(&right.name.to_ascii_lowercase())
                 })
                 .then_with(|| left.container_name.cmp(&right.container_name))
+        });
+        symbols.dedup_by(|left, right| {
+            left.name.eq_ignore_ascii_case(&right.name)
+                && left.location == right.location
+                && left.kind == right.kind
         });
         symbols.truncate(1_000);
         Ok(Some(symbols))
@@ -2092,40 +2418,18 @@ fn identifier_at_position(text: &str, position: Position, dialect: &str) -> Opti
     (!identifier.is_empty()).then_some(identifier)
 }
 
-fn identifier_references(text: &str, identifier: &str, dialect: &str, uri: &Url) -> Vec<Location> {
-    let needle = identifier.to_ascii_lowercase();
-    text.lines()
-        .enumerate()
-        .flat_map(|(line_index, line)| {
-            let searchable = line.to_ascii_lowercase();
-            searchable
-                .match_indices(&needle)
-                .filter_map(move |(start, matched)| {
-                    let end = start + matched.len();
-                    let before = line[..start].chars().next_back();
-                    let after = line[end..].chars().next();
-                    if before.is_some_and(|ch| is_identifier_character(ch, dialect))
-                        || after.is_some_and(|ch| is_identifier_character(ch, dialect))
-                    {
-                        return None;
-                    }
-                    Some(Location {
-                        uri: uri.clone(),
-                        range: Range {
-                            start: Position {
-                                line: line_index as u32,
-                                character: line[..start].encode_utf16().count() as u32,
-                            },
-                            end: Position {
-                                line: line_index as u32,
-                                character: line[..end].encode_utf16().count() as u32,
-                            },
-                        },
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+fn cte_identifier_range_at_position(
+    text: &str,
+    position: Position,
+    dialect: &str,
+) -> Option<Range> {
+    let identifier = identifier_at_position(text, position, dialect)?;
+    let parser = SqlParser::new();
+    parser
+        .extract_common_table_expressions(text)
+        .into_iter()
+        .any(|cte| SqlParser::identifier_last_part(&cte).eq_ignore_ascii_case(&identifier))
+        .then(|| identifier_range_at_position(text, position, dialect))?
 }
 
 fn is_identifier_character(character: char, dialect: &str) -> bool {
@@ -2179,6 +2483,427 @@ fn workspace_symbol_rank(query: &str, name: &str) -> u8 {
     } else {
         2
     }
+}
+
+fn range_contains_position(range: Range, position: Position) -> bool {
+    position >= range.start && position <= range.end
+}
+
+fn project_uri_scope(uri: &str) -> Option<&str> {
+    let prefix = "oxide://project/";
+    let rest = uri.strip_prefix(prefix)?;
+    let project_end = rest.find('/').unwrap_or(rest.len());
+    Some(&rest[..project_end])
+}
+
+fn documents_share_project_sql_scope(
+    origin_uri: &str,
+    candidate_uri: &str,
+    origin_schema_id: Option<SchemaId>,
+    candidate_schema_id: Option<SchemaId>,
+) -> bool {
+    match (origin_schema_id, candidate_schema_id) {
+        (Some(origin), Some(candidate)) => origin == candidate,
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => {
+            origin_uri == candidate_uri
+                || project_uri_scope(origin_uri)
+                    .zip(project_uri_scope(candidate_uri))
+                    .is_some_and(|(origin, candidate)| origin == candidate)
+        }
+    }
+}
+
+fn project_sql_symbols_match(
+    left: &ProjectSqlSymbolOccurrence,
+    right: &ProjectSqlSymbolOccurrence,
+) -> bool {
+    if left.kind.is_routine() != right.kind.is_routine() {
+        return false;
+    }
+    if left.kind.is_routine()
+        && left.kind != right.kind
+        && left.role == ProjectSqlSymbolRole::Definition
+        && right.role == ProjectSqlSymbolRole::Definition
+    {
+        return false;
+    }
+    let left_parts = left.normalized_name.split('.').collect::<Vec<_>>();
+    let right_parts = right.normalized_name.split('.').collect::<Vec<_>>();
+    let shared = left_parts.len().min(right_parts.len());
+    shared > 0
+        && left_parts[left_parts.len() - shared..] == right_parts[right_parts.len() - shared..]
+}
+
+fn project_sql_symbol_container(uri: &Url) -> String {
+    if uri.scheme() == "oxide" && uri.host_str() == Some("project") {
+        return uri
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .filter(|path| !path.is_empty())
+            .unwrap_or("Project SQL")
+            .to_string();
+    }
+    uri.path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|path| !path.is_empty())
+        .unwrap_or("SQL document")
+        .to_string()
+}
+
+fn project_sql_symbol_occurrences(source: &str) -> Vec<ProjectSqlSymbolOccurrence> {
+    if source.len() > PROJECT_SQL_INDEX_MAX_BYTES {
+        return Vec::new();
+    }
+    let searchable = SqlParser::mask_sql_noise(source);
+    let upper = searchable.to_ascii_uppercase();
+    let cte_scopes = project_cte_scopes(source, &searchable);
+    let mut occurrences = Vec::new();
+
+    let definitions = [
+        ("CREATE TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE OR REPLACE TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE TEMP TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE TEMPORARY TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE GLOBAL TEMPORARY TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE FOREIGN TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE EXTERNAL TABLE", ProjectSqlSymbolKind::Table),
+        ("CREATE VIEW", ProjectSqlSymbolKind::View),
+        ("CREATE OR REPLACE VIEW", ProjectSqlSymbolKind::View),
+        ("CREATE MATERIALIZED VIEW", ProjectSqlSymbolKind::View),
+        (
+            "CREATE OR REPLACE MATERIALIZED VIEW",
+            ProjectSqlSymbolKind::View,
+        ),
+        ("CREATE FUNCTION", ProjectSqlSymbolKind::Function),
+        ("CREATE OR REPLACE FUNCTION", ProjectSqlSymbolKind::Function),
+        ("CREATE PROCEDURE", ProjectSqlSymbolKind::Procedure),
+        (
+            "CREATE OR REPLACE PROCEDURE",
+            ProjectSqlSymbolKind::Procedure,
+        ),
+    ];
+    for (phrase, kind) in definitions {
+        for start in project_keyword_phrase_starts(&upper, phrase) {
+            let mut name_start = start + phrase.len();
+            name_start =
+                skip_project_keyword_sequence(source, &upper, name_start, &["IF", "NOT", "EXISTS"]);
+            push_project_sql_occurrence(
+                source,
+                name_start,
+                kind,
+                ProjectSqlSymbolRole::Definition,
+                &cte_scopes,
+                &mut occurrences,
+            );
+        }
+    }
+
+    let references = [
+        ("ALTER TABLE", ProjectSqlSymbolKind::Table),
+        ("DROP TABLE", ProjectSqlSymbolKind::Table),
+        ("TRUNCATE TABLE", ProjectSqlSymbolKind::Table),
+        ("ALTER VIEW", ProjectSqlSymbolKind::View),
+        ("DROP VIEW", ProjectSqlSymbolKind::View),
+        ("REFRESH MATERIALIZED VIEW", ProjectSqlSymbolKind::View),
+        ("DROP MATERIALIZED VIEW", ProjectSqlSymbolKind::View),
+        ("INSERT INTO", ProjectSqlSymbolKind::Table),
+        ("MERGE INTO", ProjectSqlSymbolKind::Table),
+        ("DELETE FROM", ProjectSqlSymbolKind::Table),
+        ("REFERENCES", ProjectSqlSymbolKind::Table),
+        ("CALL", ProjectSqlSymbolKind::Procedure),
+    ];
+    for (phrase, kind) in references {
+        for start in project_keyword_phrase_starts(&upper, phrase) {
+            let mut name_start = start + phrase.len();
+            name_start =
+                skip_project_keyword_sequence(source, &upper, name_start, &["IF", "EXISTS"]);
+            name_start = skip_project_relation_modifiers(source, &upper, name_start);
+            push_project_sql_occurrence(
+                source,
+                name_start,
+                kind,
+                ProjectSqlSymbolRole::Reference,
+                &cte_scopes,
+                &mut occurrences,
+            );
+        }
+    }
+
+    for start in local_relation_source_starts(&upper) {
+        let name_start = skip_project_relation_modifiers(source, &upper, start);
+        push_project_sql_occurrence(
+            source,
+            name_start,
+            ProjectSqlSymbolKind::Table,
+            ProjectSqlSymbolRole::Reference,
+            &cte_scopes,
+            &mut occurrences,
+        );
+    }
+
+    for start in project_keyword_phrase_starts(&upper, "UPDATE") {
+        if project_update_is_relation_target(&upper, start) {
+            let name_start =
+                skip_project_relation_modifiers(source, &upper, start + "UPDATE".len());
+            push_project_sql_occurrence(
+                source,
+                name_start,
+                ProjectSqlSymbolKind::Table,
+                ProjectSqlSymbolRole::Reference,
+                &cte_scopes,
+                &mut occurrences,
+            );
+        }
+    }
+
+    append_project_function_call_occurrences(source, &searchable, &mut occurrences);
+
+    occurrences.sort_by_key(|occurrence| {
+        (
+            occurrence.range.start.line,
+            occurrence.range.start.character,
+            occurrence.range.end.line,
+            occurrence.range.end.character,
+            occurrence.role == ProjectSqlSymbolRole::Reference,
+        )
+    });
+    occurrences.dedup_by(|left, right| {
+        left.range == right.range && left.role == right.role && left.kind == right.kind
+    });
+    occurrences.truncate(PROJECT_SQL_INDEX_MAX_OCCURRENCES);
+    occurrences
+}
+
+fn project_keyword_phrase_starts(source_upper: &str, phrase: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut search = 0;
+    while let Some(relative) = source_upper[search..].find(phrase) {
+        let start = search + relative;
+        if local_keyword_boundary(source_upper, start, phrase) {
+            starts.push(start);
+        }
+        search = start + phrase.len();
+    }
+    starts
+}
+
+fn skip_project_keyword_sequence(
+    source: &str,
+    source_upper: &str,
+    start: usize,
+    keywords: &[&str],
+) -> usize {
+    let original = skip_local_whitespace(source, start);
+    let mut cursor = original;
+    for keyword in keywords {
+        cursor = skip_local_whitespace(source, cursor);
+        if !source_upper[cursor..].starts_with(keyword)
+            || !local_keyword_boundary(source_upper, cursor, keyword)
+        {
+            return original;
+        }
+        cursor += keyword.len();
+    }
+    skip_local_whitespace(source, cursor)
+}
+
+fn skip_project_relation_modifiers(source: &str, source_upper: &str, start: usize) -> usize {
+    let mut cursor = skip_local_whitespace(source, start);
+    loop {
+        let mut advanced = false;
+        for keyword in ["ONLY", "LATERAL"] {
+            if source_upper[cursor..].starts_with(keyword)
+                && local_keyword_boundary(source_upper, cursor, keyword)
+            {
+                cursor = skip_local_whitespace(source, cursor + keyword.len());
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            return cursor;
+        }
+    }
+}
+
+fn read_project_identifier_path_after(
+    source: &str,
+    start: usize,
+) -> Option<(String, String, usize, usize, usize)> {
+    let (first, first_start, mut path_end) = read_local_identifier_after(source, start)?;
+    let mut parts = vec![first];
+    let (mut selection_start, mut selection_end) =
+        project_identifier_selection_range(source, first_start, path_end);
+    loop {
+        let dot = skip_local_whitespace(source, path_end);
+        if !source[dot..].starts_with('.') {
+            break;
+        }
+        let after_dot = skip_local_whitespace(source, dot + 1);
+        if source[after_dot..].starts_with('.') {
+            parts.push("dbo".to_string());
+            path_end = after_dot;
+            continue;
+        }
+        let Some((part, part_start, part_end)) = read_local_identifier_after(source, after_dot)
+        else {
+            break;
+        };
+        parts.push(part);
+        (selection_start, selection_end) =
+            project_identifier_selection_range(source, part_start, part_end);
+        path_end = part_end;
+    }
+    let path = parts.join(".");
+    let name = parts.last()?.clone();
+    Some((path, name, selection_start, selection_end, path_end))
+}
+
+fn project_identifier_selection_range(source: &str, start: usize, end: usize) -> (usize, usize) {
+    let Some(first) = source[start..end].chars().next() else {
+        return (start, end);
+    };
+    let Some(last) = source[start..end].chars().next_back() else {
+        return (start, end);
+    };
+    if matches!((first, last), ('"', '"') | ('`', '`') | ('[', ']')) {
+        (start + first.len_utf8(), end - last.len_utf8())
+    } else {
+        (start, end)
+    }
+}
+
+fn push_project_sql_occurrence(
+    source: &str,
+    start: usize,
+    kind: ProjectSqlSymbolKind,
+    role: ProjectSqlSymbolRole,
+    cte_scopes: &[(String, usize, usize)],
+    occurrences: &mut Vec<ProjectSqlSymbolOccurrence>,
+) {
+    if occurrences.len() >= PROJECT_SQL_INDEX_MAX_OCCURRENCES || source[start..].starts_with('(') {
+        return;
+    }
+    let Some((path, name, selection_start, selection_end, _)) =
+        read_project_identifier_path_after(source, start)
+    else {
+        return;
+    };
+    if Keywords::is_keyword(&name) {
+        return;
+    }
+    let normalized_name = SqlParser::normalize_identifier(&path).to_ascii_lowercase();
+    if role == ProjectSqlSymbolRole::Reference
+        && !kind.is_routine()
+        && !normalized_name.contains('.')
+        && cte_scopes.iter().any(|(cte, scope_start, scope_end)| {
+            cte == &normalized_name
+                && selection_start >= *scope_start
+                && selection_start < *scope_end
+        })
+    {
+        return;
+    }
+    occurrences.push(ProjectSqlSymbolOccurrence {
+        name,
+        normalized_name,
+        kind,
+        role,
+        range: range_for_offsets(source, selection_start, selection_end),
+    });
+}
+
+fn append_project_function_call_occurrences(
+    source: &str,
+    searchable: &str,
+    occurrences: &mut Vec<ProjectSqlSymbolOccurrence>,
+) {
+    let mut cursor = 0;
+    while cursor < searchable.len() && occurrences.len() < PROJECT_SQL_INDEX_MAX_OCCURRENCES {
+        let Some(character) = searchable[cursor..].chars().next() else {
+            break;
+        };
+        let previous = searchable[..cursor].chars().next_back();
+        if !(character == '_' || character.is_alphabetic())
+            || previous.is_some_and(|value| value == '_' || value == '$' || value.is_alphanumeric())
+        {
+            cursor += character.len_utf8();
+            continue;
+        }
+        let Some((path, name, selection_start, selection_end, path_end)) =
+            read_project_identifier_path_after(source, cursor)
+        else {
+            cursor += character.len_utf8();
+            continue;
+        };
+        cursor = path_end.max(cursor + character.len_utf8());
+        let after_path = skip_local_whitespace(source, path_end);
+        if !source[after_path..].starts_with('(') || Keywords::is_keyword(&name) {
+            continue;
+        }
+        let range = range_for_offsets(source, selection_start, selection_end);
+        if occurrences.iter().any(|occurrence| {
+            occurrence.range == range && occurrence.role == ProjectSqlSymbolRole::Definition
+        }) {
+            continue;
+        }
+        if occurrences.iter().any(|occurrence| {
+            occurrence.range == range
+                && occurrence.role == ProjectSqlSymbolRole::Reference
+                && occurrence.kind.is_routine()
+        }) {
+            continue;
+        }
+        occurrences.retain(|occurrence| {
+            !(occurrence.range == range
+                && occurrence.role == ProjectSqlSymbolRole::Reference
+                && !occurrence.kind.is_routine())
+        });
+        occurrences.push(ProjectSqlSymbolOccurrence {
+            name,
+            normalized_name: SqlParser::normalize_identifier(&path).to_ascii_lowercase(),
+            kind: ProjectSqlSymbolKind::Function,
+            role: ProjectSqlSymbolRole::Reference,
+            range,
+        });
+    }
+}
+
+fn project_cte_scopes(source: &str, searchable: &str) -> Vec<(String, usize, usize)> {
+    let parser = SqlParser::new();
+    let mut scopes = Vec::new();
+    let mut statement_start = 0;
+    for statement_end in searchable
+        .match_indices(';')
+        .map(|(position, _)| position + 1)
+        .chain(std::iter::once(source.len()))
+    {
+        if statement_end <= statement_start {
+            continue;
+        }
+        for cte in parser.extract_common_table_expressions(&source[statement_start..statement_end])
+        {
+            scopes.push((
+                SqlParser::normalize_identifier(&cte).to_ascii_lowercase(),
+                statement_start,
+                statement_end,
+            ));
+        }
+        statement_start = statement_end;
+    }
+    scopes
+}
+
+fn project_update_is_relation_target(source_upper: &str, update_start: usize) -> bool {
+    let statement_start = source_upper[..update_start]
+        .rfind(';')
+        .map_or(0, |position| position + 1);
+    let prefix = source_upper[statement_start..update_start].trim();
+    prefix.is_empty()
+        || (prefix.starts_with("WITH") && !prefix.contains("ON DUPLICATE KEY"))
+        || prefix.ends_with("EXPLAIN")
+        || prefix.ends_with("EXPLAIN ANALYZE")
 }
 
 async fn document_diagnostics(
@@ -3239,13 +3964,47 @@ fn expand_select_star_action(
 }
 
 #[allow(deprecated)]
-fn document_symbols(text: &str, schema: Option<&Schema>) -> Vec<DocumentSymbol> {
+fn document_symbols(
+    text: &str,
+    schema: Option<&Schema>,
+    project_occurrences: &[ProjectSqlSymbolOccurrence],
+) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
     let mut seen = HashSet::new();
+    for occurrence in project_occurrences
+        .iter()
+        .filter(|occurrence| occurrence.role == ProjectSqlSymbolRole::Definition)
+    {
+        let category = if occurrence.kind.is_routine() {
+            "routine"
+        } else {
+            "relation"
+        };
+        if seen.insert((category, occurrence.name.to_ascii_lowercase())) {
+            symbols.push(DocumentSymbol {
+                name: occurrence.name.clone(),
+                detail: Some(occurrence.kind.detail().to_string()),
+                kind: occurrence.kind.symbol_kind(),
+                tags: None,
+                deprecated: None,
+                range: occurrence.range,
+                selection_range: occurrence.range,
+                children: None,
+            });
+        }
+    }
     if let Some(schema) = schema {
         for table in &schema.tables {
-            if let Some(range) = range_for_identifier_occurrence(text, &table.name) {
-                if seen.insert(("table", table.name.to_ascii_lowercase())) {
+            let range = project_occurrences
+                .iter()
+                .find(|occurrence| {
+                    !occurrence.kind.is_routine()
+                        && occurrence.name.eq_ignore_ascii_case(&table.name)
+                })
+                .map(|occurrence| occurrence.range)
+                .or_else(|| range_for_identifier_occurrence(text, &table.name));
+            if let Some(range) = range {
+                if seen.insert(("relation", table.name.to_ascii_lowercase())) {
                     symbols.push(DocumentSymbol {
                         name: table.name.clone(),
                         detail: Some(table.object_kind().to_string()),
@@ -3260,8 +4019,16 @@ fn document_symbols(text: &str, schema: Option<&Schema>) -> Vec<DocumentSymbol> 
             }
         }
         for function in &schema.functions {
-            if let Some(range) = range_for_identifier_occurrence(text, &function.name) {
-                if seen.insert(("function", function.name.to_ascii_lowercase())) {
+            let range = project_occurrences
+                .iter()
+                .find(|occurrence| {
+                    occurrence.kind.is_routine()
+                        && occurrence.name.eq_ignore_ascii_case(&function.name)
+                })
+                .map(|occurrence| occurrence.range)
+                .or_else(|| range_for_identifier_occurrence(text, &function.name));
+            if let Some(range) = range {
+                if seen.insert(("routine", function.name.to_ascii_lowercase())) {
                     symbols.push(DocumentSymbol {
                         name: function.name.clone(),
                         detail: Some(function.signature()),
@@ -4699,12 +5466,13 @@ mod tests {
         code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
         completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
         find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, position_to_byte_offset, qualify_identifier_actions,
-        range_for_offsets, rewrite_current_document_location_uri,
-        rewrite_current_document_location_uris, schema_for_table_column_at_position,
-        schema_id_for_file, schema_qualifier_at_position, sql_inspection_diagnostics,
-        table_alias_initials, CompletionPreferences, KeywordCase, TableAliasStyle,
-        LOCAL_RELATION_SCAN_MAX_BYTES,
+        infer_schema_id_from_tables, position_to_byte_offset, project_sql_symbol_occurrences,
+        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
+        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, TableAliasStyle,
+        LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -5815,11 +6583,7 @@ mod tests {
         let mysql_unqualify = qualify_identifier_actions(
             mysql_qualified,
             &uri,
-            range_for_offsets(
-                mysql_qualified,
-                mysql_qualified_end,
-                mysql_qualified_end,
-            ),
+            range_for_offsets(mysql_qualified, mysql_qualified_end, mysql_qualified_end),
             Some(&completion_schema_with_columns()),
             "mysql",
         );
@@ -6297,5 +7061,112 @@ mod tests {
         assert!(
             completion_statement_prefix(sql, crate::position::lsp_position_at_end(sql)).is_none()
         );
+    }
+
+    #[test]
+    fn project_sql_index_tracks_ddl_calls_and_physical_relation_references() {
+        let sql = r#"-- FROM ignored.orders
+CREATE VIEW reporting.active_orders AS
+SELECT * FROM app.orders;
+SELECT 'FROM secret.orders';
+WITH recent AS (SELECT * FROM app.orders)
+SELECT * FROM recent;
+CALL ops.refresh_orders();
+CREATE FUNCTION ops.compute_total() RETURNS integer AS $$ SELECT 1 $$ LANGUAGE SQL;
+SELECT ops.compute_total();
+SELECT * FROM recent;"#;
+        let occurrences = project_sql_symbol_occurrences(sql);
+
+        assert!(occurrences.iter().any(|occurrence| {
+            occurrence.role == ProjectSqlSymbolRole::Definition
+                && occurrence.kind == ProjectSqlSymbolKind::View
+                && occurrence.normalized_name == "reporting.active_orders"
+        }));
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|occurrence| {
+                    occurrence.role == ProjectSqlSymbolRole::Reference
+                        && occurrence.normalized_name == "app.orders"
+                })
+                .count(),
+            2
+        );
+        assert!(occurrences.iter().any(|occurrence| {
+            occurrence.kind == ProjectSqlSymbolKind::Procedure
+                && occurrence.normalized_name == "ops.refresh_orders"
+        }));
+        assert!(occurrences.iter().any(|occurrence| {
+            occurrence.kind == ProjectSqlSymbolKind::Function
+                && occurrence.role == ProjectSqlSymbolRole::Definition
+                && occurrence.normalized_name == "ops.compute_total"
+        }));
+        assert!(occurrences.iter().any(|occurrence| {
+            occurrence.kind == ProjectSqlSymbolKind::Function
+                && occurrence.role == ProjectSqlSymbolRole::Reference
+                && occurrence.normalized_name == "ops.compute_total"
+        }));
+        assert_eq!(
+            occurrences
+                .iter()
+                .filter(|occurrence| occurrence.normalized_name == "recent")
+                .count(),
+            1,
+            "a CTE name must become physical again outside its statement"
+        );
+        assert!(!occurrences.iter().any(|occurrence| {
+            matches!(
+                occurrence.normalized_name.as_str(),
+                "ignored.orders" | "secret.orders"
+            )
+        }));
+    }
+
+    #[test]
+    fn project_sql_index_preserves_quoted_names_and_utf16_selection_ranges() {
+        let sql = "SELECT 'emoji 馃榾', * FROM [AppDb]..[orders]";
+        let occurrence = project_sql_symbol_occurrences(sql)
+            .into_iter()
+            .find(|occurrence| occurrence.normalized_name == "appdb.dbo.orders")
+            .expect("SQL Server relation should be indexed");
+        let orders_start = sql.find("orders").unwrap();
+
+        assert_eq!(occurrence.name, "orders");
+        assert_eq!(
+            occurrence.range.start.character,
+            sql[..orders_start].encode_utf16().count() as u32
+        );
+        assert_eq!(
+            occurrence.range.end.character,
+            sql[..orders_start + "orders".len()].encode_utf16().count() as u32
+        );
+    }
+
+    #[test]
+    fn project_sql_symbol_matching_uses_qualified_suffixes_and_object_families() {
+        let relation = |normalized_name: &str, kind| ProjectSqlSymbolOccurrence {
+            name: normalized_name.split('.').next_back().unwrap().to_string(),
+            normalized_name: normalized_name.to_string(),
+            kind,
+            role: ProjectSqlSymbolRole::Reference,
+            range: Range::default(),
+        };
+        let qualified = relation("catalog.app.orders", ProjectSqlSymbolKind::Table);
+        let schema_qualified = relation("app.orders", ProjectSqlSymbolKind::View);
+        let unqualified = relation("orders", ProjectSqlSymbolKind::Table);
+        let routine = relation("orders", ProjectSqlSymbolKind::Procedure);
+
+        assert!(project_sql_symbols_match(&qualified, &schema_qualified));
+        assert!(project_sql_symbols_match(&qualified, &unqualified));
+        assert!(!project_sql_symbols_match(&qualified, &routine));
+    }
+
+    #[test]
+    fn project_sql_index_is_bounded_for_oversized_documents() {
+        let sql = format!(
+            "SELECT * FROM orders;{}",
+            " ".repeat(PROJECT_SQL_INDEX_MAX_BYTES)
+        );
+        assert!(project_sql_symbol_occurrences(&sql).is_empty());
     }
 }

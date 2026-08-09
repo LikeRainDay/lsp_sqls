@@ -794,6 +794,182 @@ fn semantic_rename_updates_open_documents_in_the_same_schema() {
 }
 
 #[test]
+fn project_sql_index_drives_definition_symbols_references_and_safe_rename() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+    let definition_uri = "oxide://project/project-a/migrations/001_views.postgres.sql";
+    let query_uri = "oxide://project/project-a/queries/active_orders.postgres.sql";
+    let schema_id = "67676767-6767-4767-8767-676767676767";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": null,
+                        "source_location": null
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (definition_uri): schema_id,
+                    (query_uri): schema_id
+                },
+                "fileDialects": {
+                    (definition_uri): "postgres",
+                    (query_uri): "postgres"
+                }
+            }
+        }),
+    );
+    let definition_sql = "CREATE VIEW reporting.active_orders AS SELECT * FROM app.orders;";
+    let query_sql =
+        "SELECT * FROM reporting.active_orders;\nSELECT 'active_orders';\n-- FROM active_orders";
+    lsp.open(definition_uri, "postgres", definition_sql);
+    lsp.open(query_uri, "postgres", query_sql);
+    let target = query_sql.find("active_orders").unwrap() + 2;
+    let position = json!({
+        "line": 0,
+        "character": utf16_column(query_sql, target)
+    });
+
+    let definition = lsp.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": query_uri },
+            "position": position.clone()
+        }),
+    );
+    assert_eq!(
+        definition.get("uri").and_then(Value::as_str),
+        Some(definition_uri),
+        "{definition}"
+    );
+
+    let references = lsp.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": query_uri },
+            "position": position.clone(),
+            "context": { "includeDeclaration": true }
+        }),
+    );
+    let reference_locations = references.as_array().expect("reference locations");
+    assert_eq!(reference_locations.len(), 2, "{references}");
+    assert!(reference_locations
+        .iter()
+        .any(|location| { location.get("uri").and_then(Value::as_str) == Some(definition_uri) }));
+    assert!(reference_locations
+        .iter()
+        .any(|location| { location.get("uri").and_then(Value::as_str) == Some(query_uri) }));
+
+    let usages_only = lsp.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": query_uri },
+            "position": position.clone(),
+            "context": { "includeDeclaration": false }
+        }),
+    );
+    assert_eq!(
+        usages_only.as_array().map(Vec::len),
+        Some(1),
+        "{usages_only}"
+    );
+    assert_eq!(
+        usages_only.pointer("/0/uri").and_then(Value::as_str),
+        Some(query_uri),
+        "{usages_only}"
+    );
+
+    let symbols = lsp.request("workspace/symbol", json!({ "query": "active_orders" }));
+    assert!(
+        symbols
+            .as_array()
+            .is_some_and(|items| items.iter().any(|symbol| {
+                symbol.get("name").and_then(Value::as_str) == Some("active_orders")
+                    && symbol.pointer("/location/uri").and_then(Value::as_str)
+                        == Some(definition_uri)
+            })),
+        "{symbols}"
+    );
+
+    let edit = lsp.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": query_uri },
+            "position": position,
+            "newName": "current_orders"
+        }),
+    );
+    for uri in [definition_uri, query_uri] {
+        let pointer = format!("/changes/{}", uri.replace('~', "~0").replace('/', "~1"));
+        assert_eq!(
+            edit.pointer(&pointer)
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1),
+            "{edit}"
+        );
+    }
+}
+
+#[test]
+fn cte_rename_remains_document_scoped_and_ignores_sql_noise() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+    let uri = "file:///workspace/cte-rename.postgres.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": { (uri): "postgres" }
+            }
+        }),
+    );
+    let sql = "WITH recent AS (SELECT 1 AS id) SELECT * FROM recent;\nSELECT 'recent'; -- recent";
+    lsp.open(uri, "postgres", sql);
+    let target = sql.find("FROM recent").unwrap() + "FROM ".len() + 2;
+    let position = json!({
+        "line": 0,
+        "character": utf16_column(sql, target)
+    });
+
+    let prepared = lsp.request(
+        "textDocument/prepareRename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position.clone()
+        }),
+    );
+    assert!(prepared.get("start").is_some(), "{prepared}");
+
+    let edit = lsp.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position,
+            "newName": "latest"
+        }),
+    );
+    let pointer = format!("/changes/{}", uri.replace('~', "~0").replace('/', "~1"));
+    assert_eq!(
+        edit.pointer(&pointer)
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(2),
+        "{edit}"
+    );
+}
+
+#[test]
 fn completion_models_cte_derived_and_temporary_relation_columns() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();
