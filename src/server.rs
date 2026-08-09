@@ -3081,60 +3081,50 @@ fn derived_tables_before_cursor(
     uri: &str,
 ) -> Vec<Table> {
     let mut tables = Vec::new();
-    for keyword in ["FROM", "JOIN"] {
-        let mut search = 0;
-        while let Some(relative) = upper[search..].find(keyword) {
-            let keyword_start = search + relative;
-            if !local_keyword_boundary(&upper, keyword_start, keyword) {
-                search = keyword_start + keyword.len();
-                continue;
-            }
-            let opening = skip_local_whitespace(source, keyword_start + keyword.len());
-            if !source[opening..].starts_with('(') {
-                search = opening;
-                continue;
-            }
-            let Some(closing) = matching_parenthesis_in_searchable(upper, opening) else {
-                search = opening + 1;
-                continue;
-            };
-            let mut alias_start = skip_local_whitespace(source, closing + 1);
-            if upper[alias_start..].starts_with("AS")
-                && local_keyword_boundary(&upper, alias_start, "AS")
-            {
-                alias_start = skip_local_whitespace(source, alias_start + "AS".len());
-            }
-            let Some((alias, alias_offset, alias_end)) =
-                read_local_identifier_after(source, alias_start)
-            else {
-                search = closing + 1;
-                continue;
-            };
-            if Keywords::is_keyword(&alias) {
-                search = closing + 1;
-                continue;
-            }
-            let body = &source[opening + 1..closing];
-            if !body.to_ascii_uppercase().contains("SELECT") {
-                search = alias_end;
-                continue;
-            }
-            let source_line = source[..alias_offset].matches('\n').count() as u32 + 1;
-            let columns = merge_local_column_aliases(
-                infer_query_output_columns(body, schema, uri, source_line),
-                correlation_column_names_after(source, upper, alias_end).unwrap_or_default(),
-                uri,
-                source_line,
-            );
-            tables.push(local_relation_table(
-                alias,
-                "DERIVED TABLE",
-                columns,
-                uri,
-                source_line,
-            ));
-            search = alias_end;
+    for source_start in local_relation_source_starts(upper) {
+        let mut opening = skip_local_whitespace(source, source_start);
+        let after_lateral = skip_optional_keyword_sequence(source, opening, &["LATERAL"]);
+        if after_lateral != opening {
+            opening = after_lateral;
         }
+        if !source[opening..].starts_with('(') {
+            continue;
+        }
+        let Some(closing) = matching_parenthesis_in_searchable(upper, opening) else {
+            continue;
+        };
+        let mut alias_start = skip_local_whitespace(source, closing + 1);
+        if upper[alias_start..].starts_with("AS")
+            && local_keyword_boundary(upper, alias_start, "AS")
+        {
+            alias_start = skip_local_whitespace(source, alias_start + "AS".len());
+        }
+        let Some((alias, alias_offset, alias_end)) =
+            read_local_identifier_after(source, alias_start)
+        else {
+            continue;
+        };
+        if Keywords::is_keyword(&alias) {
+            continue;
+        }
+        let body = &source[opening + 1..closing];
+        if !upper[opening + 1..closing].contains("SELECT") {
+            continue;
+        }
+        let source_line = source[..alias_offset].matches('\n').count() as u32 + 1;
+        let columns = merge_local_column_aliases(
+            infer_query_output_columns(body, schema, uri, source_line),
+            correlation_column_names_after(source, upper, alias_end).unwrap_or_default(),
+            uri,
+            source_line,
+        );
+        tables.push(local_relation_table(
+            alias,
+            "DERIVED TABLE",
+            columns,
+            uri,
+            source_line,
+        ));
     }
     tables
 }
@@ -3463,7 +3453,7 @@ fn local_relation_source_starts(source_upper: &str) -> Vec<usize> {
         "INTERSECT",
     ];
     let mut starts = Vec::new();
-    for keyword in ["FROM", "JOIN"] {
+    for keyword in ["FROM", "JOIN", "APPLY"] {
         let mut search = 0;
         while let Some(relative) = source_upper[search..].find(keyword) {
             let position = search + relative;
@@ -4277,6 +4267,24 @@ mod tests {
                 "u",
                 vec!["user_id", "display_name"],
                 "DERIVED TABLE",
+            ),
+            (
+                "SELECT * FROM users u, LATERAL (SELECT u.id AS user_id) s WHERE s.",
+                "s",
+                vec!["user_id"],
+                "DERIVED TABLE",
+            ),
+            (
+                "SELECT * FROM users u CROSS APPLY (SELECT u.id AS user_id) s WHERE s.",
+                "s",
+                vec!["user_id"],
+                "DERIVED TABLE",
+            ),
+            (
+                "SELECT * FROM users u, LATERAL generate_series(1, 3) g(value), users o WHERE g.",
+                "generate_series",
+                vec!["value"],
+                "TABLE FUNCTION",
             ),
         ];
 

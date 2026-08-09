@@ -268,6 +268,31 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
         "outer alias member completion should not use same-named subquery aliases"
     );
 
+    let correlated_outer_alias_sql =
+        "SELECT * FROM users outer_user WHERE EXISTS (SELECT 1 FROM orders inner_order WHERE outer_user.";
+    let correlated_outer_alias_items = dialect
+        .completion(
+            correlated_outer_alias_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: correlated_outer_alias_sql.len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+    assert!(
+        correlated_outer_alias_items
+            .iter()
+            .any(|item| item.label == "name"),
+        "qualified correlated references should resolve the requested outer alias"
+    );
+    assert!(
+        !correlated_outer_alias_items
+            .iter()
+            .any(|item| item.label == "order_id"),
+        "outer correlated alias completion must not leak inner relation columns"
+    );
+
     let subquery_sql = "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE ";
     let subquery_items = dialect
         .completion(

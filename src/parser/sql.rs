@@ -4613,6 +4613,23 @@ impl SqlParser {
             index = next_index;
         }
 
+        // LATERAL is contextual: SQL Server can have a real table named
+        // `lateral`, while PostgreSQL uses it as a modifier only before a
+        // subquery or table function.
+        if let Some(after_lateral) = Self::consume_word(source, index, "LATERAL") {
+            let candidate = Self::skip_whitespace(source, after_lateral);
+            let is_lateral_source = source[candidate..].starts_with('(')
+                || Self::read_identifier_path(source, candidate).is_some_and(
+                    |(_, after_reference)| {
+                        let after_reference = Self::skip_whitespace(source, after_reference);
+                        source[after_reference..].starts_with('(')
+                    },
+                );
+            if is_lateral_source {
+                index = candidate;
+            }
+        }
+
         let after_if = Self::consume_word(source, index, "IF");
         if let Some(after_if) = after_if {
             let after_not = Self::consume_word(source, after_if, "NOT").unwrap_or(after_if);
@@ -4934,7 +4951,39 @@ impl SqlParser {
         position: Position,
     ) -> HashMap<String, String> {
         let scoped_source = Self::completion_scope_source(source, position);
-        Self::extract_aliases_from_source(&scoped_source)
+        let mut aliases = Self::extract_aliases_from_source(&scoped_source);
+        let Some(qualifier) = Self::column_qualifier_before_position(source, position)
+            .map(|value| Self::normalize_identifier(&value))
+        else {
+            return aliases;
+        };
+        if aliases.contains_key(&qualifier) {
+            return aliases;
+        }
+
+        // A qualified reference inside a correlated subquery may target an
+        // alias from an enclosing SELECT. Import only the requested alias;
+        // unqualified completion must remain isolated to the inner query.
+        let cursor_offset = Self::byte_offset_for_position(source, position);
+        let searchable_prefix = Self::mask_sql_noise(
+            source
+                .get(..cursor_offset.min(source.len()))
+                .unwrap_or(source),
+        );
+        let (_, mut scope_open) = Self::innermost_query_scope_start(&searchable_prefix);
+        while let Some(open) = scope_open {
+            let outer_position = crate::position::byte_position_at_end(&source[..open]);
+            let outer_scope = Self::completion_scope_source(source, outer_position);
+            let outer_aliases = Self::extract_aliases_from_source(&outer_scope);
+            if let Some(reference) = outer_aliases.get(&qualifier) {
+                aliases.insert(qualifier.clone(), reference.clone());
+                break;
+            }
+            let (_, next_scope_open) =
+                Self::innermost_query_scope_start(&searchable_prefix[..open]);
+            scope_open = next_scope_open;
+        }
+        aliases
     }
 
     fn extract_aliases_from_source(source: &str) -> HashMap<String, String> {
@@ -4943,7 +4992,7 @@ impl SqlParser {
         let source_upper = searchable_source.to_ascii_uppercase();
 
         // Pattern: FROM/JOIN/UPDATE table_name alias
-        let keywords = ["FROM", "JOIN", "UPDATE"];
+        let keywords = ["FROM", "JOIN", "APPLY", "UPDATE"];
 
         for keyword in keywords {
             let mut search_pos = 0;
@@ -5021,7 +5070,7 @@ impl SqlParser {
         let source_upper = searchable_source.to_ascii_uppercase();
         let cte_names = Self::extract_cte_names(source, &searchable_source, &source_upper);
 
-        let keywords = ["FROM", "JOIN", "UPDATE", "INTO", "TABLE", "VIEW"];
+        let keywords = ["FROM", "JOIN", "APPLY", "UPDATE", "INTO", "TABLE", "VIEW"];
 
         for keyword in keywords {
             let mut search_pos = 0;
@@ -6656,6 +6705,68 @@ mod tests {
                 vec!["generate_series".to_string()]
             );
         }
+    }
+
+    #[test]
+    fn extracts_lateral_and_apply_row_sources_without_reserving_lateral_as_a_table_name() {
+        let cases = [
+            (
+                "SELECT * FROM users u, LATERAL generate_series(1, 3) g(value), orders o WHERE o.id = u.id",
+                vec!["users", "generate_series", "orders"],
+                vec![("u", "users"), ("g", "generate_series"), ("o", "orders")],
+            ),
+            (
+                "SELECT * FROM users u CROSS APPLY json_each(u.payload) j WHERE j.value IS NOT NULL",
+                vec!["users", "json_each"],
+                vec![("u", "users"), ("j", "json_each")],
+            ),
+            (
+                "SELECT * FROM lateral l WHERE l.id = 1",
+                vec!["lateral"],
+                vec![("l", "lateral")],
+            ),
+        ];
+
+        for (sql, expected_references, expected_aliases) in cases {
+            let mut parser = SqlParser::new();
+            let result = parser.parse(sql);
+            let tree = result.tree.as_ref().expect("SQL should parse");
+            let aliases = parser.extract_aliases(tree, sql);
+
+            assert_eq!(
+                parser.extract_referenced_tables(tree, sql),
+                expected_references
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            );
+            for (alias, reference) in expected_aliases {
+                assert_eq!(aliases.get(alias).map(String::as_str), Some(reference));
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_only_the_requested_outer_alias_inside_a_correlated_subquery() {
+        let sql = "SELECT * FROM app.users outer_user WHERE EXISTS (SELECT 1 FROM app.orders inner_order WHERE outer_user.)";
+        let mut parser = SqlParser::new();
+        let result = parser.parse(sql);
+        let tree = result.tree.as_ref().expect("SQL should parse");
+        let cursor_position = position_at_end(sql.trim_end_matches(')'));
+        let aliases = parser.extract_aliases_at_position(tree, sql, cursor_position);
+
+        assert_eq!(
+            aliases.get("outer_user").map(String::as_str),
+            Some("app.users")
+        );
+        assert_eq!(
+            aliases.get("inner_order").map(String::as_str),
+            Some("app.orders")
+        );
+        assert_eq!(
+            parser.extract_referenced_tables_at_position(tree, sql, cursor_position),
+            vec!["app.orders".to_string()]
+        );
     }
 
     #[test]
