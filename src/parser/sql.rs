@@ -979,11 +979,17 @@ impl SqlParser {
     }
 
     fn byte_offset_for_position(source: &str, position: Position) -> usize {
-        let byte_position = Self::lsp_position_to_byte_position(source, position);
+        // Dialect entry points convert LSP UTF-16 positions to tree-sitter byte
+        // columns exactly once. Parser context helpers must not reinterpret the
+        // byte column as UTF-16, especially after emoji or non-ASCII literals.
         let mut line_start = 0usize;
         for (line_index, line) in source.split_inclusive('\n').enumerate() {
-            if line_index == byte_position.line as usize {
-                return (line_start + byte_position.character as usize).min(source.len());
+            if line_index == position.line as usize {
+                let mut offset = (line_start + position.character as usize).min(source.len());
+                while offset > line_start && !source.is_char_boundary(offset) {
+                    offset -= 1;
+                }
+                return offset;
             }
             line_start += line.len();
         }

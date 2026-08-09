@@ -826,7 +826,7 @@ fn add_insert_all_columns_completion(
     let references = parser.extract_referenced_tables_at_position(
         tree,
         statement,
-        lsp_position_at_end(statement),
+        SqlParser::lsp_position_to_byte_position(statement, lsp_position_at_end(statement)),
     );
     let Some(reference) = references.last() else {
         return;
@@ -2824,6 +2824,8 @@ fn selection_range_for_position(text: &str, position: Position, dialect: &str) -
     }
 }
 
+const LOCAL_RELATION_SCAN_MAX_BYTES: usize = 512 * 1024;
+
 fn augment_schema_with_local_relations(
     mut schema: Schema,
     text: &str,
@@ -2832,9 +2834,29 @@ fn augment_schema_with_local_relations(
 ) -> Schema {
     let cursor = position_to_byte_offset(text, position).min(text.len());
     let visible = &text[..cursor];
-    let mut local_relations = temporary_tables_before_cursor(visible, &schema, uri);
-    local_relations.extend(cte_tables_before_cursor(visible, &schema, uri));
-    local_relations.extend(derived_tables_before_cursor(visible, &schema, uri));
+    // Completion runs on every keystroke. Keep local-relation discovery
+    // bounded rather than repeatedly scanning an arbitrarily large console.
+    if visible.len() > LOCAL_RELATION_SCAN_MAX_BYTES {
+        return schema;
+    }
+    // Reuse one length-preserving searchable copy. Besides avoiding three
+    // uppercase allocations, masking prevents WITH/FROM/JOIN/CREATE tokens in
+    // comments, literals and quoted identifiers from becoming fake relations.
+    let searchable_upper = SqlParser::mask_sql_noise(visible).to_ascii_uppercase();
+    let mut local_relations =
+        temporary_tables_before_cursor(visible, &searchable_upper, &schema, uri);
+    local_relations.extend(cte_tables_before_cursor(
+        visible,
+        &searchable_upper,
+        &schema,
+        uri,
+    ));
+    local_relations.extend(derived_tables_before_cursor(
+        visible,
+        &searchable_upper,
+        &schema,
+        uri,
+    ));
 
     for table in local_relations.into_iter().rev() {
         schema
@@ -2845,8 +2867,12 @@ fn augment_schema_with_local_relations(
     schema
 }
 
-fn temporary_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
-    let upper = source.to_ascii_uppercase();
+fn temporary_tables_before_cursor(
+    source: &str,
+    upper: &str,
+    schema: &Schema,
+    uri: &str,
+) -> Vec<Table> {
     let mut tables = HashMap::<String, (usize, Table)>::new();
     for keyword in ["CREATE TEMP TABLE", "CREATE TEMPORARY TABLE"] {
         let mut search = 0;
@@ -2957,8 +2983,7 @@ fn parse_temporary_column(definition: &str, uri: &str, line: u32) -> Option<Colu
     })
 }
 
-fn cte_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
-    let upper = source.to_ascii_uppercase();
+fn cte_tables_before_cursor(source: &str, upper: &str, schema: &Schema, uri: &str) -> Vec<Table> {
     let mut tables = Vec::new();
     let mut search = 0;
     while let Some(relative) = upper[search..].find("WITH") {
@@ -3032,8 +3057,12 @@ fn cte_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Tab
     tables
 }
 
-fn derived_tables_before_cursor(source: &str, schema: &Schema, uri: &str) -> Vec<Table> {
-    let upper = source.to_ascii_uppercase();
+fn derived_tables_before_cursor(
+    source: &str,
+    upper: &str,
+    schema: &Schema,
+    uri: &str,
+) -> Vec<Table> {
     let mut tables = Vec::new();
     for keyword in ["FROM", "JOIN"] {
         let mut search = 0;
@@ -3147,7 +3176,7 @@ fn infer_query_output_columns(
 }
 
 fn select_expression_output_name(expression: &str) -> Option<String> {
-    let upper = expression.to_ascii_uppercase();
+    let upper = SqlParser::mask_sql_noise(expression).to_ascii_uppercase();
     if let Some(as_offset) = upper.rfind(" AS ") {
         return read_local_identifier_after(expression, as_offset + " AS ".len())
             .map(|(name, _, _)| name);
@@ -3267,19 +3296,9 @@ fn matching_parenthesis(source: &str, opening: usize) -> Option<usize> {
     if !source[opening..].starts_with('(') {
         return None;
     }
+    let searchable = SqlParser::mask_sql_noise(source);
     let mut nesting = 0u32;
-    let mut quote = None;
-    for (relative, character) in source[opening..].char_indices() {
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(character, '\'' | '"' | '`') {
-            quote = Some(character);
-            continue;
-        }
+    for (relative, character) in searchable[opening..].char_indices() {
         match character {
             '(' => nesting += 1,
             ')' => {
@@ -3295,22 +3314,12 @@ fn matching_parenthesis(source: &str, opening: usize) -> Option<usize> {
 }
 
 fn split_top_level_ranges(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let searchable = SqlParser::mask_sql_noise(source);
     let mut ranges = Vec::new();
     let mut segment_start = start;
     let mut nesting = 0u32;
-    let mut quote = None;
-    for (relative, character) in source[start..end].char_indices() {
+    for (relative, character) in searchable[start..end].char_indices() {
         let offset = start + relative;
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(character, '\'' | '"' | '`') {
-            quote = Some(character);
-            continue;
-        }
         match character {
             '(' | '[' | '{' => nesting += 1,
             ')' | ']' | '}' if nesting > 0 => nesting -= 1,
@@ -3326,21 +3335,10 @@ fn split_top_level_ranges(source: &str, start: usize, end: usize) -> Vec<(usize,
 }
 
 fn find_top_level_keyword(source: &str, start: usize, keyword: &str) -> Option<usize> {
-    let upper = source.to_ascii_uppercase();
+    let upper = SqlParser::mask_sql_noise(source).to_ascii_uppercase();
     let mut nesting = 0u32;
-    let mut quote = None;
-    for (relative, character) in source[start..].char_indices() {
+    for (relative, character) in upper[start..].char_indices() {
         let offset = start + relative;
-        if let Some(active_quote) = quote {
-            if character == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        if matches!(character, '\'' | '"' | '`') {
-            quote = Some(character);
-            continue;
-        }
         match character {
             '(' | '[' | '{' => nesting += 1,
             ')' | ']' | '}' if nesting > 0 => nesting -= 1,
@@ -3828,15 +3826,17 @@ mod tests {
     use super::{
         add_insert_all_columns_completion, apply_completed_sql_context_completion_edits,
         apply_completion_preferences, apply_qualified_identifier_completion_edits,
-        calculate_schema_match_score, completed_sql_context_keyword_at_position,
-        completion_statement_prefix, expand_select_star_action, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, position_to_byte_offset, range_for_offsets,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
-        TableAliasStyle,
+        augment_schema_with_local_relations, calculate_schema_match_score,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
+        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, position_to_byte_offset,
+        range_for_offsets, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, schema_for_table_column_at_position,
+        schema_id_for_file, schema_qualifier_at_position, sql_inspection_diagnostics,
+        table_alias_initials, CompletionPreferences, KeywordCase, TableAliasStyle,
+        LOCAL_RELATION_SCAN_MAX_BYTES,
     };
+    use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
     use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
     use dashmap::DashMap;
@@ -3877,6 +3877,151 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn semantic_test_schema() -> Schema {
+        Schema {
+            id: SchemaId::new(),
+            database: "app".to_string(),
+            server_version: None,
+            tables: vec![Table {
+                name: "users".to_string(),
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "bigint".to_string(),
+                        ..Default::default()
+                    },
+                    Column {
+                        name: "name".to_string(),
+                        data_type: "text".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            functions: Vec::new(),
+            source_uri: None,
+        }
+    }
+
+    #[test]
+    fn local_relation_augmentation_extracts_dbx_cte_and_derived_projection_shapes() {
+        let sql = "WITH recent_users(id, display_name) AS (\
+            SELECT id, concat(name, ',FROM') AS display_name FROM users\
+        ) SELECT * FROM recent_users ru JOIN (\
+            SELECT id, name AS user_name FROM users\
+        ) sq ON sq.id = ru.id WHERE sq.";
+        let augmented = augment_schema_with_local_relations(
+            semantic_test_schema(),
+            sql,
+            lsp_position_at_end(sql),
+            "oxide://query/semantic.postgres.sql",
+        );
+
+        let recent = augmented
+            .tables
+            .iter()
+            .find(|table| table.name == "recent_users")
+            .expect("CTE relation");
+        assert_eq!(
+            recent
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "display_name"]
+        );
+        assert_eq!(
+            recent.object_type.as_deref(),
+            Some("COMMON TABLE EXPRESSION")
+        );
+
+        let derived = augmented
+            .tables
+            .iter()
+            .find(|table| table.name == "sq")
+            .expect("derived relation");
+        assert_eq!(
+            derived
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "user_name"]
+        );
+        assert_eq!(derived.object_type.as_deref(), Some("DERIVED TABLE"));
+    }
+
+    #[test]
+    fn local_relation_scan_ignores_keywords_inside_comments_and_literals() {
+        let sql = "-- WITH ghost(id) AS (SELECT id FROM users)\n\
+            SELECT 'FROM (SELECT id FROM users) fake' AS note FROM users";
+        let augmented = augment_schema_with_local_relations(
+            semantic_test_schema(),
+            sql,
+            lsp_position_at_end(sql),
+            "oxide://query/noise.postgres.sql",
+        );
+
+        assert!(!augmented.tables.iter().any(|table| table.name == "ghost"));
+        assert!(!augmented.tables.iter().any(|table| table.name == "fake"));
+    }
+
+    #[test]
+    fn local_relation_scan_is_bounded_for_large_console_documents() {
+        let mut sql = " ".repeat(LOCAL_RELATION_SCAN_MAX_BYTES + 1);
+        sql.push_str("WITH recent(id) AS (SELECT id FROM users) SELECT * FROM recent");
+        let augmented = augment_schema_with_local_relations(
+            semantic_test_schema(),
+            &sql,
+            lsp_position_at_end(&sql),
+            "oxide://query/large.postgres.sql",
+        );
+
+        assert!(!augmented.tables.iter().any(|table| table.name == "recent"));
+    }
+
+    #[tokio::test]
+    async fn dbx_cte_column_scope_is_shared_by_native_and_compatibility_dialects() {
+        let sql = "WITH recent_users(id, display_name) AS (SELECT id, name FROM users) \
+                   SELECT * FROM recent_users ru WHERE ru.";
+        let position = lsp_position_at_end(sql);
+        let augmented = augment_schema_with_local_relations(
+            semantic_test_schema(),
+            sql,
+            position,
+            "oxide://query/cte.postgres.sql",
+        );
+        let registry = DialectRegistry::new();
+
+        for dialect_name in [
+            "postgres",
+            "mysql",
+            "sqlite",
+            "hive",
+            "clickhouse",
+            "oracle",
+            "sqlserver",
+            "duckdb",
+        ] {
+            let dialect = registry
+                .get_by_name(dialect_name)
+                .unwrap_or_else(|| panic!("registered dialect {dialect_name}"));
+            let items = dialect.completion(sql, position, Some(&augmented)).await;
+            let labels = items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                labels.contains(&"id") && labels.contains(&"display_name"),
+                "{dialect_name} should expose CTE projection columns: {labels:?}"
+            );
+            assert!(
+                !labels.contains(&"name"),
+                "{dialect_name} should not leak base-table columns into alias scope: {labels:?}"
+            );
+        }
     }
 
     #[test]
