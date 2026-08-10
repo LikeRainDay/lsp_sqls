@@ -589,6 +589,8 @@ impl SqlLspServer {
 
     async fn publish_diagnostics_for_open_documents(&self) {
         for (uri, text) in self.document_manager.entries() {
+            let revision = self.document_manager.revision(&uri);
+            let version = self.document_manager.version(&uri);
             let Ok(parsed_uri) = Url::parse(&uri) else {
                 tracing::warn!("Skipping diagnostics for invalid document URI: {}", uri);
                 continue;
@@ -597,11 +599,17 @@ impl SqlLspServer {
             if let Some(dialect) = self.get_dialect_for_file(&uri) {
                 let schema = self.get_schema_for_file(&uri);
                 let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
+                // A configuration refresh can race with didChange. Never
+                // label diagnostics computed from the old snapshot with the
+                // newer document version.
+                if self.document_manager.revision(&uri) != revision {
+                    continue;
+                }
                 self.client
                     .publish_diagnostics(
                         parsed_uri,
                         diagnostics,
-                        self.document_manager.version(&uri),
+                        version,
                     )
                     .await;
             }
