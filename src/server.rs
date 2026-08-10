@@ -1,7 +1,8 @@
 use crate::builtin_signatures::{
     builtin_function_catalog_is_available_for, builtin_function_is_known_for,
     builtin_signature_completion_catalog_for, builtin_signatures_for,
-    builtin_table_signature_completion_catalog_for, builtin_value_catalog_for, BuiltinSignature,
+    builtin_table_signature_completion_catalog_for, builtin_value_catalog_for,
+    builtin_window_function_catalog_is_available_for, BuiltinSignature,
 };
 use crate::dialect::Dialect;
 use crate::dialects::common::{apply_formatter_layout, LogicalOperatorLayout};
@@ -1469,6 +1470,91 @@ fn add_clickhouse_table_function_completions(
     }));
 }
 
+fn add_window_function_completions(
+    text: &str,
+    position: Position,
+    dialect: &str,
+    items: &mut Vec<CompletionItem>,
+) {
+    if !builtin_window_function_catalog_is_available_for(dialect) {
+        return;
+    }
+    let Some(prefix) = builtin_function_context(text, position) else {
+        return;
+    };
+    const WINDOW_FUNCTIONS: &[(&str, &[&str])] = &[
+        ("ROW_NUMBER", &[]),
+        ("RANK", &[]),
+        ("DENSE_RANK", &[]),
+        ("LAG", &["value"]),
+        ("LEAD", &["value"]),
+        ("FIRST_VALUE", &["value"]),
+        ("LAST_VALUE", &["value"]),
+        ("NTILE", &["buckets"]),
+    ];
+    let candidates = WINDOW_FUNCTIONS
+        .iter()
+        .filter(|(name, _)| prefix.is_empty() || name.to_ascii_lowercase().starts_with(&prefix))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return;
+    }
+    let candidate_names = candidates
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let live_names = items
+        .iter()
+        .filter(|item| completion_item_is_live_routine(item))
+        .map(|item| SqlParser::identifier_last_part(&item.label).to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    items.retain(|item| {
+        let name = SqlParser::identifier_last_part(&item.label).to_ascii_lowercase();
+        completion_item_is_live_routine(item)
+            || !matches!(
+                item.kind,
+                Some(CompletionItemKind::FUNCTION | CompletionItemKind::KEYWORD)
+            )
+            || !candidate_names.contains(&name)
+    });
+
+    items.extend(candidates.into_iter().filter_map(|(name, parameters)| {
+        if live_names.contains(&name.to_ascii_lowercase()) {
+            return None;
+        }
+        let mut placeholder = 1usize;
+        let arguments = parameters
+            .iter()
+            .map(|parameter| {
+                let argument = format!("${{{placeholder}:{parameter}}}");
+                placeholder += 1;
+                argument
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let partition = placeholder;
+        let order = placeholder + 1;
+        Some(CompletionItem {
+            label: (*name).to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("Window function with OVER clause".to_string()),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "Portable window-function block for the active `{dialect}` SQL profile. Edit or remove the partition expression as needed."
+                ),
+            })),
+            sort_text: Some(format!("1:window-function:{}", name.to_ascii_lowercase())),
+            filter_text: Some((*name).to_string()),
+            insert_text: Some(format!(
+                "{name}({arguments}) OVER (PARTITION BY ${{{partition}:column}} ORDER BY ${{{order}:column}})"
+            )),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+    }));
+}
+
 fn add_referenced_alias_completions(
     text: &str,
     position: Position,
@@ -2593,6 +2679,12 @@ impl LanguageServer for SqlLspServer {
                 completion_position,
                 &dialect_identity,
                 schema.as_ref(),
+                &mut items,
+            );
+            add_window_function_completions(
+                completion_text,
+                completion_position,
+                &dialect_identity,
                 &mut items,
             );
             add_clickhouse_table_function_completions(
@@ -7157,22 +7249,22 @@ mod tests {
         add_builtin_function_completions, add_clickhouse_table_function_completions,
         add_insert_all_columns_completion, add_insert_statement_snippets,
         add_join_condition_actions, add_referenced_alias_completions,
-        apply_completed_sql_context_completion_edits, apply_completion_preferences,
-        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
-        calculate_schema_match_score, client_supports_completion_documentation_resolve,
-        code_action_kind_available, code_action_kind_explicitly_requested,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        deduplicate_simple_completion_items, defer_completion_documentation,
-        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, insert_value_hints,
-        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
-        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
-        resolve_completion_documentation, rewrite_current_document_location_uri,
-        rewrite_current_document_location_uris, routine_call_at_position,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
-        CompletionResolveCache, FormattingPreferences, FromClauseLayout, KeywordCase,
-        LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        add_window_function_completions, apply_completed_sql_context_completion_edits,
+        apply_completion_preferences, apply_qualified_identifier_completion_edits,
+        augment_schema_with_local_relations, calculate_schema_match_score,
+        client_supports_completion_documentation_resolve, code_action_kind_available,
+        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, deduplicate_simple_completion_items,
+        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, insert_value_hints, live_overload_accepts_call,
+        position_to_byte_offset, project_sql_symbol_occurrences, project_sql_symbols_match,
+        qualify_identifier_actions, range_for_offsets, resolve_completion_documentation,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
+        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
+        CompletionPreferences, CompletionResolveCache, FormattingPreferences, FromClauseLayout,
+        KeywordCase, LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
         LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
@@ -7446,6 +7538,69 @@ mod tests {
             .expect("ClickHouse numbers table function");
         assert_eq!(numbers.kind, Some(CompletionItemKind::CLASS));
         assert_eq!(numbers.insert_text.as_deref(), Some("numbers(${1:count})"));
+    }
+
+    #[test]
+    fn dbx_window_function_blocks_are_expression_scoped_and_product_aware() {
+        let row_sql = "SELECT row_";
+        let mut postgres_items = Vec::new();
+        add_window_function_completions(
+            row_sql,
+            lsp_position_at_end(row_sql),
+            "postgres",
+            &mut postgres_items,
+        );
+        assert_eq!(
+            postgres_items
+                .iter()
+                .find(|item| item.label == "ROW_NUMBER")
+                .and_then(|item| item.insert_text.as_deref()),
+            Some("ROW_NUMBER() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})")
+        );
+
+        let lag_sql = "SELECT la";
+        let mut lag_items = Vec::new();
+        add_window_function_completions(
+            lag_sql,
+            lsp_position_at_end(lag_sql),
+            "mysql",
+            &mut lag_items,
+        );
+        assert_eq!(
+            lag_items
+                .iter()
+                .find(|item| item.label == "LAG")
+                .and_then(|item| item.insert_text.as_deref()),
+            Some("LAG(${1:value}) OVER (PARTITION BY ${2:column} ORDER BY ${3:column})")
+        );
+
+        let relation_sql = "SELECT * FROM row_";
+        let mut relation_items = Vec::new();
+        add_window_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "postgres",
+            &mut relation_items,
+        );
+        assert!(relation_items.is_empty());
+
+        let mut clickhouse_items = Vec::new();
+        add_window_function_completions(
+            row_sql,
+            lsp_position_at_end(row_sql),
+            "clickhouse",
+            &mut clickhouse_items,
+        );
+        assert!(clickhouse_items.is_empty());
+
+        let mut mongo_items = Vec::new();
+        add_window_function_completions(
+            row_sql,
+            lsp_position_at_end(row_sql),
+            "mongodb-json",
+            &mut mongo_items,
+        );
+        assert!(mongo_items.is_empty());
     }
 
     #[test]

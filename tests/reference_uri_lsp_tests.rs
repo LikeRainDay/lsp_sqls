@@ -1217,6 +1217,73 @@ fn manticore_and_cloudflare_d1_completion_keep_dbx_catalog_boundaries() {
 }
 
 #[test]
+fn portable_window_blocks_and_clickhouse_calls_keep_distinct_completion_shapes() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let postgres_uri = "file:///workspace/window.postgres.sql";
+    let clickhouse_uri = "file:///workspace/window.clickhouse.sql";
+    let relation_uri = "file:///workspace/window-relation.postgres.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (postgres_uri): "postgres",
+                    (clickhouse_uri): "clickhouse",
+                    (relation_uri): "postgres"
+                }
+            }
+        }),
+    );
+    let expression_sql = "SELECT row_";
+    let relation_sql = "SELECT * FROM row_";
+    lsp.open(postgres_uri, "sql", expression_sql);
+    lsp.open(clickhouse_uri, "sql", expression_sql);
+    lsp.open(relation_uri, "sql", relation_sql);
+
+    let completion_at = |lsp: &mut LspProcess, uri: &str, character: usize| {
+        lsp.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": character },
+                "context": { "triggerKind": 1 }
+            }),
+        )
+    };
+    let postgres = completion_at(&mut lsp, postgres_uri, expression_sql.len());
+    let clickhouse = completion_at(&mut lsp, clickhouse_uri, expression_sql.len());
+    let relation = completion_at(&mut lsp, relation_uri, relation_sql.len());
+    let find = |completion: &Value, label: &str| {
+        completion
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&postgres, "ROW_NUMBER")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("ROW_NUMBER() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})")
+    );
+    assert_eq!(
+        find(&clickhouse, "row_number")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("row_number()")
+    );
+    assert!(find(&relation, "ROW_NUMBER").is_none());
+}
+
+#[test]
 fn semantic_rename_updates_open_documents_in_the_same_schema() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();

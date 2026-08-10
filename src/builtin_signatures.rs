@@ -333,6 +333,9 @@ fn is_non_sql_dialect(dialect: &str) -> bool {
         dialect,
         "mongodb"
             | "mongo"
+            | "mongodb-json"
+            | "mongo-json"
+            | "json"
             | "redis"
             | "elasticsearch"
             | "elastic"
@@ -470,6 +473,11 @@ pub(crate) fn builtin_function_is_known_for(
 
 pub(crate) fn builtin_function_catalog_is_available_for(dialect: &str) -> bool {
     !is_non_sql_dialect(&dialect.to_ascii_lowercase())
+}
+
+pub(crate) fn builtin_window_function_catalog_is_available_for(dialect: &str) -> bool {
+    let normalized = dialect.to_ascii_lowercase();
+    !is_non_sql_dialect(&normalized) && !matches!(normalized.as_str(), "clickhouse" | "ch")
 }
 
 pub(crate) fn builtin_signatures_for(
