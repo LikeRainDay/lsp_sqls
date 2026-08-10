@@ -31,6 +31,9 @@ const BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS: usize = 100;
 const COMPLETION_RESOLVE_CACHE_MAX_ENTRIES: usize = 8_192;
 const COMPLETION_RESOLVE_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES: usize = 256 * 1024;
+const INLAY_HINT_STATEMENT_SCAN_BYTES: usize = 32 * 1024;
+const INLAY_HINT_REQUEST_MAX_BYTES: usize = 64 * 1024;
+const INLAY_HINT_MAX_ITEMS: usize = 500;
 const COMPLETION_RESOLVE_ID_FIELD: &str = "oxideSqlLspCompletionResolveId";
 const COMPLETION_RESOLVE_ORIGINAL_DATA_FIELD: &str = "originalData";
 
@@ -2966,7 +2969,11 @@ impl LanguageServer for SqlLspServer {
         let Some(schema) = self.get_schema_for_file(&uri) else {
             return Ok(Some(Vec::new()));
         };
-        Ok(Some(routine_parameter_hints(&text, params.range, &schema)))
+        let mut hints = insert_value_hints(&text, params.range, &schema);
+        hints.extend(routine_parameter_hints(&text, params.range, &schema));
+        hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
+        hints.truncate(INLAY_HINT_MAX_ITEMS);
+        Ok(Some(hints))
     }
 
     #[allow(deprecated)]
@@ -6251,6 +6258,422 @@ fn sql_identifier_tokens(text: &str) -> Vec<(String, usize, usize)> {
     tokens
 }
 
+fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHint> {
+    let absolute_range_start = position_to_byte_offset(text, range.start);
+    let absolute_range_end = position_to_byte_offset(text, range.end)
+        .max(absolute_range_start)
+        .min(absolute_range_start.saturating_add(INLAY_HINT_REQUEST_MAX_BYTES));
+    let provisional_window_start = floor_char_boundary(
+        text,
+        absolute_range_start.saturating_sub(INLAY_HINT_STATEMENT_SCAN_BYTES),
+    );
+    let window_start = if provisional_window_start == 0 {
+        0
+    } else {
+        text[provisional_window_start..absolute_range_start]
+            .find('\n')
+            .map_or(provisional_window_start, |offset| {
+                provisional_window_start + offset + 1
+            })
+    };
+    let window_end = ceil_char_boundary(
+        text,
+        absolute_range_end
+            .saturating_add(INLAY_HINT_STATEMENT_SCAN_BYTES)
+            .min(text.len()),
+    );
+    let text_window = &text[window_start..window_end];
+    let range_start = absolute_range_start - window_start;
+    let range_end = absolute_range_end - window_start;
+    let masked = SqlParser::mask_sql_noise(text_window);
+    let lower = masked.to_ascii_lowercase();
+    let scan_start = lower[..range_start]
+        .rfind(';')
+        .map_or(0, |offset| offset + 1);
+    let scan_end = lower[range_end..]
+        .find(';')
+        .map_or(text_window.len(), |offset| range_end + offset);
+    let mut labels = Vec::new();
+    let mut search_from = scan_start;
+
+    while search_from < scan_end && labels.len() < INLAY_HINT_MAX_ITEMS {
+        let Some(insert) = find_sql_keyword(&lower, "insert", search_from, scan_end) else {
+            break;
+        };
+        let statement_end = lower[insert..scan_end]
+            .find(';')
+            .map_or(scan_end, |offset| insert + offset);
+        let Some(into) = find_sql_keyword(&lower, "into", insert + "insert".len(), statement_end)
+        else {
+            search_from = insert + "insert".len();
+            continue;
+        };
+        let Some((table_reference, mut cursor)) =
+            read_insert_qualified_identifier(text_window, into + "into".len(), statement_end)
+        else {
+            search_from = into + "into".len();
+            continue;
+        };
+
+        cursor = skip_sql_whitespace(text_window, cursor, statement_end);
+        if sql_keyword_at(&lower, "with", cursor, statement_end) {
+            let after_with = skip_sql_whitespace(text_window, cursor + "with".len(), statement_end);
+            if lower[after_with..statement_end].starts_with('(') {
+                if let Some(close) = matching_sql_paren(&masked, after_with, statement_end) {
+                    cursor = skip_sql_whitespace(text_window, close + 1, statement_end);
+                }
+            }
+        }
+        cursor = skip_insert_target_alias(text_window, &lower, cursor, statement_end);
+
+        let (columns, values_search_from) = if lower[cursor..statement_end].starts_with('(') {
+            let Some(close) = matching_sql_paren(&masked, cursor, statement_end) else {
+                search_from = statement_end.max(insert + "insert".len());
+                continue;
+            };
+            (
+                Some(insert_column_names(text_window, &masked, cursor + 1, close)),
+                close + 1,
+            )
+        } else {
+            (None, cursor)
+        };
+        let Some(values) = find_sql_keyword(&lower, "values", values_search_from, statement_end)
+        else {
+            search_from = statement_end.max(insert + "insert".len());
+            continue;
+        };
+        if find_sql_keyword(&lower, "select", values_search_from, values).is_some() {
+            search_from = statement_end.max(insert + "insert".len());
+            continue;
+        }
+
+        let resolved_columns = columns.unwrap_or_else(|| {
+            schema
+                .tables
+                .iter()
+                .find(|table| schema_table_matches(schema, &table_reference, table))
+                .map(|table| {
+                    table
+                        .columns
+                        .iter()
+                        .filter(|column| {
+                            !column.auto_increment && !column.generated && !column.hidden
+                        })
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        if !resolved_columns.is_empty() {
+            append_insert_row_hints(
+                text_window,
+                &masked,
+                (values + "values".len(), statement_end),
+                (range_start, range_end),
+                &resolved_columns,
+                &mut labels,
+            );
+        }
+        search_from = statement_end.max(insert + "insert".len());
+    }
+
+    labels
+        .into_iter()
+        .map(|(offset, column)| InlayHint {
+            position: position_for_offset(text, window_start + offset),
+            label: InlayHintLabel::String(format!("{column}:")),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(
+                "Column matched from the INSERT target and value position.".to_string(),
+            )),
+            padding_left: None,
+            padding_right: Some(true),
+            data: None,
+        })
+        .collect()
+}
+
+fn append_insert_row_hints(
+    text: &str,
+    masked: &str,
+    statement: (usize, usize),
+    requested_range: (usize, usize),
+    columns: &[String],
+    hints: &mut Vec<(usize, String)>,
+) {
+    let (from, statement_end) = statement;
+    let (range_start, range_end) = requested_range;
+    let mut cursor = skip_sql_whitespace(text, from, statement_end);
+    while cursor < statement_end
+        && masked[cursor..statement_end].starts_with('(')
+        && hints.len() < INLAY_HINT_MAX_ITEMS
+    {
+        let Some((value_offsets, next)) =
+            insert_value_row_offsets(text, masked, cursor, statement_end)
+        else {
+            break;
+        };
+        for (offset, column) in value_offsets.into_iter().zip(columns.iter()) {
+            if offset < range_start || offset > range_end || hints.len() >= INLAY_HINT_MAX_ITEMS {
+                continue;
+            }
+            hints.push((offset, column.clone()));
+        }
+        cursor = skip_sql_whitespace(text, next, statement_end);
+        if !masked[cursor..statement_end].starts_with(',') {
+            break;
+        }
+        cursor = skip_sql_whitespace(text, cursor + 1, statement_end);
+    }
+}
+
+fn insert_value_row_offsets(
+    text: &str,
+    masked: &str,
+    open: usize,
+    end: usize,
+) -> Option<(Vec<usize>, usize)> {
+    let mut offsets = Vec::new();
+    let mut depth = 1usize;
+    let mut value_start = open + 1;
+    let mut cursor = open + 1;
+    while cursor < end {
+        let character = masked[cursor..].chars().next()?;
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 1 => {
+                if let Some(offset) = first_insert_value_offset(text, masked, value_start, cursor) {
+                    offsets.push(offset);
+                }
+                return Some((offsets, cursor + 1));
+            }
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 1 => {
+                if let Some(offset) = first_insert_value_offset(text, masked, value_start, cursor) {
+                    offsets.push(offset);
+                }
+                value_start = cursor + 1;
+            }
+            ';' if depth == 1 => return None,
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    None
+}
+
+fn first_insert_value_offset(text: &str, masked: &str, from: usize, to: usize) -> Option<usize> {
+    let mut cursor = from;
+    while cursor < to {
+        let raw = text[cursor..].chars().next()?;
+        let searchable = masked[cursor..].chars().next()?;
+        if !searchable.is_whitespace() || matches!(raw, '\'' | '"' | '`' | '[' | '$') {
+            return Some(cursor);
+        }
+        cursor += raw.len_utf8();
+    }
+    None
+}
+
+fn insert_column_names(text: &str, masked: &str, from: usize, to: usize) -> Vec<String> {
+    let mut columns = Vec::new();
+    let mut start = from;
+    let mut depth = 0usize;
+    let mut cursor = from;
+    while cursor <= to {
+        let character = if cursor == to {
+            ','
+        } else {
+            masked[cursor..].chars().next().unwrap_or(',')
+        };
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let Some(column) = normalize_insert_identifier(&text[start..cursor]) else {
+                    return Vec::new();
+                };
+                columns.push(column);
+                start = cursor + 1;
+            }
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    columns
+}
+
+fn normalize_insert_identifier(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        return Some(trimmed[1..trimmed.len() - 1].replace("]]", "]"));
+    }
+    for quote in ['"', '`'] {
+        if trimmed.starts_with(quote) && trimmed.ends_with(quote) {
+            return Some(
+                trimmed[quote.len_utf8()..trimmed.len() - quote.len_utf8()]
+                    .replace(&format!("{quote}{quote}"), &quote.to_string()),
+            );
+        }
+    }
+    trimmed
+        .chars()
+        .all(|character| character == '_' || character == '$' || character.is_alphanumeric())
+        .then(|| trimmed.to_string())
+}
+
+fn skip_insert_target_alias(text: &str, lower: &str, from: usize, end: usize) -> usize {
+    let cursor = skip_sql_whitespace(text, from, end);
+    if sql_keyword_at(lower, "as", cursor, end) {
+        return read_insert_identifier_part(text, cursor + "as".len(), end)
+            .map_or(cursor, |(_, next)| skip_sql_whitespace(text, next, end));
+    }
+    if lower[cursor..end].starts_with('(')
+        || ["values", "select", "default", "overriding"]
+            .iter()
+            .any(|keyword| sql_keyword_at(lower, keyword, cursor, end))
+    {
+        return cursor;
+    }
+    read_insert_identifier_part(text, cursor, end)
+        .map_or(cursor, |(_, next)| skip_sql_whitespace(text, next, end))
+}
+
+fn read_insert_qualified_identifier(
+    text: &str,
+    from: usize,
+    end: usize,
+) -> Option<(String, usize)> {
+    let (first, mut cursor) = read_insert_identifier_part(text, from, end)?;
+    let mut parts = vec![first];
+    loop {
+        let dot = skip_sql_whitespace(text, cursor, end);
+        if !text[dot..end].starts_with('.') {
+            break;
+        }
+        let after_dot = skip_sql_whitespace(text, dot + 1, end);
+        if text[after_dot..end].starts_with('.') {
+            parts.push(String::new());
+            cursor = after_dot;
+            continue;
+        }
+        let (part, next) = read_insert_identifier_part(text, after_dot, end)?;
+        parts.push(part);
+        cursor = next;
+    }
+    Some((parts.join("."), cursor))
+}
+
+fn read_insert_identifier_part(text: &str, from: usize, end: usize) -> Option<(String, usize)> {
+    let start = skip_sql_whitespace(text, from, end);
+    let opener = text[start..end].chars().next()?;
+    if matches!(opener, '"' | '`' | '[') {
+        let closer = if opener == '[' { ']' } else { opener };
+        let mut cursor = start + opener.len_utf8();
+        while cursor < end {
+            let character = text[cursor..].chars().next()?;
+            cursor += character.len_utf8();
+            if character != closer {
+                continue;
+            }
+            if text[cursor..end].starts_with(closer) {
+                cursor += closer.len_utf8();
+                continue;
+            }
+            return Some((text[start..cursor].to_string(), cursor));
+        }
+        return None;
+    }
+    if !(opener == '_' || opener == '$' || opener == '#' || opener.is_alphabetic()) {
+        return None;
+    }
+    let mut cursor = start + opener.len_utf8();
+    while cursor < end {
+        let character = text[cursor..].chars().next()?;
+        if !(character == '_'
+            || character == '$'
+            || character == '#'
+            || character.is_alphanumeric())
+        {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    Some((text[start..cursor].to_string(), cursor))
+}
+
+fn matching_sql_paren(masked: &str, open: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = open;
+    while cursor < end {
+        let character = masked[cursor..].chars().next()?;
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    None
+}
+
+fn find_sql_keyword(lower: &str, keyword: &str, from: usize, end: usize) -> Option<usize> {
+    let mut cursor = from;
+    while cursor < end {
+        let offset = lower[cursor..end].find(keyword)?;
+        let candidate = cursor + offset;
+        if sql_keyword_at(lower, keyword, candidate, end) {
+            return Some(candidate);
+        }
+        cursor = candidate + keyword.len();
+    }
+    None
+}
+
+fn sql_keyword_at(lower: &str, keyword: &str, start: usize, end: usize) -> bool {
+    let keyword_end = start.saturating_add(keyword.len());
+    keyword_end <= end
+        && lower[start..keyword_end].eq_ignore_ascii_case(keyword)
+        && lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_insert_identifier_character(character))
+        && lower[keyword_end..]
+            .chars()
+            .next()
+            .is_none_or(|character| !is_insert_identifier_character(character))
+}
+
+fn is_insert_identifier_character(character: char) -> bool {
+    character == '_' || character == '$' || character == '#' || character.is_alphanumeric()
+}
+
+fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset = offset.saturating_sub(1);
+    }
+    offset
+}
+
+fn ceil_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
 fn routine_parameter_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHint> {
     let range_start = position_to_byte_offset(text, range.start);
     let range_end = position_to_byte_offset(text, range.end);
@@ -6597,14 +7020,14 @@ mod tests {
         completion_statement_prefix, deduplicate_simple_completion_items,
         defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
         find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
-        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
-        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
-        rewrite_current_document_location_uris, routine_call_at_position,
-        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
-        CompletionResolveCache, FormattingPreferences, FromClauseLayout, KeywordCase,
-        LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        infer_schema_id_from_tables, insert_value_hints, live_overload_accepts_call,
+        position_to_byte_offset, project_sql_symbol_occurrences, project_sql_symbols_match,
+        qualify_identifier_actions, range_for_offsets, resolve_completion_documentation,
+        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
+        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
+        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
+        CompletionPreferences, CompletionResolveCache, FormattingPreferences, FromClauseLayout,
+        KeywordCase, LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
         LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
@@ -6619,8 +7042,8 @@ mod tests {
     use std::sync::Mutex;
     use tower_lsp::lsp_types::{
         CodeAction, CodeActionContext, CodeActionKind, CompletionItem, CompletionItemKind,
-        CompletionTextEdit, Documentation, InitializeParams, InsertTextFormat, Location, Position,
-        Range, TextEdit, Url,
+        CompletionTextEdit, Documentation, InitializeParams, InlayHintLabel, InsertTextFormat,
+        Location, Position, Range, TextEdit, Url,
     };
 
     #[test]
@@ -7799,6 +8222,112 @@ mod tests {
             functions: Vec::new(),
             source_uri: None,
         }
+    }
+
+    fn inlay_labels(sql: &str, schema: &Schema) -> Vec<String> {
+        insert_value_hints(
+            sql,
+            Range {
+                start: Position::new(0, 0),
+                end: lsp_position_at_end(sql),
+            },
+            schema,
+        )
+        .into_iter()
+        .filter_map(|hint| match hint.label {
+            InlayHintLabel::String(label) => Some(label),
+            InlayHintLabel::LabelParts(_) => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn insert_value_hints_resolve_implicit_columns_from_metadata() {
+        let sql = "INSERT INTO app.orders VALUES (1, 42, 9), (2, coalesce(7, 8), 10);";
+
+        assert_eq!(
+            inlay_labels(sql, &completion_schema_with_columns()),
+            vec![
+                "id:",
+                "customer_id:",
+                "total:",
+                "id:",
+                "customer_id:",
+                "total:"
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_keep_explicit_quoted_columns_and_skip_database_owned_implicit_columns() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].columns[0].auto_increment = true;
+        schema.tables[0].columns[2].generated = true;
+        schema.tables[0].columns.push(Column {
+            name: "system period".to_string(),
+            hidden: true,
+            ..Default::default()
+        });
+        let sql = concat!(
+            "INSERT INTO app.orders VALUES (42);\n",
+            "INSERT INTO [app].[orders] ([customer_id], \"display name\") ",
+            "VALUES (7, 'Ada'), (8, json_object('name', 'Lin'));"
+        );
+
+        assert_eq!(
+            inlay_labels(sql, &schema),
+            vec![
+                "customer_id:",
+                "customer_id:",
+                "display name:",
+                "customer_id:",
+                "display name:"
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_ignore_comments_strings_and_insert_select() {
+        let sql = concat!(
+            "-- INSERT INTO app.orders VALUES (1, 2, 3);\n",
+            "SELECT 'INSERT INTO app.orders VALUES (4, 5, 6)';\n",
+            "INSERT INTO app.orders (id, total) SELECT id, total FROM staging;"
+        );
+
+        assert!(inlay_labels(sql, &completion_schema_with_columns()).is_empty());
+    }
+
+    #[test]
+    fn insert_value_hints_match_sql_server_catalog_and_implicit_dbo() {
+        let mut schema = completion_schema_with_columns();
+        schema.catalog = Some("AppDb".to_string());
+        schema.database = "dbo".to_string();
+        let sql = "INSERT INTO [AppDb]..[orders] WITH (TABLOCK) VALUES (1, 2, 3);";
+
+        assert_eq!(
+            inlay_labels(sql, &schema),
+            vec!["id:", "customer_id:", "total:"]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_preserve_document_utf16_positions_from_a_bounded_window() {
+        let prefix = "SELECT 'emoji \u{1F680}';\n".repeat(4_000);
+        let statement = "INSERT INTO app.orders VALUES (1, 2, 3);";
+        let sql = format!("{prefix}{statement}");
+        let statement_start = prefix.len();
+        let value_start = sql[statement_start..].find('1').unwrap() + statement_start;
+        let hints = insert_value_hints(
+            &sql,
+            range_for_offsets(&sql, statement_start, sql.len()),
+            &completion_schema_with_columns(),
+        );
+
+        assert_eq!(hints.len(), 3);
+        assert_eq!(
+            hints[0].position,
+            range_for_offsets(&sql, value_start, value_start).start
+        );
     }
 
     #[test]
