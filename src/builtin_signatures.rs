@@ -188,6 +188,49 @@ const MANTICORE_SIGNATURES: &[(&str, &[&str])] = &[
     ("KNN_DIST", &[]),
 ];
 
+// IBM Db2 11.5 built-in function catalog. These stable scalar forms are kept
+// intentionally compact; live routine metadata still takes precedence.
+const DB2_SIGNATURES: &[(&str, &[&str])] = &[
+    ("ADD_DAYS", &["datetime", "days"]),
+    ("ADD_HOURS", &["datetime", "hours"]),
+    ("ADD_MINUTES", &["datetime", "minutes"]),
+    ("ADD_MONTHS", &["datetime", "months"]),
+    ("ADD_SECONDS", &["datetime", "seconds"]),
+    ("ADD_YEARS", &["datetime", "years"]),
+    ("DAYS", &["date"]),
+    ("MONTHS_BETWEEN", &["date1", "date2"]),
+    ("TIMESTAMP_FORMAT", &["string", "format"]),
+    ("VARCHAR_FORMAT", &["timestamp", "format"]),
+    ("GENERATE_UNIQUE", &[]),
+];
+
+// Dameng documents these date/time entries as functions (including the empty
+// parentheses), unlike Oracle and Db2 bare system values.
+const DAMENG_SIGNATURES: &[(&str, &[&str])] = &[
+    ("SYSDATE", &[]),
+    ("CURDATE", &[]),
+    ("CURTIME", &[]),
+    ("CURRENT_DATE", &[]),
+    ("CURRENT_TIME", &[]),
+    ("CURRENT_TIMESTAMP", &[]),
+    ("LOCALTIMESTAMP", &[]),
+    ("TO_CHAR", &["value", "format"]),
+    ("TO_DATE", &["string", "format"]),
+    ("DATEADD", &["datepart", "number", "date"]),
+    ("DATEDIFF", &["datepart", "startdate", "enddate"]),
+    ("DECODE", &["expression", "search", "result", "default"]),
+    (
+        "REGEXP_SUBSTR",
+        &[
+            "source",
+            "pattern",
+            "position",
+            "occurrence",
+            "match_parameter",
+        ],
+    ),
+];
+
 // DBX exposes these Oracle system values as expression completions without
 // call parentheses. Keep them separate from function signatures so accepting
 // SYSDATE never produces the invalid/needlessly transformed SYSDATE().
@@ -201,6 +244,30 @@ const ORACLE_SYSTEM_VALUES: &[&str] = &[
     "DBTIMEZONE",
     "USER",
     "UID",
+];
+
+// Db2 special registers are expressions, not routine calls. IBM documents
+// both the traditional spaced form and SQL-standard underscore aliases.
+const DB2_SPECIAL_REGISTERS: &[&str] = &[
+    "CURRENT DATE",
+    "CURRENT_DATE",
+    "CURRENT TIME",
+    "CURRENT_TIME",
+    "CURRENT TIMESTAMP",
+    "CURRENT_TIMESTAMP",
+    "CURRENT TIMEZONE",
+    "CURRENT_TIMEZONE",
+    "CURRENT USER",
+    "CURRENT_USER",
+    "CURRENT SCHEMA",
+    "CURRENT_SCHEMA",
+    "CURRENT SERVER",
+    "CURRENT_SERVER",
+    "SESSION_USER",
+    "SYSTEM_USER",
+    "USER",
+    "SYSDATE",
+    "LOCALTIMESTAMP",
 ];
 
 fn lookup(
@@ -303,6 +370,8 @@ fn dialect_signature_entries(
     dialect: &str,
 ) -> Option<&'static [(&'static str, &'static [&'static str])]> {
     match dialect {
+        "db2" => Some(DB2_SIGNATURES),
+        "dameng" => Some(DAMENG_SIGNATURES),
         "mysql" | "mariadb" => Some(MYSQL_SIGNATURES),
         "postgres" | "postgresql" | "pgsql" | "psql" => Some(POSTGRES_SIGNATURES),
         "sqlite" | "sqlite3" | "turso" | "cloudflare-d1" => Some(SQLITE_SIGNATURES),
@@ -352,6 +421,13 @@ pub(crate) fn builtin_signature_catalog_for(
 
 pub(crate) fn builtin_value_catalog_for(dialect: &str) -> Vec<BuiltinValue> {
     match dialect.to_ascii_lowercase().as_str() {
+        "db2" => DB2_SPECIAL_REGISTERS
+            .iter()
+            .map(|name| BuiltinValue {
+                name,
+                category: "Db2 special register",
+            })
+            .collect(),
         "oracle" | "oceanbase-oracle" => ORACLE_SYSTEM_VALUES
             .iter()
             .map(|name| BuiltinValue {
@@ -446,5 +522,27 @@ mod tests {
         assert_eq!(builtin_value_catalog_for("oceanbase-oracle"), values);
         assert!(builtin_value_catalog_for("postgres").is_empty());
         assert!(builtin_signatures_for("oracle", "SYSDATE", None).is_empty());
+    }
+
+    #[test]
+    fn db2_registers_and_dameng_functions_keep_distinct_call_styles() {
+        let db2_values = builtin_value_catalog_for("db2");
+        assert!(db2_values.iter().any(|value| value.name == "CURRENT DATE"));
+        assert!(db2_values.iter().any(|value| value.name == "SYSDATE"));
+        assert!(builtin_signatures_for("db2", "SYSDATE", None).is_empty());
+        assert_eq!(
+            builtin_signatures_for("db2", "ADD_DAYS", None)[0].parameter_groups[0],
+            ["datetime", "days"]
+        );
+
+        assert!(builtin_value_catalog_for("dameng").is_empty());
+        assert_eq!(
+            builtin_signatures_for("dameng", "SYSDATE", None)[0].parameter_groups[0],
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            builtin_signatures_for("dameng", "TO_DATE", None)[0].parameter_groups[0],
+            ["string", "format"]
+        );
     }
 }

@@ -38,6 +38,7 @@ pub const POSTGRES_COMPATIBILITY_ALIASES: &[&str] = &[
     "access",
     "cockroachdb",
     "dameng",
+    "db2",
     "exasol",
     "firebird",
     "gaussdb",

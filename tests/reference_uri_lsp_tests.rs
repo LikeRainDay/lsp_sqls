@@ -1092,6 +1092,65 @@ fn oracle_system_values_complete_without_function_parentheses() {
 }
 
 #[test]
+fn db2_and_dameng_completion_keep_product_specific_call_styles() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let db2_uri = "file:///workspace/register.db2.sql";
+    let dameng_uri = "file:///workspace/function.dameng.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (db2_uri): "db2",
+                    (dameng_uri): "dameng"
+                }
+            }
+        }),
+    );
+    let sql = "SELECT sys";
+    lsp.open(db2_uri, "sql", sql);
+    lsp.open(dameng_uri, "sql", sql);
+
+    let completion_at = |lsp: &mut LspProcess, uri: &str| {
+        lsp.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": sql.len() },
+                "context": { "triggerKind": 1 }
+            }),
+        )
+    };
+    let db2 = completion_at(&mut lsp, db2_uri);
+    let dameng = completion_at(&mut lsp, dameng_uri);
+    let find_sysdate = |completion: &Value| {
+        completion
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some("SYSDATE"))
+            })
+            .cloned()
+            .expect("SYSDATE completion")
+    };
+    let db2_sysdate = find_sysdate(&db2);
+    assert_eq!(db2_sysdate.get("kind").and_then(Value::as_u64), Some(12));
+    assert_eq!(
+        db2_sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE")
+    );
+    let dameng_sysdate = find_sysdate(&dameng);
+    assert_eq!(dameng_sysdate.get("kind").and_then(Value::as_u64), Some(3));
+    assert_eq!(
+        dameng_sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE()")
+    );
+}
+
+#[test]
 fn semantic_rename_updates_open_documents_in_the_same_schema() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();

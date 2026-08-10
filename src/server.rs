@@ -7326,6 +7326,57 @@ mod tests {
     }
 
     #[test]
+    fn db2_registers_and_dameng_functions_preserve_product_syntax() {
+        let sql = "SELECT sys";
+        let mut db2_items = Vec::new();
+        add_builtin_function_completions(
+            sql,
+            lsp_position_at_end(sql),
+            "db2",
+            None,
+            &mut db2_items,
+        );
+        let db2_sysdate = db2_items
+            .iter()
+            .find(|item| item.label == "SYSDATE")
+            .expect("Db2 SYSDATE special register");
+        assert_eq!(db2_sysdate.kind, Some(CompletionItemKind::VALUE));
+        assert_eq!(db2_sysdate.insert_text.as_deref(), Some("SYSDATE"));
+
+        let mut dameng_items = Vec::new();
+        add_builtin_function_completions(
+            sql,
+            lsp_position_at_end(sql),
+            "dameng",
+            None,
+            &mut dameng_items,
+        );
+        let dameng_sysdate = dameng_items
+            .iter()
+            .find(|item| item.label == "SYSDATE")
+            .expect("Dameng SYSDATE function");
+        assert_eq!(dameng_sysdate.kind, Some(CompletionItemKind::FUNCTION));
+        assert_eq!(dameng_sysdate.insert_text.as_deref(), Some("SYSDATE()"));
+
+        let add_sql = "SELECT add_";
+        let mut add_items = Vec::new();
+        add_builtin_function_completions(
+            add_sql,
+            lsp_position_at_end(add_sql),
+            "db2",
+            None,
+            &mut add_items,
+        );
+        assert_eq!(
+            add_items
+                .iter()
+                .find(|item| item.label == "ADD_DAYS")
+                .and_then(|item| item.insert_text.as_deref()),
+            Some("ADD_DAYS(${1:datetime}, ${2:days})")
+        );
+    }
+
+    #[test]
     fn signature_call_context_ignores_nested_sql_noise() {
         let sql = "SELECT calc(inner(1, 2), 'a,''b)', $$,)$$, /* , ) */ ";
         assert_eq!(
