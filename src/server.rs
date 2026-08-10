@@ -5183,16 +5183,66 @@ fn column_qualification_sources(
             is_aliased: false,
         });
     }
-    sources.sort_by(|left, right| left.qualifier_label.cmp(&right.qualifier_label));
-    sources.dedup_by(|left, right| {
+    sources.sort_by(|left, right| {
         left.qualifier_label
-            .eq_ignore_ascii_case(&right.qualifier_label)
+            .cmp(&right.qualifier_label)
+            .then_with(|| left.qualifier_sql.cmp(&right.qualifier_sql))
     });
-    sources
+
+    // An ordinary alias is case-insensitive, while a quoted alias remains a
+    // distinct SQL identifier. Do not collapse `u` and `"U"`: doing so would
+    // make a qualification action silently pick a different row source.
+    let mut unique_sources = Vec::with_capacity(sources.len());
+    for source in sources {
+        if unique_sources
+            .iter()
+            .any(|existing| qualification_sources_are_equivalent(existing, &source))
+        {
+            continue;
+        }
+        unique_sources.push(source);
+    }
+    unique_sources
 }
 
-fn source_matches_qualifier(source: &ColumnQualificationSource, qualifier: &str) -> bool {
+fn sql_identifier_is_quoted(value: &str) -> bool {
+    let value = value.trim();
+    matches!(
+        value.as_bytes(),
+        [b'"', .., b'"'] | [b'`', .., b'`'] | [b'[', .., b']']
+    )
+}
+
+fn qualification_sources_are_equivalent(
+    left: &ColumnQualificationSource,
+    right: &ColumnQualificationSource,
+) -> bool {
+    if left.is_aliased || right.is_aliased {
+        return left.is_aliased
+            && right.is_aliased
+            && if sql_identifier_is_quoted(&left.qualifier_sql)
+                || sql_identifier_is_quoted(&right.qualifier_sql)
+            {
+                left.qualifier_sql == right.qualifier_sql
+            } else {
+                left.qualifier_label
+                    .eq_ignore_ascii_case(&right.qualifier_label)
+            };
+    }
+
+    left.qualifier_label
+        .eq_ignore_ascii_case(&right.qualifier_label)
+}
+
+fn source_matches_qualifier(
+    source: &ColumnQualificationSource,
+    raw_qualifier: &str,
+    qualifier: &str,
+) -> bool {
     if source.is_aliased {
+        if sql_identifier_is_quoted(&source.qualifier_sql) {
+            return source.qualifier_sql == raw_qualifier;
+        }
         source.qualifier_label.eq_ignore_ascii_case(qualifier)
     } else {
         relation_name_matches(&source.relation, qualifier)
@@ -5415,7 +5465,9 @@ fn qualify_identifier_actions(
     if selection.normalized_parts.len() > 1 {
         let qualifier =
             selection.normalized_parts[..selection.normalized_parts.len() - 1].join(".");
-        if matching_sources.len() != 1 || !source_matches_qualifier(matching_sources[0], &qualifier)
+        let raw_qualifier = selection.raw_parts[..selection.raw_parts.len() - 1].join(".");
+        if matching_sources.len() != 1
+            || !source_matches_qualifier(matching_sources[0], &raw_qualifier, &qualifier)
         {
             return Vec::new();
         }
@@ -10177,6 +10229,50 @@ mod tests {
             code_action_replacement(&mysql_unqualify[0], &uri),
             "`total`"
         );
+    }
+
+    #[test]
+    fn qualify_identifier_actions_keep_quoted_aliases_distinct_from_ordinary_aliases() {
+        let uri = Url::parse("file:///query.sql").unwrap();
+        let schema = completion_schema_with_columns();
+
+        let collision_sql =
+            "SELECT id FROM app.orders u JOIN app.customers AS \"U\" ON \"U\".id = u.customer_id";
+        let collision_end = "SELECT id".len();
+        let replacements = qualify_identifier_actions(
+            collision_sql,
+            &uri,
+            range_for_offsets(collision_sql, collision_end, collision_end),
+            Some(&schema),
+            "postgres",
+        )
+        .iter()
+        .map(|action| code_action_replacement(action, &uri))
+        .collect::<Vec<_>>();
+        assert_eq!(replacements, vec!["\"U\".id", "u.id"]);
+
+        let wrong_quote_sql = "SELECT U.total FROM app.orders AS \"U\"";
+        let wrong_quote_end = "SELECT U.total".len();
+        assert!(qualify_identifier_actions(
+            wrong_quote_sql,
+            &uri,
+            range_for_offsets(wrong_quote_sql, wrong_quote_end, wrong_quote_end),
+            Some(&schema),
+            "postgres",
+        )
+        .is_empty());
+
+        let quoted_sql = "SELECT \"U\".total FROM app.orders AS \"U\"";
+        let quoted_end = "SELECT \"U\".total".len();
+        let actions = qualify_identifier_actions(
+            quoted_sql,
+            &uri,
+            range_for_offsets(quoted_sql, quoted_end, quoted_end),
+            Some(&schema),
+            "postgres",
+        );
+        assert_eq!(actions.len(), 1);
+        assert_eq!(code_action_replacement(&actions[0], &uri), "total");
     }
 
     #[test]
