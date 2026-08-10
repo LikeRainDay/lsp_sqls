@@ -278,7 +278,7 @@ pub(crate) fn order_direction_keywords(
 ) -> Vec<&'static str> {
     let text_before = text_before_position(sql, position);
     let text_upper = text_before.to_ascii_uppercase();
-    let statement_start = SqlParser::active_statement_start(&text_before);
+    let statement_start = SqlParser::active_statement_start(text_before);
     let statement_upper = &text_upper[statement_start..];
 
     let Some(order_position) = statement_upper.rfind("ORDER BY") else {
@@ -358,7 +358,7 @@ pub(crate) fn group_by_continuation_sort_prefix(keyword: &str) -> &'static str {
 pub(crate) fn select_continuation_keywords(sql: &str, position: Position) -> Vec<&'static str> {
     let text_before = text_before_position(sql, position);
     let text_upper = text_before.to_ascii_uppercase();
-    let statement_start = SqlParser::active_statement_start(&text_before);
+    let statement_start = SqlParser::active_statement_start(text_before);
     let statement_upper = &text_upper[statement_start..];
 
     let Some(select_position) = statement_upper.rfind("SELECT") else {
@@ -662,7 +662,7 @@ pub(crate) fn create_operator_item(operator: &str, sort_prefix: &str) -> Complet
     }
 }
 
-pub(crate) fn add_column_domain_value_items(
+pub(crate) fn add_column_value_items(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
     referenced_tables: &[String],
@@ -673,7 +673,8 @@ pub(crate) fn add_column_domain_value_items(
     let Some(column_name) = predicate_column_before_value(sql, position, prefix) else {
         return;
     };
-    let mut values = Vec::new();
+    let mut domain_value_sets = Vec::new();
+    let mut value_kinds = Vec::new();
     let tables = if referenced_tables.is_empty() {
         schema.tables.iter().collect::<Vec<_>>()
     } else {
@@ -691,28 +692,211 @@ pub(crate) fn add_column_domain_value_items(
         else {
             continue;
         };
-        values.extend(sql_type_domain_values(&column.data_type));
+        let mut domain_values = sql_type_domain_values(&column.data_type);
+        domain_values.sort();
+        domain_values.dedup();
+        domain_value_sets.push(domain_values);
+        value_kinds.push(sql_type_value_template_kind(&column.data_type));
     }
-    values.sort();
-    values.dedup();
 
     let normalized_prefix = prefix.trim_matches(['\'', '"']).to_ascii_lowercase();
-    for value in values.into_iter().take(64) {
-        if !normalized_prefix.is_empty()
-            && !value.to_ascii_lowercase().starts_with(&normalized_prefix)
-        {
-            continue;
+    add_null_value_item(items, &column_name, &normalized_prefix);
+    if let Some(values) = domain_value_sets
+        .first()
+        .filter(|values| !values.is_empty())
+        .filter(|values| {
+            domain_value_sets
+                .iter()
+                .all(|candidate| candidate == *values)
+        })
+    {
+        for value in values.iter().take(64) {
+            if !normalized_prefix.is_empty()
+                && !value.to_ascii_lowercase().starts_with(&normalized_prefix)
+            {
+                continue;
+            }
+            let quoted = format!("'{}'", value.replace('\'', "''"));
+            items.push(CompletionItem {
+                label: value.clone(),
+                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                detail: Some(format!("Domain value for {column_name}")),
+                sort_text: Some(completion_sort_text("0", value)),
+                filter_text: Some(value.clone()),
+                insert_text: Some(quoted),
+                ..CompletionItem::default()
+            });
         }
-        let quoted = format!("'{}'", value.replace('\'', "''"));
+    }
+
+    let Some(value_kind) = value_kinds.first().copied().flatten().filter(|kind| {
+        value_kinds
+            .iter()
+            .all(|candidate| candidate == &Some(*kind))
+    }) else {
+        return;
+    };
+    add_typed_value_template_items(items, &column_name, value_kind, &normalized_prefix);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SqlValueTemplateKind {
+    Boolean,
+    Date,
+    Json,
+    Numeric,
+    Text,
+    Time,
+    Timestamp,
+    Uuid,
+}
+
+fn sql_type_value_template_kind(data_type: &str) -> Option<SqlValueTemplateKind> {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized.split(['(', ' ', '[']).next().unwrap_or("");
+    if normalized.starts_with("enum(") || normalized.starts_with("set(") {
+        return None;
+    }
+    if matches!(base, "boolean" | "bool" | "bit") {
+        return Some(SqlValueTemplateKind::Boolean);
+    }
+    if matches!(
+        base,
+        "timestamp" | "timestamptz" | "datetime" | "datetime2" | "smalldatetime"
+    ) || normalized.starts_with("timestamp with")
+        || normalized.starts_with("timestamp without")
+    {
+        return Some(SqlValueTemplateKind::Timestamp);
+    }
+    if matches!(base, "date") {
+        return Some(SqlValueTemplateKind::Date);
+    }
+    if matches!(base, "time" | "timetz") || normalized.starts_with("time with") {
+        return Some(SqlValueTemplateKind::Time);
+    }
+    if matches!(base, "uuid" | "uniqueidentifier") {
+        return Some(SqlValueTemplateKind::Uuid);
+    }
+    if matches!(base, "json" | "jsonb") {
+        return Some(SqlValueTemplateKind::Json);
+    }
+    if matches!(
+        base,
+        "tinyint"
+            | "smallint"
+            | "mediumint"
+            | "int"
+            | "integer"
+            | "bigint"
+            | "decimal"
+            | "numeric"
+            | "number"
+            | "float"
+            | "float4"
+            | "float8"
+            | "real"
+            | "double"
+            | "money"
+            | "smallmoney"
+    ) {
+        return Some(SqlValueTemplateKind::Numeric);
+    }
+    if matches!(
+        base,
+        "char"
+            | "nchar"
+            | "varchar"
+            | "varchar2"
+            | "nvarchar"
+            | "nvarchar2"
+            | "text"
+            | "tinytext"
+            | "mediumtext"
+            | "longtext"
+            | "ntext"
+            | "citext"
+            | "string"
+    ) {
+        return Some(SqlValueTemplateKind::Text);
+    }
+    None
+}
+
+fn value_item_matches_prefix(label: &str, prefix: &str) -> bool {
+    prefix.is_empty() || label.to_ascii_lowercase().starts_with(prefix)
+}
+
+fn add_null_value_item(items: &mut Vec<CompletionItem>, column_name: &str, prefix: &str) {
+    if !value_item_matches_prefix("NULL", prefix) {
+        return;
+    }
+    items.push(CompletionItem {
+        label: "NULL".to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some(format!("NULL value for {column_name}")),
+        sort_text: Some(completion_sort_text("0", "NULL")),
+        insert_text: Some("NULL".to_string()),
+        ..CompletionItem::default()
+    });
+}
+
+fn add_typed_value_template_items(
+    items: &mut Vec<CompletionItem>,
+    column_name: &str,
+    kind: SqlValueTemplateKind,
+    prefix: &str,
+) {
+    let detail = |label: &str| format!("{label} for {column_name}");
+    let mut add_snippet = |label: &str, insert_text: &str, description: &str| {
+        if !value_item_matches_prefix(label, prefix) {
+            return;
+        }
         items.push(CompletionItem {
-            label: value.clone(),
-            kind: Some(CompletionItemKind::ENUM_MEMBER),
-            detail: Some(format!("Domain value for {column_name}")),
-            sort_text: Some(completion_sort_text("0", &value)),
-            filter_text: Some(value),
-            insert_text: Some(quoted),
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(detail(description)),
+            sort_text: Some(completion_sort_text("0", label)),
+            filter_text: Some(label.to_string()),
+            insert_text: Some(insert_text.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
             ..CompletionItem::default()
         });
+    };
+
+    match kind {
+        SqlValueTemplateKind::Boolean => {
+            for value in ["TRUE", "FALSE"] {
+                if value_item_matches_prefix(value, prefix) {
+                    items.push(CompletionItem {
+                        label: value.to_string(),
+                        kind: Some(CompletionItemKind::KEYWORD),
+                        detail: Some(detail("Boolean value")),
+                        sort_text: Some(completion_sort_text("0", value)),
+                        insert_text: Some(value.to_string()),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+        }
+        SqlValueTemplateKind::Date => {
+            add_snippet("'YYYY-MM-DD'", "'${1:YYYY-MM-DD}'", "Date literal")
+        }
+        SqlValueTemplateKind::Json => {
+            add_snippet("'{}'", r#"'{"${1:key}":"${2:value}"}'"#, "JSON literal")
+        }
+        SqlValueTemplateKind::Numeric => add_snippet("0", "${1:0}", "Numeric literal"),
+        SqlValueTemplateKind::Text => add_snippet("''", "'${1:value}'", "String literal"),
+        SqlValueTemplateKind::Time => add_snippet("'HH:MM:SS'", "'${1:HH:MM:SS}'", "Time literal"),
+        SqlValueTemplateKind::Timestamp => add_snippet(
+            "'YYYY-MM-DD HH:MM:SS'",
+            "'${1:YYYY-MM-DD HH:MM:SS}'",
+            "Timestamp literal",
+        ),
+        SqlValueTemplateKind::Uuid => add_snippet(
+            "'UUID'",
+            "'${1:00000000-0000-0000-0000-000000000000}'",
+            "UUID literal",
+        ),
     }
 }
 

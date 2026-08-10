@@ -953,6 +953,18 @@ fn is_relation_completion_kind(kind: Option<CompletionItemKind>) -> bool {
     )
 }
 
+fn deduplicate_simple_completion_items(items: &mut Vec<CompletionItem>) {
+    let mut seen = HashSet::new();
+    items.retain(|item| {
+        let family = match item.kind {
+            Some(CompletionItemKind::KEYWORD) => "keyword",
+            Some(CompletionItemKind::OPERATOR) => "operator",
+            _ => return true,
+        };
+        seen.insert(format!("{family}:{}", item.label.to_ascii_lowercase()))
+    });
+}
+
 fn apply_completion_preferences(
     text: &str,
     position: Position,
@@ -2033,6 +2045,7 @@ impl LanguageServer for SqlLspServer {
             ) {
                 apply_completion_preferences(&text, position, &mut items, &preferences);
             }
+            deduplicate_simple_completion_items(&mut items);
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
@@ -2723,13 +2736,13 @@ fn project_sql_symbol_container(uri: &Url) -> String {
     if uri.scheme() == "oxide" && uri.host_str() == Some("project") {
         return uri
             .path_segments()
-            .and_then(|segments| segments.last())
+            .and_then(|mut segments| segments.next_back())
             .filter(|path| !path.is_empty())
             .unwrap_or("Project SQL")
             .to_string();
     }
     uri.path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .filter(|path| !path.is_empty())
         .unwrap_or("SQL document")
         .to_string()
@@ -4646,7 +4659,7 @@ fn temporary_tables_before_cursor(
                     closing + 1,
                 )
             } else if upper[definition_start..].starts_with("AS")
-                && local_keyword_boundary(&upper, definition_start, "AS")
+                && local_keyword_boundary(upper, definition_start, "AS")
             {
                 let query_start = skip_local_whitespace(source, definition_start + "AS".len());
                 let statement_end = source[query_start..]
@@ -4726,13 +4739,13 @@ fn cte_tables_before_cursor(source: &str, upper: &str, schema: &Schema, uri: &st
     let mut search = 0;
     while let Some(relative) = upper[search..].find("WITH") {
         let with_start = search + relative;
-        if !local_keyword_boundary(&upper, with_start, "WITH") {
+        if !local_keyword_boundary(upper, with_start, "WITH") {
             search = with_start + "WITH".len();
             continue;
         }
         let mut cursor = skip_local_whitespace(source, with_start + "WITH".len());
         if upper[cursor..].starts_with("RECURSIVE")
-            && local_keyword_boundary(&upper, cursor, "RECURSIVE")
+            && local_keyword_boundary(upper, cursor, "RECURSIVE")
         {
             cursor = skip_local_whitespace(source, cursor + "RECURSIVE".len());
         }
@@ -4755,7 +4768,7 @@ fn cte_tables_before_cursor(source: &str, upper: &str, schema: &Schema, uri: &st
                     .collect();
                 cursor = skip_local_whitespace(source, closing + 1);
             }
-            if !upper[cursor..].starts_with("AS") || !local_keyword_boundary(&upper, cursor, "AS") {
+            if !upper[cursor..].starts_with("AS") || !local_keyword_boundary(upper, cursor, "AS") {
                 break;
             }
             cursor = skip_local_whitespace(source, cursor + "AS".len());
@@ -5831,16 +5844,16 @@ mod tests {
         augment_schema_with_local_relations, calculate_schema_match_score,
         code_action_kind_available, code_action_kind_explicitly_requested,
         completed_sql_context_keyword_at_position, completion_statement_prefix,
-        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables,
-        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
-        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
-        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
-        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
-        CompletionPreferences, KeywordCase, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
-        ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES,
-        PROJECT_SQL_INDEX_MAX_BYTES,
+        deduplicate_simple_completion_items, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
+        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
+        range_for_offsets, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, routine_call_at_position,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
+        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, RoutineCallContext,
+        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -6750,6 +6763,57 @@ mod tests {
             panic!("keyword completion should keep its text edit");
         };
         assert_eq!(edit.new_text, " select");
+    }
+
+    #[test]
+    fn completion_deduplicates_keywords_without_collapsing_overloads() {
+        let mut items = vec![
+            CompletionItem {
+                label: "TRUE".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Boolean value for enabled".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "true".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("PostgreSQL keyword".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "calculate".to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("calculate(integer)".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "calculate".to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("calculate(text)".to_string()),
+                ..CompletionItem::default()
+            },
+        ];
+
+        deduplicate_simple_completion_items(&mut items);
+
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == Some(CompletionItemKind::KEYWORD))
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == Some(CompletionItemKind::FUNCTION))
+                .count(),
+            2
+        );
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("Boolean value for enabled")
+        );
     }
 
     #[test]

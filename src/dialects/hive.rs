@@ -354,7 +354,7 @@ impl Dialect for HiveDialect {
                         let use_table_prefix =
                             !matches!(latest_predicate_clause, Some("SET" | "UPDATE"))
                                 && referenced_tables.len() != 1;
-                        common::add_column_domain_value_items(
+                        common::add_column_value_items(
                             &mut items,
                             schema,
                             &referenced_tables,
@@ -684,7 +684,7 @@ impl Dialect for HiveDialect {
                             common::referenced_table_names_at_position(&parser, tree, sql, position)
                         })
                         .unwrap_or_default();
-                    common::add_column_domain_value_items(
+                    common::add_column_value_items(
                         &mut items,
                         schema,
                         &referenced_tables,
