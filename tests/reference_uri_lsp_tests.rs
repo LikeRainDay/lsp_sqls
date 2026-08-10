@@ -388,6 +388,9 @@ fn inline_completion_context_combines_ast_schema_and_validation() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();
     let uri = "file:///workspace/query.postgres.sql";
+    let snippet_uri = "file:///workspace/insert-snippet.postgres.sql";
+    let window_uri = "file:///workspace/window-snippet.postgres.sql";
+    let continuation_uri = "file:///workspace/from-continuation.postgres.sql";
     let schema_id = "22222222-2222-4222-8222-222222222222";
     lsp.notify(
         "workspace/didChangeConfiguration",
@@ -416,8 +419,18 @@ fn inline_completion_context_combines_ast_schema_and_validation() {
                     "functions": [],
                     "source_uri": null
                 }],
-                "fileSchemas": { (uri): schema_id },
-                "fileDialects": { (uri): "postgres" }
+                "fileSchemas": {
+                    (uri): schema_id,
+                    (snippet_uri): schema_id,
+                    (window_uri): schema_id,
+                    (continuation_uri): schema_id
+                },
+                "fileDialects": {
+                    (uri): "postgres",
+                    (snippet_uri): "postgres",
+                    (window_uri): "postgres",
+                    (continuation_uri): "postgres"
+                }
             }
         }),
     );
@@ -452,6 +465,96 @@ fn inline_completion_context_combines_ast_schema_and_validation() {
                 .iter()
                 .any(|item| { item.get("label").and_then(Value::as_str) == Some("email") })),
         "{context}"
+    );
+    assert_eq!(
+        context
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|items| items
+                .iter()
+                .find(|item| { item.get("label").and_then(Value::as_str) == Some("email") }))
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("email"),
+        "qualified inline candidates must preserve the dialect insertion"
+    );
+
+    let snippet_sql = "ins";
+    lsp.open(snippet_uri, "postgres", snippet_sql);
+    let snippet_context = lsp.request(
+        "oxide/inlineCompletionContext",
+        json!({
+            "textDocument": { "uri": snippet_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(snippet_sql, snippet_sql.len())
+            }
+        }),
+    );
+    assert!(
+        snippet_context
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("label").and_then(Value::as_str) == Some("insert users")
+                    && item
+                        .get("insertText")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| {
+                            text.contains("INSERT INTO app.users")
+                                && text.contains("${1:email_value}")
+                        })
+            })),
+        "{snippet_context}"
+    );
+
+    let window_sql = "SELECT row_";
+    lsp.open(window_uri, "postgres", window_sql);
+    let window_context = lsp.request(
+        "oxide/inlineCompletionContext",
+        json!({
+            "textDocument": { "uri": window_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(window_sql, window_sql.len())
+            }
+        }),
+    );
+    assert!(
+        window_context
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("label").and_then(Value::as_str) == Some("ROW_NUMBER")
+                    && item
+                        .get("insertText")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.contains("OVER (PARTITION BY"))
+            })),
+        "{window_context}"
+    );
+
+    let continuation_sql = "SELECT * FROM";
+    lsp.open(continuation_uri, "postgres", continuation_sql);
+    let continuation_context = lsp.request(
+        "oxide/inlineCompletionContext",
+        json!({
+            "textDocument": { "uri": continuation_uri },
+            "position": {
+                "line": 0,
+                "character": utf16_column(continuation_sql, continuation_sql.len())
+            }
+        }),
+    );
+    assert!(
+        continuation_context
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| {
+                item.get("label").and_then(Value::as_str) == Some("app.users")
+                    && item.get("insertText").and_then(Value::as_str) == Some(" app.users")
+            })),
+        "{continuation_context}"
     );
 
     let diagnostics = lsp.request(

@@ -801,6 +801,92 @@ impl SqlLspServer {
         count
     }
 
+    async fn completion_candidates_at(
+        &self,
+        uri: &str,
+        text: &str,
+        position: Position,
+        context: Option<&CompletionContext>,
+    ) -> Option<Vec<CompletionItem>> {
+        let dialect = self.get_dialect_for_file(uri)?;
+        let schema = self.get_schema_for_position(uri, text, position);
+        let (completion_text, completion_position) =
+            completion_statement_prefix(text, position).unwrap_or((text, position));
+        let mut items = dialect
+            .completion_with_context(
+                completion_text,
+                completion_position,
+                schema.as_ref(),
+                context,
+            )
+            .await;
+        let dialect_identity = self
+            .dialect_identity_for_file(uri)
+            .unwrap_or_else(|| dialect.name().to_string());
+        add_builtin_function_completions(
+            completion_text,
+            completion_position,
+            &dialect_identity,
+            schema.as_ref(),
+            &mut items,
+        );
+        add_window_function_completions(
+            completion_text,
+            completion_position,
+            &dialect_identity,
+            &mut items,
+        );
+        add_clickhouse_table_function_completions(
+            completion_text,
+            completion_position,
+            &dialect_identity,
+            &mut items,
+        );
+        add_oracle_table_function_completions(
+            completion_text,
+            completion_position,
+            &dialect_identity,
+            schema.as_ref(),
+            &mut items,
+        );
+        let preferences = self
+            .completion_preferences
+            .read()
+            .map(|preferences| preferences.clone())
+            .unwrap_or_default();
+        let relational_completion = matches!(
+            dialect.name(),
+            "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
+        );
+        if relational_completion {
+            add_insert_statement_snippets(
+                text,
+                position,
+                schema.as_ref(),
+                &mut items,
+                &preferences,
+                dialect.name(),
+            );
+            add_insert_all_columns_completion(
+                text,
+                position,
+                schema.as_ref(),
+                &mut items,
+                &preferences,
+                dialect.name(),
+            );
+        }
+        add_referenced_alias_completions(text, position, &mut items);
+        apply_completed_sql_context_completion_edits(text, position, &mut items);
+        apply_qualified_identifier_completion_edits(text, position, &mut items);
+        if relational_completion {
+            apply_completion_preferences(text, position, &mut items, &preferences);
+        }
+        deduplicate_simple_completion_items(&mut items);
+        apply_high_frequency_keyword_ranking(&mut items);
+        Some(items)
+    }
+
     pub async fn inline_completion_context(
         &self,
         params: TextDocumentPositionParams,
@@ -812,8 +898,10 @@ impl SqlLspServer {
             return Ok(empty_inline_completion_context());
         };
         let schema = self.get_schema_for_position(&uri, &text, position);
-        let mut raw_candidates = dialect.completion(&text, position, schema.as_ref()).await;
-        apply_high_frequency_keyword_ranking(&mut raw_candidates);
+        let mut raw_candidates = self
+            .completion_candidates_at(&uri, &text, position, None)
+            .await
+            .unwrap_or_default();
         raw_candidates.sort_by(|left, right| {
             left.sort_text
                 .as_deref()
@@ -826,7 +914,7 @@ impl SqlLspServer {
             .take(32)
             .map(|item| InlineCompletionCandidate {
                 label: item.label.clone(),
-                insert_text: item.insert_text.or(Some(item.label)),
+                insert_text: completion_item_effective_insert_text(&item),
                 kind: item.kind.and_then(serialized_lsp_number),
             })
             .collect();
@@ -922,6 +1010,17 @@ fn empty_inline_completion_context() -> InlineCompletionContextResponse {
 
 fn serialized_lsp_number(value: impl Serialize) -> Option<u32> {
     serde_json::to_value(value).ok()?.as_u64()?.try_into().ok()
+}
+
+fn completion_item_effective_insert_text(item: &CompletionItem) -> Option<String> {
+    item.text_edit
+        .as_ref()
+        .map(|edit| match edit {
+            CompletionTextEdit::Edit(edit) => edit.new_text.clone(),
+            CompletionTextEdit::InsertAndReplace(edit) => edit.new_text.clone(),
+        })
+        .or_else(|| item.insert_text.clone())
+        .or_else(|| Some(item.label.clone()))
 }
 
 fn statement_range_for_node(source: &str, mut node: tree_sitter::Node<'_>) -> Option<Range> {
@@ -2967,98 +3066,23 @@ impl LanguageServer for SqlLspServer {
 
         let text = self.document_manager.get(&uri).unwrap_or_default();
 
-        if let Some(dialect) = self.get_dialect_for_file(&uri) {
-            let schema = self.get_schema_for_position(&uri, &text, position);
-            let (completion_text, completion_position) =
-                completion_statement_prefix(&text, position).unwrap_or((&text, position));
-            let mut items = dialect
-                .completion_with_context(
-                    completion_text,
-                    completion_position,
-                    schema.as_ref(),
-                    params.context.as_ref(),
-                )
-                .await;
-            let dialect_identity = self
-                .dialect_identity_for_file(&uri)
-                .unwrap_or_else(|| dialect.name().to_string());
-            add_builtin_function_completions(
-                completion_text,
-                completion_position,
-                &dialect_identity,
-                schema.as_ref(),
+        let Some(mut items) = self
+            .completion_candidates_at(&uri, &text, position, params.context.as_ref())
+            .await
+        else {
+            return Ok(None);
+        };
+        if self
+            .completion_documentation_resolve_supported
+            .load(Ordering::Relaxed)
+        {
+            defer_completion_documentation(
                 &mut items,
+                &self.completion_resolve_cache,
+                &self.next_completion_resolve_id,
             );
-            add_window_function_completions(
-                completion_text,
-                completion_position,
-                &dialect_identity,
-                &mut items,
-            );
-            add_clickhouse_table_function_completions(
-                completion_text,
-                completion_position,
-                &dialect_identity,
-                &mut items,
-            );
-            add_oracle_table_function_completions(
-                completion_text,
-                completion_position,
-                &dialect_identity,
-                schema.as_ref(),
-                &mut items,
-            );
-            let preferences = self
-                .completion_preferences
-                .read()
-                .map(|preferences| preferences.clone())
-                .unwrap_or_default();
-            if matches!(
-                dialect.name(),
-                "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
-            ) {
-                add_insert_statement_snippets(
-                    &text,
-                    position,
-                    schema.as_ref(),
-                    &mut items,
-                    &preferences,
-                    dialect.name(),
-                );
-                add_insert_all_columns_completion(
-                    &text,
-                    position,
-                    schema.as_ref(),
-                    &mut items,
-                    &preferences,
-                    dialect.name(),
-                );
-            }
-            add_referenced_alias_completions(&text, position, &mut items);
-            apply_completed_sql_context_completion_edits(&text, position, &mut items);
-            apply_qualified_identifier_completion_edits(&text, position, &mut items);
-            if matches!(
-                dialect.name(),
-                "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
-            ) {
-                apply_completion_preferences(&text, position, &mut items, &preferences);
-            }
-            deduplicate_simple_completion_items(&mut items);
-            apply_high_frequency_keyword_ranking(&mut items);
-            if self
-                .completion_documentation_resolve_supported
-                .load(Ordering::Relaxed)
-            {
-                defer_completion_documentation(
-                    &mut items,
-                    &self.completion_resolve_cache,
-                    &self.next_completion_resolve_id,
-                );
-            }
-            return Ok(Some(CompletionResponse::Array(items)));
         }
-
-        Ok(None)
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
