@@ -886,7 +886,9 @@ impl SqlLspServer {
         add_referenced_alias_completions(text, position, &mut items);
         apply_completed_sql_context_completion_edits(text, position, &mut items);
         apply_qualified_identifier_completion_edits(text, position, &mut items);
-        apply_completion_preferences(text, position, &mut items, &preferences);
+        if relational_completion {
+            apply_completion_preferences(text, position, &mut items, &preferences);
+        }
         deduplicate_simple_completion_items(&mut items);
         apply_high_frequency_keyword_ranking(&mut items);
         Some(items)
