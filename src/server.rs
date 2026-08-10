@@ -10,8 +10,10 @@ use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
 use crate::token::Keywords;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use serde_json::{Map as JsonMap, Value};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -25,6 +27,139 @@ const PROJECT_SQL_INDEX_MAX_RESULTS: usize = 2_000;
 const SIGNATURE_HELP_MAX_SCAN_BYTES: usize = 64 * 1024;
 const SIGNATURE_HELP_MAX_OVERLOADS: usize = 50;
 const BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS: usize = 100;
+const COMPLETION_RESOLVE_CACHE_MAX_ENTRIES: usize = 8_192;
+const COMPLETION_RESOLVE_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES: usize = 256 * 1024;
+const COMPLETION_RESOLVE_ID_FIELD: &str = "oxideSqlLspCompletionResolveId";
+const COMPLETION_RESOLVE_ORIGINAL_DATA_FIELD: &str = "originalData";
+
+#[derive(Clone)]
+struct CompletionResolveEntry {
+    documentation: Documentation,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct CompletionResolveCache {
+    entries: HashMap<u64, CompletionResolveEntry>,
+    order: VecDeque<u64>,
+    bytes: usize,
+}
+
+impl CompletionResolveCache {
+    fn insert(&mut self, id: u64, documentation: Documentation) -> bool {
+        let Ok(bytes) = serde_json::to_vec(&documentation).map(|encoded| encoded.len()) else {
+            return false;
+        };
+        if bytes > COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES
+            || bytes > COMPLETION_RESOLVE_CACHE_MAX_BYTES
+        {
+            return false;
+        }
+
+        while self.entries.len() >= COMPLETION_RESOLVE_CACHE_MAX_ENTRIES
+            || self.bytes.saturating_add(bytes) > COMPLETION_RESOLVE_CACHE_MAX_BYTES
+        {
+            let Some(expired_id) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(expired) = self.entries.remove(&expired_id) {
+                self.bytes = self.bytes.saturating_sub(expired.bytes);
+            }
+        }
+
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.push_back(id);
+        self.entries.insert(
+            id,
+            CompletionResolveEntry {
+                documentation,
+                bytes,
+            },
+        );
+        true
+    }
+
+    fn documentation(&self, id: u64) -> Option<Documentation> {
+        self.entries
+            .get(&id)
+            .map(|entry| entry.documentation.clone())
+    }
+}
+
+fn completion_resolve_data(id: u64, original_data: Option<Value>) -> Value {
+    let mut data = JsonMap::new();
+    data.insert(COMPLETION_RESOLVE_ID_FIELD.to_string(), Value::from(id));
+    if let Some(original_data) = original_data {
+        data.insert(
+            COMPLETION_RESOLVE_ORIGINAL_DATA_FIELD.to_string(),
+            original_data,
+        );
+    }
+    Value::Object(data)
+}
+
+fn completion_resolve_identity(data: Option<&Value>) -> Option<u64> {
+    data?.get(COMPLETION_RESOLVE_ID_FIELD)?.as_u64()
+}
+
+fn original_completion_data(data: Option<&Value>) -> Option<Value> {
+    data?.get(COMPLETION_RESOLVE_ORIGINAL_DATA_FIELD).cloned()
+}
+
+fn defer_completion_documentation(
+    items: &mut [CompletionItem],
+    cache: &Mutex<CompletionResolveCache>,
+    next_id: &AtomicU64,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    for item in items {
+        let Some(documentation) = item.documentation.take() else {
+            continue;
+        };
+        let id = next_id.fetch_add(1, Ordering::Relaxed);
+        if cache.insert(id, documentation.clone()) {
+            item.data = Some(completion_resolve_data(id, item.data.take()));
+        } else {
+            item.documentation = Some(documentation);
+        }
+    }
+}
+
+fn resolve_completion_documentation(
+    mut item: CompletionItem,
+    cache: &Mutex<CompletionResolveCache>,
+) -> CompletionItem {
+    let Some(id) = completion_resolve_identity(item.data.as_ref()) else {
+        return item;
+    };
+    let original_data = original_completion_data(item.data.as_ref());
+    if let Ok(cache) = cache.lock() {
+        if let Some(documentation) = cache.documentation(id) {
+            item.documentation = Some(documentation);
+        }
+    }
+    item.data = original_data;
+    item
+}
+
+fn client_supports_completion_documentation_resolve(params: &InitializeParams) -> bool {
+    params
+        .capabilities
+        .text_document
+        .as_ref()
+        .and_then(|capabilities| capabilities.completion.as_ref())
+        .and_then(|capabilities| capabilities.completion_item.as_ref())
+        .and_then(|capabilities| capabilities.resolve_support.as_ref())
+        .is_some_and(|support| {
+            support
+                .properties
+                .iter()
+                .any(|property| property == "documentation")
+        })
+}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum ProjectSqlSymbolKind {
@@ -242,6 +377,9 @@ pub struct SqlLspServer {
     document_manager: DocumentManager,
     analysis_cache: Arc<DashMap<String, CachedSqlAnalysis>>,
     project_sql_index_cache: Arc<DashMap<String, CachedProjectSqlIndex>>,
+    completion_resolve_cache: Mutex<CompletionResolveCache>,
+    next_completion_resolve_id: AtomicU64,
+    completion_documentation_resolve_supported: AtomicBool,
 }
 
 impl SqlLspServer {
@@ -261,6 +399,9 @@ impl SqlLspServer {
             document_manager: DocumentManager::new(),
             analysis_cache: Arc::new(DashMap::new()),
             project_sql_index_cache: Arc::new(DashMap::new()),
+            completion_resolve_cache: Mutex::new(CompletionResolveCache::default()),
+            next_completion_resolve_id: AtomicU64::new(1),
+            completion_documentation_resolve_supported: AtomicBool::new(false),
         }
     }
 
@@ -1678,7 +1819,11 @@ fn schema_id_for_file(
 
 #[tower_lsp::async_trait]
 impl LanguageServer for SqlLspServer {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        self.completion_documentation_resolve_supported.store(
+            client_supports_completion_documentation_resolve(&params),
+            Ordering::Relaxed,
+        );
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "sql-lsp".to_string(),
@@ -1689,7 +1834,7 @@ impl LanguageServer for SqlLspServer {
                     TextDocumentSyncKind::INCREMENTAL,
                 )),
                 completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
+                    resolve_provider: Some(true),
                     trigger_characters: Some(vec![
                         ".".to_string(),
                         " ".to_string(),
@@ -2046,10 +2191,27 @@ impl LanguageServer for SqlLspServer {
                 apply_completion_preferences(&text, position, &mut items, &preferences);
             }
             deduplicate_simple_completion_items(&mut items);
+            if self
+                .completion_documentation_resolve_supported
+                .load(Ordering::Relaxed)
+            {
+                defer_completion_documentation(
+                    &mut items,
+                    &self.completion_resolve_cache,
+                    &self.next_completion_resolve_id,
+                );
+            }
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
         Ok(None)
+    }
+
+    async fn completion_resolve(&self, item: CompletionItem) -> Result<CompletionItem> {
+        Ok(resolve_completion_documentation(
+            item,
+            &self.completion_resolve_cache,
+        ))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -5842,18 +6004,21 @@ mod tests {
         add_referenced_alias_completions, apply_completed_sql_context_completion_edits,
         apply_completion_preferences, apply_qualified_identifier_completion_edits,
         augment_schema_with_local_relations, calculate_schema_match_score,
-        code_action_kind_available, code_action_kind_explicitly_requested,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        deduplicate_simple_completion_items, expand_select_star_action, find_schema_by_qualifier,
+        client_supports_completion_documentation_resolve, code_action_kind_available,
+        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, deduplicate_simple_completion_items,
+        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
         find_schema_by_table_reference, infer_dialect_from_uri_and_language,
         infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
         project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
-        range_for_offsets, rewrite_current_document_location_uri,
+        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
         rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
-        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences, KeywordCase,
-        ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence, ProjectSqlSymbolRole, RoutineCallContext,
-        TableAliasStyle, LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
+        CompletionResolveCache, KeywordCase, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
+        COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
+        LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -5861,10 +6026,105 @@ mod tests {
         Column, Function, FunctionParameter, Schema, SchemaId, SchemaManager, Table,
     };
     use dashmap::DashMap;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
     use tower_lsp::lsp_types::{
         CodeAction, CodeActionContext, CodeActionKind, CompletionItem, CompletionItemKind,
-        CompletionTextEdit, InsertTextFormat, Location, Position, Range, TextEdit, Url,
+        CompletionTextEdit, Documentation, InitializeParams, InsertTextFormat, Location, Position,
+        Range, TextEdit, Url,
     };
+
+    #[test]
+    fn completion_documentation_is_deferred_only_for_capable_clients() {
+        let capable: InitializeParams = serde_json::from_value(serde_json::json!({
+            "capabilities": {
+                "textDocument": {
+                    "completion": {
+                        "completionItem": {
+                            "resolveSupport": {
+                                "properties": ["documentation", "detail"]
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let incapable: InitializeParams = serde_json::from_value(serde_json::json!({
+            "capabilities": {
+                "textDocument": {
+                    "completion": {
+                        "completionItem": {
+                            "resolveSupport": { "properties": ["detail"] }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(client_supports_completion_documentation_resolve(&capable));
+        assert!(!client_supports_completion_documentation_resolve(
+            &incapable
+        ));
+    }
+
+    #[test]
+    fn completion_documentation_is_deferred_and_restores_original_data() {
+        let cache = Mutex::new(CompletionResolveCache::default());
+        let next_id = AtomicU64::new(1);
+        let original_data = serde_json::json!({ "source": "metadata" });
+        let mut items = vec![CompletionItem {
+            label: "customer_id".to_string(),
+            documentation: Some(Documentation::String("Primary key".to_string())),
+            data: Some(original_data.clone()),
+            ..Default::default()
+        }];
+
+        defer_completion_documentation(&mut items, &cache, &next_id);
+        assert!(items[0].documentation.is_none());
+        assert_eq!(
+            items[0]
+                .data
+                .as_ref()
+                .and_then(|data| data.get("oxideSqlLspCompletionResolveId"))
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+
+        let resolved = resolve_completion_documentation(items.remove(0), &cache);
+        assert_eq!(
+            resolved.documentation,
+            Some(Documentation::String("Primary key".to_string()))
+        );
+        assert_eq!(resolved.data, Some(original_data));
+    }
+
+    #[test]
+    fn completion_documentation_cache_is_bounded_and_oversize_docs_stay_inline() {
+        let cache = Mutex::new(CompletionResolveCache::default());
+        let next_id = AtomicU64::new(1);
+        let mut oversize = vec![CompletionItem {
+            label: "large".to_string(),
+            documentation: Some(Documentation::String(
+                "x".repeat(COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES + 1),
+            )),
+            ..Default::default()
+        }];
+        defer_completion_documentation(&mut oversize, &cache, &next_id);
+        assert!(oversize[0].documentation.is_some());
+        assert!(oversize[0].data.is_none());
+
+        let mut cache = cache.lock().unwrap();
+        for id in 0..=COMPLETION_RESOLVE_CACHE_MAX_ENTRIES as u64 {
+            assert!(cache.insert(id, Documentation::String("doc".to_string())));
+        }
+        assert_eq!(cache.entries.len(), COMPLETION_RESOLVE_CACHE_MAX_ENTRIES);
+        assert!(!cache.entries.contains_key(&0));
+        assert!(cache
+            .entries
+            .contains_key(&(COMPLETION_RESOLVE_CACHE_MAX_ENTRIES as u64)));
+    }
 
     fn test_schema(database: &str, tables: &[&str]) -> Schema {
         Schema {

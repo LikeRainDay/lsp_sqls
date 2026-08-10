@@ -28,9 +28,17 @@ impl LspProcess {
     }
 
     fn initialize(&mut self) -> Value {
+        self.initialize_with_capabilities(json!({}))
+    }
+
+    fn initialize_with_capabilities(&mut self, capabilities: Value) -> Value {
         let result = self.request(
             "initialize",
-            json!({ "processId": null, "rootUri": null, "capabilities": {} }),
+            json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": capabilities
+            }),
         );
         self.notify("initialized", json!({}));
         result
@@ -456,6 +464,102 @@ fn inline_completion_context_combines_ast_schema_and_validation() {
     assert!(diagnostics.as_array().is_some_and(|items| items
         .iter()
         .any(|item| { item.get("severity").and_then(Value::as_u64) == Some(1) })));
+}
+
+#[test]
+fn completion_documentation_resolves_lazily_for_capable_clients() {
+    let mut lsp = LspProcess::spawn();
+    let initialized = lsp.initialize_with_capabilities(json!({
+        "textDocument": {
+            "completion": {
+                "completionItem": {
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                    }
+                }
+            }
+        }
+    }));
+    assert_eq!(
+        initialized
+            .pointer("/capabilities/completionProvider/resolveProvider")
+            .and_then(Value::as_bool),
+        Some(true),
+        "{initialized}"
+    );
+
+    let uri = "file:///workspace/resolve.postgres.sql";
+    let schema_id = "45454545-4545-4545-8545-454545454545";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [{
+                        "name": "orders",
+                        "columns": [{
+                            "name": "id",
+                            "data_type": "bigint",
+                            "nullable": false,
+                            "primary_key": true,
+                            "unique": true,
+                            "indexed": true,
+                            "comment": "Order identifier",
+                            "source_location": null
+                        }],
+                        "indexes": [],
+                        "constraints": [],
+                        "comment": "Customer orders",
+                        "source_location": null
+                    }],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": { (uri): schema_id },
+                "fileDialects": { (uri): "postgres" }
+            }
+        }),
+    );
+    lsp.open(uri, "postgres", "SELECT * FROM ");
+
+    let completion = lsp.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": 14 }
+        }),
+    );
+    let items = completion
+        .as_array()
+        .or_else(|| completion.get("items").and_then(Value::as_array))
+        .expect("completion items");
+    let item = items
+        .iter()
+        .find(|item| item.get("label").and_then(Value::as_str) == Some("app.orders"))
+        .cloned()
+        .unwrap_or_else(|| panic!("orders completion missing: {completion}"));
+    assert!(item.get("documentation").is_none(), "{item}");
+    assert!(
+        item.pointer("/data/oxideSqlLspCompletionResolveId")
+            .and_then(Value::as_u64)
+            .is_some(),
+        "{item}"
+    );
+
+    let resolved = lsp.request("completionItem/resolve", item.clone());
+    assert!(
+        resolved
+            .get("documentation")
+            .and_then(Value::as_str)
+            .is_some_and(|documentation| documentation.contains("Customer orders")),
+        "{resolved}"
+    );
+    for field in ["label", "sortText", "insertText", "textEdit"] {
+        assert_eq!(resolved.get(field), item.get(field), "changed {field}");
+    }
+    assert!(resolved.get("data").is_none(), "{resolved}");
 }
 
 #[test]
