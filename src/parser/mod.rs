@@ -6,4 +6,4 @@ pub mod dsl;
 pub mod sql;
 
 pub use dsl::{DslCompletionContext, DslParser};
-pub use sql::{AstNode, CompletionContext, ParseResult, SqlParser};
+pub use sql::{AstNode, CompletionContext, ParseResult, RelationAlias, SqlParser};

@@ -5024,14 +5024,25 @@ impl SqlParser {
         source: &str,
         position: Position,
     ) -> HashMap<String, String> {
+        Self::relation_aliases_at_position(source, position)
+            .into_iter()
+            .map(|alias| (alias.name, alias.relation))
+            .collect()
+    }
+
+    /// Returns aliases from the innermost query visible at `position` while
+    /// retaining their original SQL spelling for safe completion insertion.
+    /// If a qualified reference targets an alias from a correlated outer
+    /// query, only that requested outer alias is imported into the inner scope.
+    pub fn relation_aliases_at_position(source: &str, position: Position) -> Vec<RelationAlias> {
         let scoped_source = Self::completion_scope_source(source, position);
-        let mut aliases = Self::extract_aliases_from_source(&scoped_source);
+        let mut aliases = Self::extract_relation_alias_entries_from_source(&scoped_source);
         let Some(qualifier) = Self::column_qualifier_before_position(source, position)
             .map(|value| Self::normalize_identifier(&value))
         else {
             return aliases;
         };
-        if aliases.contains_key(&qualifier) {
+        if aliases.iter().any(|alias| alias.name == qualifier) {
             return aliases;
         }
 
@@ -5048,23 +5059,20 @@ impl SqlParser {
         while let Some(open) = scope_open {
             let outer_position = crate::position::byte_position_at_end(&source[..open]);
             let outer_scope = Self::completion_scope_source(source, outer_position);
-            let outer_aliases = Self::extract_aliases_from_source(&outer_scope);
-            if let Some(reference) = outer_aliases.get(&qualifier) {
-                aliases.insert(qualifier.clone(), reference.clone());
+            let outer_aliases = Self::extract_relation_alias_entries_from_source(&outer_scope);
+            if let Some(alias) = outer_aliases
+                .into_iter()
+                .find(|alias| alias.name == qualifier)
+            {
+                aliases.push(alias);
                 break;
             }
             let (_, next_scope_open) =
                 Self::innermost_query_scope_start(&searchable_prefix[..open]);
             scope_open = next_scope_open;
         }
+        aliases.sort_by(|left, right| left.name.cmp(&right.name));
         aliases
-    }
-
-    /// Returns aliases from the innermost query visible at `position` while
-    /// retaining their original SQL spelling for safe completion insertion.
-    pub fn relation_aliases_at_position(source: &str, position: Position) -> Vec<RelationAlias> {
-        let scoped_source = Self::completion_scope_source(source, position);
-        Self::extract_relation_alias_entries_from_source(&scoped_source)
     }
 
     fn extract_aliases_from_source(source: &str) -> HashMap<String, String> {
@@ -6958,6 +6966,23 @@ mod tests {
             parser.extract_referenced_tables_at_position(tree, sql, cursor_position),
             vec!["app.orders".to_string()]
         );
+    }
+
+    #[test]
+    fn correlated_alias_entries_preserve_quoted_outer_sql() {
+        let sql = "SELECT * FROM app.users AS \"Outer User\" WHERE EXISTS (SELECT 1 FROM app.orders inner_order WHERE \"Outer User\".)";
+        let cursor_position = position_at_end(sql.trim_end_matches(')'));
+        let aliases = SqlParser::relation_aliases_at_position(sql, cursor_position);
+
+        let outer = aliases
+            .iter()
+            .find(|alias| alias.name == "Outer User")
+            .expect("quoted outer alias");
+        assert_eq!(outer.sql, "\"Outer User\"");
+        assert_eq!(outer.relation, "app.users");
+        assert!(aliases
+            .iter()
+            .any(|alias| { alias.name == "inner_order" && alias.relation == "app.orders" }));
     }
 
     #[test]

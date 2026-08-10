@@ -1,4 +1,4 @@
-use crate::parser::SqlParser;
+use crate::parser::{RelationAlias, SqlParser};
 use crate::schema::{Column, Constraint, Function, Index, Schema, Table};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -1517,7 +1517,7 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 pub(crate) fn apply_column_aliases(
     items: &mut Vec<CompletionItem>,
     schema: &Schema,
-    aliases: &HashMap<String, String>,
+    aliases: &[RelationAlias],
 ) {
     if aliases.is_empty() {
         return;
@@ -1531,9 +1531,9 @@ pub(crate) fn apply_column_aliases(
         };
         let matching_aliases = aliases
             .iter()
-            .filter(|(_, reference)| {
+            .filter(|alias| {
                 SqlParser::table_name_matches_with_catalog(
-                    reference,
+                    &alias.relation,
                     source.catalog.as_deref(),
                     &source.schema,
                     &source.table,
@@ -1544,10 +1544,10 @@ pub(crate) fn apply_column_aliases(
                     .eq_ignore_ascii_case(schema.catalog.as_deref().unwrap_or_default())
                     && source.schema.eq_ignore_ascii_case(&schema.database)
             })
-            .map(|(alias, _)| alias.clone())
+            .cloned()
             .collect::<Vec<_>>();
         let mut matching_aliases = matching_aliases;
-        matching_aliases.sort_by_key(|alias| alias.to_ascii_lowercase());
+        matching_aliases.sort_by_key(|alias| alias.name.to_ascii_lowercase());
 
         let is_qualified = item.label != source.column;
         if matching_aliases.is_empty() || (!is_qualified && matching_aliases.len() == 1) {
@@ -1557,13 +1557,17 @@ pub(crate) fn apply_column_aliases(
 
         for alias in matching_aliases {
             let mut aliased = item.clone();
-            let label = format!("{}.{}", alias, source.column);
+            let label = format!("{}.{}", alias.name, source.column);
+            let insert_text = format!("{}.{}", alias.sql, source.column);
             aliased.label = label.clone();
-            aliased.insert_text = Some(label);
+            aliased.insert_text = Some(insert_text);
+            // A qualified display label must remain searchable by the bare
+            // column name, matching DBX/Monaco filtering behavior.
+            aliased.filter_text = Some(source.column.clone());
             aliased.sort_text = aliased
                 .sort_text
                 .as_ref()
-                .map(|sort_text| format!("{sort_text}:{}", alias.to_ascii_lowercase()));
+                .map(|sort_text| format!("{sort_text}:{}", alias.name.to_ascii_lowercase()));
             expanded.push(aliased);
         }
     }
@@ -2003,10 +2007,18 @@ mod tests {
             "id",
             "0",
         );
-        let aliases = HashMap::from([
-            ("u".to_string(), "users".to_string()),
-            ("o".to_string(), "orders".to_string()),
-        ]);
+        let aliases = vec![
+            RelationAlias {
+                name: "u".to_string(),
+                sql: "u".to_string(),
+                relation: "users".to_string(),
+            },
+            RelationAlias {
+                name: "o".to_string(),
+                sql: "o".to_string(),
+                relation: "orders".to_string(),
+            },
+        ];
         apply_column_aliases(&mut items, &schema, &aliases);
 
         assert_eq!(
@@ -2023,6 +2035,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("u.id"), Some("o.id")]
         );
+        assert!(items
+            .iter()
+            .all(|item| item.filter_text.as_deref() == Some("id")));
+    }
+
+    #[test]
+    fn aliased_columns_preserve_quoted_sql_spelling() {
+        let schema = test_schema();
+        let mut items = Vec::new();
+        add_schema_columns(&mut items, &schema, &["users".to_string()], true, "id", "0");
+        let aliases = vec![RelationAlias {
+            name: "User Alias".to_string(),
+            sql: "\"User Alias\"".to_string(),
+            relation: "users".to_string(),
+        }];
+        apply_column_aliases(&mut items, &schema, &aliases);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "User Alias.id");
+        assert_eq!(items[0].insert_text.as_deref(), Some("\"User Alias\".id"));
+        assert_eq!(items[0].filter_text.as_deref(), Some("id"));
     }
 
     #[test]

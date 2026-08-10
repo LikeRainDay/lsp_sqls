@@ -855,8 +855,8 @@ impl Dialect for HiveDialect {
             }
         }
 
-        if let (Some(schema), Some(tree)) = (schema, parse_result.tree.as_ref()) {
-            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+        if let (Some(schema), Some(_)) = (schema, parse_result.tree.as_ref()) {
+            let aliases = SqlParser::relation_aliases_at_position(sql, position);
             common::apply_column_aliases(&mut items, schema, &aliases);
         }
 

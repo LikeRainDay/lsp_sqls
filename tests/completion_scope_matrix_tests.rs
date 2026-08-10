@@ -1,5 +1,7 @@
 use sql_lsp::dialect::Dialect;
-use sql_lsp::dialects::{ClickHouseDialect, HiveDialect, MysqlDialect, PostgresDialect};
+use sql_lsp::dialects::{
+    ClickHouseDialect, HiveDialect, MysqlDialect, PostgresDialect, SqliteDialect,
+};
 use sql_lsp::schema::{Column, Schema, SchemaId, Table};
 use tower_lsp::lsp_types::Position;
 
@@ -152,10 +154,41 @@ async fn assert_scope_matrix<D: Dialect>(name: &str, dialect: D) {
     }
 }
 
+async fn assert_quoted_alias_insertion<D: Dialect>(name: &str, dialect: D, alias_sql: &str) {
+    let schema = completion_schema();
+    let sql = format!(
+        "SELECT * FROM users AS {alias_sql} JOIN orders o ON o.id = {alias_sql}.id WHERE i"
+    );
+    let items = complete(&dialect, &sql, sql.len(), &schema).await;
+    let item = items
+        .iter()
+        .find(|item| item.label == "User Source.id")
+        .unwrap_or_else(|| panic!("{name} should offer the quoted alias column: {items:?}"));
+
+    let expected_insert = format!("{alias_sql}.id");
+    assert_eq!(item.insert_text.as_deref(), Some(expected_insert.as_str()));
+    assert_eq!(item.filter_text.as_deref(), Some("id"));
+}
+
 #[tokio::test]
 async fn relational_dialects_share_datagrip_style_completion_scoping() {
     assert_scope_matrix("PostgreSQL", PostgresDialect::new()).await;
     assert_scope_matrix("MySQL", MysqlDialect::new()).await;
     assert_scope_matrix("Hive", HiveDialect::new()).await;
     assert_scope_matrix("ClickHouse", ClickHouseDialect::new()).await;
+}
+
+#[tokio::test]
+async fn relational_dialects_preserve_quoted_aliases_in_column_insertions() {
+    assert_quoted_alias_insertion("PostgreSQL", PostgresDialect::new(), "\"User Source\"").await;
+    assert_quoted_alias_insertion("MySQL", MysqlDialect::new(), "`User Source`").await;
+    assert_quoted_alias_insertion("SQLite", SqliteDialect::new(), "\"User Source\"").await;
+    assert_quoted_alias_insertion("Hive", HiveDialect::new(), "`User Source`").await;
+    assert_quoted_alias_insertion("ClickHouse", ClickHouseDialect::new(), "`User Source`").await;
+    assert_quoted_alias_insertion(
+        "SQL Server compatibility",
+        PostgresDialect::new(),
+        "[User Source]",
+    )
+    .await;
 }
