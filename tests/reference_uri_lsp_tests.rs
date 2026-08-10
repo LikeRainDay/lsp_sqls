@@ -836,6 +836,129 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
 }
 
 #[test]
+fn missing_join_condition_code_action_uses_metadata_and_product_quoting() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let uri = "file:///workspace/join-fix.sqlserver.sql";
+    let schema_id = "77777777-7777-4777-8777-777777777777";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "app",
+                    "tables": [
+                        {
+                            "name": "orders",
+                            "columns": [{
+                                "name": "Customer ID",
+                                "data_type": "bigint",
+                                "nullable": false,
+                                "primary_key": false,
+                                "unique": false,
+                                "indexed": true,
+                                "comment": null,
+                                "source_location": null
+                            }],
+                            "indexes": [],
+                            "constraints": [{
+                                "name": "orders_customer_fk",
+                                "constraint_type": "FOREIGN KEY",
+                                "columns": ["Customer ID"],
+                                "referenced_schema": "app",
+                                "referenced_table": "customers",
+                                "referenced_columns": ["Customer ID"],
+                                "definition": null
+                            }],
+                            "comment": null,
+                            "source_location": null
+                        },
+                        {
+                            "name": "customers",
+                            "columns": [{
+                                "name": "Customer ID",
+                                "data_type": "bigint",
+                                "nullable": false,
+                                "primary_key": true,
+                                "unique": true,
+                                "indexed": true,
+                                "comment": null,
+                                "source_location": null
+                            }],
+                            "indexes": [],
+                            "constraints": [],
+                            "comment": null,
+                            "source_location": null
+                        }
+                    ],
+                    "functions": [],
+                    "source_uri": null
+                }],
+                "fileSchemas": { (uri): schema_id },
+                "fileDialects": { (uri): "sqlserver" }
+            }
+        }),
+    );
+    let sql = "SELECT o.[Customer ID] FROM app.orders o JOIN app.customers c;";
+    lsp.open(uri, "sqlserver", sql);
+
+    let diagnostic_report = lsp.request(
+        "textDocument/diagnostic",
+        json!({
+            "textDocument": { "uri": uri },
+            "identifier": "sql-lsp"
+        }),
+    );
+    let diagnostic = diagnostic_report
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|diagnostic| {
+                diagnostic.get("code").and_then(Value::as_str) == Some("OXIDE002")
+            })
+        })
+        .cloned()
+        .expect("missing JOIN diagnostic");
+    let join_start = sql.find("JOIN").unwrap();
+    let actions = lsp.request(
+        "textDocument/codeAction",
+        json!({
+            "textDocument": { "uri": uri },
+            "range": {
+                "start": { "line": 0, "character": join_start },
+                "end": { "line": 0, "character": join_start + 4 }
+            },
+            "context": {
+                "diagnostics": [diagnostic],
+                "only": ["quickfix"]
+            }
+        }),
+    );
+    let inferred = actions
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|action| {
+                action.get("title").and_then(Value::as_str)
+                    == Some("Add JOIN condition via orders_customer_fk")
+            })
+        })
+        .expect("foreign-key JOIN quick fix");
+    assert_eq!(
+        inferred.get("isPreferred").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        inferred
+            .pointer("/edit/changes/file:~1~1~1workspace~1join-fix.sqlserver.sql/0/newText")
+            .and_then(Value::as_str),
+        Some(" ON o.[Customer ID] = c.[Customer ID]"),
+        "{inferred}"
+    );
+}
+
+#[test]
 fn signature_help_falls_back_to_dialect_builtins_without_schema_metadata() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();

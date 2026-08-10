@@ -7,7 +7,7 @@ use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
 use crate::placeholder::SqlPlaceholderDialect;
 use crate::position::lsp_position_at_end;
-use crate::schema::{Column, Schema, SchemaId, SchemaManager, Table};
+use crate::schema::{Column, Constraint, Schema, SchemaId, SchemaManager, Table};
 use crate::token::Keywords;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -1479,6 +1479,8 @@ fn quote_completion_identifier(identifier: &str, dialect_name: &str) -> String {
 
     if matches!(dialect_name, "mysql" | "hive" | "clickhouse") {
         format!("`{}`", identifier.replace('`', "``"))
+    } else if dialect_name == "sqlserver" {
+        format!("[{}]", identifier.replace(']', "]]"))
     } else {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
@@ -2762,6 +2764,10 @@ impl LanguageServer for SqlLspServer {
         let Some(dialect) = self.get_dialect_for_file(&uri_string) else {
             return Ok(None);
         };
+        let dialect_identity = self
+            .dialect_identity_for_file(&uri_string)
+            .unwrap_or_else(|| dialect.name().to_string());
+        let schema = self.get_schema_for_position(&uri_string, &text, params.range.start);
         let mut actions = Vec::new();
         // Formatting is already exposed through textDocument/formatting. Do
         // not format the full console for every automatic lightbulb request;
@@ -2782,10 +2788,13 @@ impl LanguageServer for SqlLspServer {
             }
         }
         if code_action_kind_available(&params.context, &CodeActionKind::REFACTOR_REWRITE) {
-            let schema = self.get_schema_for_position(&uri_string, &text, params.range.start);
-            if let Some(action) =
-                expand_select_star_action(&text, &uri, params.range, schema.clone(), dialect.name())
-            {
+            if let Some(action) = expand_select_star_action(
+                &text,
+                &uri,
+                params.range,
+                schema.clone(),
+                &dialect_identity,
+            ) {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
             actions.extend(
@@ -2794,7 +2803,7 @@ impl LanguageServer for SqlLspServer {
                     &uri,
                     params.range,
                     schema.as_ref(),
-                    dialect.name(),
+                    &dialect_identity,
                 )
                 .into_iter()
                 .map(CodeActionOrCommand::CodeAction),
@@ -2813,6 +2822,21 @@ impl LanguageServer for SqlLspServer {
                 if let Some(action) = add_mutation_safety_guard_action(&text, &uri, diagnostic) {
                     actions.push(CodeActionOrCommand::CodeAction(action));
                 }
+            } else if matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "OXIDE002"
+            ) {
+                actions.extend(
+                    add_join_condition_actions(
+                        &text,
+                        &uri,
+                        diagnostic,
+                        schema.as_ref(),
+                        &dialect_identity,
+                    )
+                    .into_iter()
+                    .map(CodeActionOrCommand::CodeAction),
+                );
             }
         }
         Ok(Some(actions))
@@ -3703,7 +3727,7 @@ fn inspection_suppressed(statement: &str, code: &str) -> bool {
         .contains(&format!("NOINSPECTION {}", code.to_ascii_uppercase()))
 }
 
-fn join_without_condition_offset(normalized: &str) -> Option<usize> {
+fn join_without_condition_span(normalized: &str) -> Option<(usize, usize)> {
     for (offset, _) in normalized.match_indices("JOIN") {
         let before = normalized[..offset].trim_end();
         let keyword_before = before.split_whitespace().next_back().unwrap_or_default();
@@ -3720,10 +3744,15 @@ fn join_without_condition_offset(normalized: &str) -> Option<usize> {
         .unwrap_or(tail.len());
         let join_clause = &tail[..boundary];
         if !contains_sql_keyword(join_clause, "ON") && !contains_sql_keyword(join_clause, "USING") {
-            return Some(offset);
+            let relation_end = join_clause.trim_end_matches(';').trim_end().len();
+            return Some((offset, offset + "JOIN".len() + relation_end));
         }
     }
     None
+}
+
+fn join_without_condition_offset(normalized: &str) -> Option<usize> {
+    join_without_condition_span(normalized).map(|(offset, _)| offset)
 }
 
 fn ambiguous_column_diagnostics(
@@ -4694,6 +4723,230 @@ fn add_mutation_safety_guard_action(
         is_preferred: Some(true),
         ..Default::default()
     })
+}
+
+fn foreign_key_targets_table(schema: &Schema, constraint: &Constraint, target: &Table) -> bool {
+    if !constraint
+        .constraint_type
+        .to_ascii_uppercase()
+        .contains("FOREIGN")
+    {
+        return false;
+    }
+    let Some(referenced_table) = constraint.referenced_table.as_deref() else {
+        return false;
+    };
+    let reference = constraint
+        .referenced_schema
+        .as_deref()
+        .filter(|schema| !schema.trim().is_empty())
+        .map(|referenced_schema| format!("{referenced_schema}.{referenced_table}"))
+        .unwrap_or_else(|| referenced_table.to_string());
+    schema_table_matches(schema, &reference, target)
+}
+
+fn join_reference_qualifier(
+    schema: &Schema,
+    table: &Table,
+    reference: &str,
+    aliases: &HashMap<String, String>,
+    dialect_name: &str,
+) -> Option<String> {
+    let mut matching_aliases = aliases
+        .iter()
+        .filter(|(_, target)| schema_table_matches(schema, target, table))
+        .map(|(alias, _)| alias.as_str());
+    let alias = matching_aliases.next();
+    if alias.is_some() && matching_aliases.next().is_some() {
+        // Multiple aliases for the same relation form a self-join-like shape;
+        // the alias map does not prove which occurrence owns this constraint.
+        return None;
+    }
+    Some(quote_completion_identifier(
+        alias
+            .map(str::to_string)
+            .unwrap_or_else(|| SqlParser::identifier_last_part(reference))
+            .as_str(),
+        dialect_name,
+    ))
+}
+
+fn join_predicate(
+    left_qualifier: &str,
+    left_columns: &[String],
+    right_qualifier: &str,
+    right_columns: &[String],
+    dialect_name: &str,
+) -> Option<String> {
+    if left_columns.is_empty() || left_columns.len() != right_columns.len() {
+        return None;
+    }
+    Some(
+        left_columns
+            .iter()
+            .zip(right_columns)
+            .map(|(left, right)| {
+                format!(
+                    "{left_qualifier}.{} = {right_qualifier}.{}",
+                    quote_completion_identifier(left, dialect_name),
+                    quote_completion_identifier(right, dialect_name),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
+}
+
+fn add_join_condition_actions(
+    text: &str,
+    uri: &Url,
+    diagnostic: &Diagnostic,
+    schema: Option<&Schema>,
+    dialect_name: &str,
+) -> Vec<CodeAction> {
+    const MAX_INFERRED_JOIN_ACTIONS: usize = 16;
+
+    let join_start = position_to_byte_offset(text, diagnostic.range.start).min(text.len());
+    let statement_start = text[..join_start].rfind(';').map_or(0, |offset| offset + 1);
+    let statement_end = text[join_start..]
+        .find(';')
+        .map_or(text.len(), |offset| join_start + offset + 1);
+    let statement = &text[statement_start..statement_end];
+    let normalized = SqlParser::mask_sql_noise(statement).to_ascii_uppercase();
+    let expected_join = join_start.saturating_sub(statement_start);
+    let Some((join_relative, insert_relative)) = join_without_condition_span(&normalized) else {
+        return Vec::new();
+    };
+    if join_relative != expected_join || insert_relative > statement.len() {
+        return Vec::new();
+    }
+    let insert_offset = statement_start + insert_relative;
+    let insert_range = range_for_offsets(text, insert_offset, insert_offset);
+    let fallback = || CodeAction {
+        title: "Add non-matching JOIN safety guard".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diagnostic.clone()]),
+        edit: Some(single_document_edit(
+            uri.clone(),
+            insert_range,
+            " ON 1 = 0 /* replace join condition before executing */".to_string(),
+        )),
+        is_preferred: Some(false),
+        ..Default::default()
+    };
+
+    let Some(schema) = schema else {
+        return vec![fallback()];
+    };
+    let join_prefix = &statement[..insert_relative];
+    let mut parser = SqlParser::new();
+    let Some(tree) = parser.parse(join_prefix).tree else {
+        return vec![fallback()];
+    };
+    let references = parser.extract_referenced_tables(&tree, join_prefix);
+    let Some(candidate_reference) = references.last() else {
+        return vec![fallback()];
+    };
+    if references.len() < 2 {
+        return vec![fallback()];
+    }
+    let Some(candidate) = schema
+        .tables
+        .iter()
+        .find(|table| schema_table_matches(schema, candidate_reference, table))
+    else {
+        return vec![fallback()];
+    };
+    let aliases = parser.extract_aliases(&tree, join_prefix);
+    let Some(candidate_qualifier) = join_reference_qualifier(
+        schema,
+        candidate,
+        candidate_reference,
+        &aliases,
+        dialect_name,
+    ) else {
+        return vec![fallback()];
+    };
+
+    let mut inferred = Vec::<(String, String)>::new();
+    let mut seen = HashSet::new();
+    for existing_reference in &references[..references.len() - 1] {
+        let Some(existing) = schema
+            .tables
+            .iter()
+            .find(|table| schema_table_matches(schema, existing_reference, table))
+        else {
+            continue;
+        };
+        if std::ptr::eq(candidate, existing) {
+            continue;
+        }
+        let Some(existing_qualifier) =
+            join_reference_qualifier(schema, existing, existing_reference, &aliases, dialect_name)
+        else {
+            continue;
+        };
+
+        for constraint in &candidate.constraints {
+            if !foreign_key_targets_table(schema, constraint, existing) {
+                continue;
+            }
+            if let Some(predicate) = join_predicate(
+                &candidate_qualifier,
+                &constraint.columns,
+                &existing_qualifier,
+                &constraint.referenced_columns,
+                dialect_name,
+            ) {
+                if seen.insert(predicate.to_ascii_lowercase()) {
+                    inferred.push((constraint.name.clone(), predicate));
+                }
+            }
+        }
+        for constraint in &existing.constraints {
+            if !foreign_key_targets_table(schema, constraint, candidate) {
+                continue;
+            }
+            if let Some(predicate) = join_predicate(
+                &existing_qualifier,
+                &constraint.columns,
+                &candidate_qualifier,
+                &constraint.referenced_columns,
+                dialect_name,
+            ) {
+                if seen.insert(predicate.to_ascii_lowercase()) {
+                    inferred.push((constraint.name.clone(), predicate));
+                }
+            }
+        }
+        if inferred.len() >= MAX_INFERRED_JOIN_ACTIONS {
+            break;
+        }
+    }
+    inferred.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    inferred.truncate(MAX_INFERRED_JOIN_ACTIONS);
+    let unique = inferred.len() == 1;
+    let mut actions = inferred
+        .into_iter()
+        .map(|(constraint_name, predicate)| CodeAction {
+            title: if constraint_name.trim().is_empty() {
+                "Add JOIN condition from foreign-key metadata".to_string()
+            } else {
+                format!("Add JOIN condition via {constraint_name}")
+            },
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diagnostic.clone()]),
+            edit: Some(single_document_edit(
+                uri.clone(),
+                insert_range,
+                format!(" ON {predicate}"),
+            )),
+            is_preferred: Some(unique),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    actions.push(fallback());
+    actions
 }
 
 fn expand_select_star_action(
@@ -6324,18 +6577,18 @@ fn infer_dialect_from_uri_and_language(
 mod tests {
     use super::{
         add_builtin_function_completions, add_insert_all_columns_completion,
-        add_insert_statement_snippets, add_referenced_alias_completions,
-        apply_completed_sql_context_completion_edits, apply_completion_preferences,
-        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
-        calculate_schema_match_score, client_supports_completion_documentation_resolve,
-        code_action_kind_available, code_action_kind_explicitly_requested,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        deduplicate_simple_completion_items, defer_completion_documentation,
-        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables,
-        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
-        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
-        resolve_completion_documentation, rewrite_current_document_location_uri,
+        add_insert_statement_snippets, add_join_condition_actions,
+        add_referenced_alias_completions, apply_completed_sql_context_completion_edits,
+        apply_completion_preferences, apply_qualified_identifier_completion_edits,
+        augment_schema_with_local_relations, calculate_schema_match_score,
+        client_supports_completion_documentation_resolve, code_action_kind_available,
+        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, deduplicate_simple_completion_items,
+        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
+        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
+        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
         rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
@@ -6348,7 +6601,7 @@ mod tests {
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
     use crate::schema::{
-        Column, Function, FunctionParameter, Schema, SchemaId, SchemaManager, Table,
+        Column, Constraint, Function, FunctionParameter, Schema, SchemaId, SchemaManager, Table,
     };
     use dashmap::DashMap;
     use std::sync::atomic::AtomicU64;
@@ -7822,6 +8075,109 @@ mod tests {
             &source_only,
             &CodeActionKind::REFACTOR_REWRITE
         ));
+    }
+
+    #[test]
+    fn missing_join_condition_quick_fix_uses_unique_foreign_key_metadata() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].constraints.push(Constraint {
+            name: "orders_customer_fk".to_string(),
+            constraint_type: "FOREIGN KEY".to_string(),
+            columns: vec!["customer_id".to_string()],
+            referenced_schema: Some("app".to_string()),
+            referenced_table: Some("customers".to_string()),
+            referenced_columns: vec!["id".to_string()],
+            definition: None,
+        });
+        let sql = "SELECT o.id FROM app.orders o JOIN app.customers c WHERE c.name <> '';";
+        let diagnostic = sql_inspection_diagnostics(sql, Some(&schema), "postgres")
+            .into_iter()
+            .find(|diagnostic| {
+                diagnostic.code.as_ref().is_some_and(|code| {
+                    matches!(code, tower_lsp::lsp_types::NumberOrString::String(code) if code == "OXIDE002")
+                })
+            })
+            .expect("missing JOIN diagnostic");
+        let uri = Url::parse("file:///query.sql").unwrap();
+
+        let actions = add_join_condition_actions(sql, &uri, &diagnostic, Some(&schema), "postgres");
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions[0].title,
+            "Add JOIN condition via orders_customer_fk"
+        );
+        assert_eq!(actions[0].is_preferred, Some(true));
+        assert_eq!(
+            code_action_replacement(&actions[0], &uri),
+            " ON o.customer_id = c.id"
+        );
+        let edit = &code_action_edits(&actions[0], &uri)[0];
+        assert_eq!(
+            position_to_byte_offset(sql, edit.range.start),
+            sql.find(" WHERE").unwrap()
+        );
+        assert_eq!(actions[1].title, "Add non-matching JOIN safety guard");
+    }
+
+    #[test]
+    fn missing_join_condition_quick_fix_keeps_ambiguous_foreign_keys_as_choices() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].constraints.extend([
+            Constraint {
+                name: "orders_customer_fk".to_string(),
+                constraint_type: "FOREIGN KEY".to_string(),
+                columns: vec!["customer_id".to_string()],
+                referenced_table: Some("customers".to_string()),
+                referenced_columns: vec!["id".to_string()],
+                ..Default::default()
+            },
+            Constraint {
+                name: "orders_owner_fk".to_string(),
+                constraint_type: "FOREIGN KEY".to_string(),
+                columns: vec!["id".to_string()],
+                referenced_table: Some("customers".to_string()),
+                referenced_columns: vec!["id".to_string()],
+                ..Default::default()
+            },
+        ]);
+        let sql = "SELECT * FROM app.orders o JOIN app.customers c;";
+        let diagnostic = sql_inspection_diagnostics(sql, Some(&schema), "mysql")
+            .into_iter()
+            .find(|diagnostic| diagnostic.message.starts_with("JOIN has no"))
+            .expect("missing JOIN diagnostic");
+        let uri = Url::parse("file:///query.sql").unwrap();
+
+        let actions = add_join_condition_actions(sql, &uri, &diagnostic, Some(&schema), "mysql");
+
+        assert_eq!(actions.len(), 3);
+        assert!(actions[..2]
+            .iter()
+            .all(|action| action.is_preferred == Some(false)));
+        assert_eq!(
+            position_to_byte_offset(sql, code_action_edits(&actions[0], &uri)[0].range.start),
+            sql.len() - 1,
+        );
+    }
+
+    #[test]
+    fn missing_join_condition_quick_fix_falls_back_without_proven_metadata() {
+        let schema = completion_schema_with_columns();
+        let sql = "SELECT * FROM app.orders o JOIN app.customers c";
+        let diagnostic = sql_inspection_diagnostics(sql, Some(&schema), "postgres")
+            .into_iter()
+            .find(|diagnostic| diagnostic.message.starts_with("JOIN has no"))
+            .expect("missing JOIN diagnostic");
+        let uri = Url::parse("file:///query.sql").unwrap();
+
+        let actions = add_join_condition_actions(sql, &uri, &diagnostic, Some(&schema), "postgres");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Add non-matching JOIN safety guard");
+        assert_eq!(
+            code_action_replacement(&actions[0], &uri),
+            " ON 1 = 0 /* replace join condition before executing */"
+        );
     }
 
     #[test]
