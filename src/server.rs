@@ -225,6 +225,8 @@ struct CachedProjectSqlIndex {
 struct CompletionPreferences {
     #[serde(default = "default_keyword_case")]
     keyword_case: KeywordCase,
+    #[serde(default = "default_function_case")]
+    function_case: KeywordCase,
     #[serde(default)]
     table_alias: TableAliasStyle,
 }
@@ -269,6 +271,7 @@ impl Default for CompletionPreferences {
     fn default() -> Self {
         Self {
             keyword_case: KeywordCase::Upper,
+            function_case: KeywordCase::Preserve,
             table_alias: TableAliasStyle::None,
         }
     }
@@ -284,6 +287,10 @@ enum KeywordCase {
 
 fn default_keyword_case() -> KeywordCase {
     KeywordCase::Upper
+}
+
+fn default_function_case() -> KeywordCase {
+    KeywordCase::Preserve
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -879,9 +886,7 @@ impl SqlLspServer {
         add_referenced_alias_completions(text, position, &mut items);
         apply_completed_sql_context_completion_edits(text, position, &mut items);
         apply_qualified_identifier_completion_edits(text, position, &mut items);
-        if relational_completion {
-            apply_completion_preferences(text, position, &mut items, &preferences);
-        }
+        apply_completion_preferences(text, position, &mut items, &preferences);
         deduplicate_simple_completion_items(&mut items);
         apply_high_frequency_keyword_ranking(&mut items);
         Some(items)
@@ -1360,18 +1365,29 @@ fn apply_completion_preferences(
         && relation_alias_context_at_position(text, position);
 
     for item in items {
-        if item.kind == Some(CompletionItemKind::KEYWORD) {
-            let transform = |value: &str| match preferences.keyword_case {
-                KeywordCase::Upper => value.to_ascii_uppercase(),
-                KeywordCase::Lower => value.to_ascii_lowercase(),
-                KeywordCase::Preserve => value.to_string(),
-            };
+        if item.kind == Some(CompletionItemKind::KEYWORD)
+            || completion_item_uses_generated_keyword_case(item)
+        {
+            let transform = |value: &str| apply_identifier_case(value, preferences.keyword_case);
             item.label = transform(&item.label);
             if let Some(insert_text) = item.insert_text.as_mut() {
                 *insert_text = transform(insert_text);
             }
             update_completion_text_edit(item, &transform);
-        } else if add_table_alias && is_relation_completion_kind(item.kind) {
+        }
+
+        if completion_item_uses_generated_function_case(item) {
+            apply_generated_function_case(item, preferences.function_case);
+            if item
+                .sort_text
+                .as_deref()
+                .is_some_and(|sort_text| sort_text.starts_with("1:window-function:"))
+            {
+                apply_generated_template_keyword_case(item, preferences.keyword_case);
+            }
+        }
+
+        if add_table_alias && is_relation_completion_kind(item.kind) {
             let Some(alias) = table_alias_initials(&item.label) else {
                 continue;
             };
@@ -1388,6 +1404,106 @@ fn apply_completion_preferences(
             update_completion_text_edit(item, &append_alias);
         }
     }
+}
+
+fn apply_identifier_case(value: &str, requested_case: KeywordCase) -> String {
+    match requested_case {
+        KeywordCase::Upper => value.to_ascii_uppercase(),
+        KeywordCase::Lower => value.to_ascii_lowercase(),
+        KeywordCase::Preserve => value.to_string(),
+    }
+}
+
+fn completion_item_uses_generated_keyword_case(item: &CompletionItem) -> bool {
+    let sort_text = item.sort_text.as_deref().unwrap_or_default();
+    sort_text.starts_with("1:builtin-value:")
+        || (sort_text.starts_with("1:oracle-table-function:")
+            && matches!(item.label.to_ascii_uppercase().as_str(), "TABLE" | "THE"))
+}
+
+fn completion_item_uses_generated_function_case(item: &CompletionItem) -> bool {
+    let sort_text = item.sort_text.as_deref().unwrap_or_default();
+    sort_text.starts_with("1:builtin:")
+        || sort_text.starts_with("1:window-function:")
+        || sort_text.starts_with("1:table-function:")
+        || (sort_text.starts_with("1:oracle-table-function:")
+            && !matches!(item.label.to_ascii_uppercase().as_str(), "TABLE" | "THE"))
+}
+
+fn replace_identifier_prefix(value: &str, original: &str, replacement: &str) -> String {
+    let trimmed = value.trim_start_matches(char::is_whitespace);
+    let leading_len = value.len().saturating_sub(trimmed.len());
+    let Some(prefix) = trimmed.get(..original.len()) else {
+        return value.to_string();
+    };
+    if !prefix.eq_ignore_ascii_case(original) {
+        return value.to_string();
+    }
+    format!(
+        "{}{}{}",
+        &value[..leading_len],
+        replacement,
+        &trimmed[original.len()..]
+    )
+}
+
+fn apply_generated_function_case(item: &mut CompletionItem, function_case: KeywordCase) {
+    let original = item.label.clone();
+    let replacement = apply_identifier_case(&original, function_case);
+    item.label = replacement.clone();
+    if item
+        .filter_text
+        .as_deref()
+        .is_some_and(|filter_text| filter_text.eq_ignore_ascii_case(&original))
+    {
+        item.filter_text = Some(replacement.clone());
+    }
+    let transform = |value: &str| replace_identifier_prefix(value, &original, &replacement);
+    if let Some(insert_text) = item.insert_text.as_mut() {
+        *insert_text = transform(insert_text);
+    }
+    update_completion_text_edit(item, &transform);
+}
+
+fn generated_template_keyword_case(value: &str, keyword_case: KeywordCase) -> String {
+    if matches!(keyword_case, KeywordCase::Preserve) {
+        return value.to_string();
+    }
+    const KEYWORDS: &[&str] = &["AS", "INTERVAL", "OVER", "PARTITION", "BY", "ORDER"];
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len());
+    let mut cursor = 0usize;
+    while cursor < characters.len() {
+        if !characters[cursor].is_ascii_alphanumeric() && characters[cursor] != '_' {
+            output.push(characters[cursor]);
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < characters.len()
+            && (characters[cursor].is_ascii_alphanumeric() || characters[cursor] == '_')
+        {
+            cursor += 1;
+        }
+        let word = characters[start..cursor].iter().collect::<String>();
+        if KEYWORDS
+            .iter()
+            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+        {
+            output.push_str(&apply_identifier_case(&word, keyword_case));
+        } else {
+            output.push_str(&word);
+        }
+    }
+    output
+}
+
+fn apply_generated_template_keyword_case(item: &mut CompletionItem, keyword_case: KeywordCase) {
+    let transform = |value: &str| generated_template_keyword_case(value, keyword_case);
+    if let Some(insert_text) = item.insert_text.as_mut() {
+        *insert_text = transform(insert_text);
+    }
+    update_completion_text_edit(item, &transform);
 }
 
 fn builtin_function_context(text: &str, position: Position) -> Option<String> {
@@ -8970,6 +9086,7 @@ mod tests {
             &mut items,
             &CompletionPreferences {
                 keyword_case: KeywordCase::Lower,
+                function_case: KeywordCase::Preserve,
                 table_alias: TableAliasStyle::None,
             },
         );
@@ -8980,6 +9097,108 @@ mod tests {
             panic!("keyword completion should keep its text edit");
         };
         assert_eq!(edit.new_text, " select");
+    }
+
+    #[test]
+    fn completion_preferences_case_generated_functions_without_rewriting_live_metadata() {
+        let mut items = vec![
+            CompletionItem {
+                label: "COALESCE".to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                sort_text: Some("1:builtin:coalesce".to_string()),
+                filter_text: Some("COALESCE".to_string()),
+                insert_text: Some("COALESCE(${1:value})".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "ROW_NUMBER".to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                sort_text: Some("1:window-function:row_number".to_string()),
+                insert_text: Some(
+                    "ROW_NUMBER() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})".to_string(),
+                ),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                    range: Range::default(),
+                    new_text: " ROW_NUMBER() OVER (PARTITION BY ${1:column} ORDER BY ${2:column})"
+                        .to_string(),
+                })),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "CURRENT_DATE".to_string(),
+                kind: Some(CompletionItemKind::VALUE),
+                sort_text: Some("1:builtin-value:current_date".to_string()),
+                insert_text: Some("CURRENT_DATE".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "TABLE".to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                sort_text: Some("1:oracle-table-function:table".to_string()),
+                insert_text: Some("TABLE(${1:function_call})".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "JSON_TABLE".to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                sort_text: Some("1:oracle-table-function:json_table".to_string()),
+                insert_text: Some("JSON_TABLE(${1:expr}, ${2:path})".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "MixedCaseRoutine".to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("Function: MixedCaseRoutine()".to_string()),
+                sort_text: Some("0:oracle-table-routine:mixedcaseroutine".to_string()),
+                insert_text: Some("MixedCaseRoutine()".to_string()),
+                ..CompletionItem::default()
+            },
+        ];
+
+        apply_completion_preferences(
+            "SELECT ",
+            Position::new(0, 7),
+            &mut items,
+            &CompletionPreferences {
+                keyword_case: KeywordCase::Lower,
+                function_case: KeywordCase::Lower,
+                table_alias: TableAliasStyle::None,
+            },
+        );
+
+        assert_eq!(items[0].label, "coalesce");
+        assert_eq!(
+            items[0].insert_text.as_deref(),
+            Some("coalesce(${1:value})")
+        );
+        assert_eq!(items[1].label, "row_number");
+        assert_eq!(
+            items[1].insert_text.as_deref(),
+            Some("row_number() over (partition by ${1:column} order by ${2:column})")
+        );
+        let Some(CompletionTextEdit::Edit(edit)) = items[1].text_edit.as_ref() else {
+            panic!("window completion should keep its text edit");
+        };
+        assert_eq!(
+            edit.new_text,
+            " row_number() over (partition by ${1:column} order by ${2:column})"
+        );
+        assert_eq!(items[2].label, "current_date");
+        assert_eq!(items[3].label, "table");
+        assert_eq!(items[4].label, "json_table");
+        assert_eq!(items[5].label, "MixedCaseRoutine");
+        assert_eq!(items[5].insert_text.as_deref(), Some("MixedCaseRoutine()"));
+    }
+
+    #[test]
+    fn completion_preferences_default_function_case_preserves_legacy_clients() {
+        let preferences: CompletionPreferences = serde_json::from_value(serde_json::json!({
+            "keywordCase": "lower",
+            "tableAlias": "none"
+        }))
+        .expect("completion preferences should deserialize");
+
+        assert!(matches!(preferences.function_case, KeywordCase::Preserve));
     }
 
     #[test]
@@ -9133,6 +9352,7 @@ mod tests {
     fn completion_preferences_add_initial_alias_only_for_relation_context() {
         let preferences = CompletionPreferences {
             keyword_case: KeywordCase::Upper,
+            function_case: KeywordCase::Preserve,
             table_alias: TableAliasStyle::Initials,
         };
         let mut from_items = vec![CompletionItem {
@@ -9342,6 +9562,7 @@ mod tests {
             &mut items,
             &CompletionPreferences {
                 keyword_case: KeywordCase::Lower,
+                function_case: KeywordCase::Preserve,
                 table_alias: TableAliasStyle::None,
             },
             "postgres",
