@@ -148,6 +148,18 @@ const SQLITE_SIGNATURES: &[(&str, &[&str])] = &[
     ("JSON_SET", &["json", "path", "value"]),
     ("STRFTIME", &["format", "time"]),
     ("IFNULL", &["expression", "fallback"]),
+    ("NOW", &[]),
+];
+
+// DBX deliberately removes NOW() from the SQLite-compatible Cloudflare D1
+// fallback because D1 exposes SQLite date/time functions rather than a NOW
+// routine. Keep the product boundary explicit instead of widening SQLite's
+// convenience catalog to every compatibility alias.
+const CLOUDFLARE_D1_SIGNATURES: &[(&str, &[&str])] = &[
+    ("JSON_EXTRACT", &["json", "path"]),
+    ("JSON_SET", &["json", "path", "value"]),
+    ("STRFTIME", &["format", "time"]),
+    ("IFNULL", &["expression", "fallback"]),
 ];
 
 const SQLSERVER_SIGNATURES: &[(&str, &[&str])] = &[
@@ -184,8 +196,27 @@ const MANTICORE_SIGNATURES: &[(&str, &[&str])] = &[
     ("SNIPPET", &["field", "query"]),
     ("WEIGHT", &[]),
     ("ZONESPANLIST", &[]),
+    ("BIGINT", &["expression"]),
+    ("DOUBLE", &["expression"]),
+    ("INTEGER", &["expression"]),
+    ("SINT", &["expression"]),
+    ("TO_STRING", &["expression"]),
+    ("UINT", &["expression"]),
+    ("UINT64", &["expression"]),
     ("GEODIST", &["lat1", "lon1", "lat2", "lon2"]),
+    ("CONTAINS", &["polygon", "point"]),
+    ("POLY2D", &["...points"]),
+    ("CRC32", &["expression"]),
+    ("FIBONACCI", &["number"]),
     ("KNN_DIST", &[]),
+    ("NOW", &[]),
+    ("DATE_FORMAT", &["timestamp", "format"]),
+    ("DAY", &["timestamp"]),
+    ("MONTH", &["timestamp"]),
+    ("YEAR", &["timestamp"]),
+    ("HOUR", &["timestamp"]),
+    ("MINUTE", &["timestamp"]),
+    ("SECOND", &["timestamp"]),
 ];
 
 // IBM Db2 11.5 built-in function catalog. These stable scalar forms are kept
@@ -374,7 +405,8 @@ fn dialect_signature_entries(
         "dameng" => Some(DAMENG_SIGNATURES),
         "mysql" | "mariadb" => Some(MYSQL_SIGNATURES),
         "postgres" | "postgresql" | "pgsql" | "psql" => Some(POSTGRES_SIGNATURES),
-        "sqlite" | "sqlite3" | "turso" | "cloudflare-d1" => Some(SQLITE_SIGNATURES),
+        "sqlite" | "sqlite3" | "turso" => Some(SQLITE_SIGNATURES),
+        "cloudflare-d1" => Some(CLOUDFLARE_D1_SIGNATURES),
         "sqlserver" => Some(SQLSERVER_SIGNATURES),
         "manticoresearch" => Some(MANTICORE_SIGNATURES),
         _ => None,
@@ -544,5 +576,30 @@ mod tests {
             builtin_signatures_for("dameng", "TO_DATE", None)[0].parameter_groups[0],
             ["string", "format"]
         );
+    }
+
+    #[test]
+    fn manticore_and_sqlite_compatibility_catalogs_match_dbx_boundaries() {
+        let manticore = builtin_signature_catalog_for("manticoresearch", None);
+        assert_eq!(
+            manticore
+                .iter()
+                .filter(|signature| {
+                    ["POLY2D", "TO_STRING", "CRC32", "DATE_FORMAT"].contains(&signature.name)
+                })
+                .count(),
+            4
+        );
+        assert_eq!(
+            builtin_signatures_for("manticoresearch", "POLY2D", None)[0].parameter_groups[0],
+            ["...points"]
+        );
+
+        assert_eq!(
+            builtin_signatures_for("sqlite", "NOW", None)[0].parameter_groups[0],
+            Vec::<&str>::new()
+        );
+        assert!(builtin_signatures_for("cloudflare-d1", "NOW", None).is_empty());
+        assert!(!builtin_signatures_for("cloudflare-d1", "STRFTIME", None).is_empty());
     }
 }

@@ -1151,6 +1151,72 @@ fn db2_and_dameng_completion_keep_product_specific_call_styles() {
 }
 
 #[test]
+fn manticore_and_cloudflare_d1_completion_keep_dbx_catalog_boundaries() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let manticore_uri = "file:///workspace/search.manticore.sql";
+    let sqlite_uri = "file:///workspace/local.sqlite.sql";
+    let d1_uri = "file:///workspace/edge.d1.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": {
+                    (manticore_uri): "manticoresearch",
+                    (sqlite_uri): "sqlite",
+                    (d1_uri): "cloudflare-d1"
+                }
+            }
+        }),
+    );
+    lsp.open(manticore_uri, "sql", "SELECT pol");
+    lsp.open(sqlite_uri, "sql", "SELECT now");
+    lsp.open(d1_uri, "sql", "SELECT now");
+
+    let completion_at = |lsp: &mut LspProcess, uri: &str, character: usize| {
+        lsp.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": character },
+                "context": { "triggerKind": 1 }
+            }),
+        )
+    };
+    let manticore = completion_at(&mut lsp, manticore_uri, "SELECT pol".len());
+    let sqlite = completion_at(&mut lsp, sqlite_uri, "SELECT now".len());
+    let d1 = completion_at(&mut lsp, d1_uri, "SELECT now".len());
+    let find = |completion: &Value, label: &str| {
+        completion
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    let manticore_poly2d = find(&manticore, "POLY2D").expect("Manticore POLY2D");
+    assert_eq!(
+        manticore_poly2d.get("insertText").and_then(Value::as_str),
+        Some("POLY2D(${1:points})")
+    );
+    let sqlite_now = find(&sqlite, "NOW").expect("SQLite NOW");
+    assert_eq!(
+        sqlite_now.get("insertText").and_then(Value::as_str),
+        Some("NOW()")
+    );
+    assert!(!d1.as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("label").and_then(Value::as_str) == Some("NOW")
+                && item.get("insertText").and_then(Value::as_str) == Some("NOW()")
+        })
+    }));
+}
+
+#[test]
 fn semantic_rename_updates_open_documents_in_the_same_schema() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();

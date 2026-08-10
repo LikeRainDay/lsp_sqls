@@ -1281,22 +1281,32 @@ fn add_builtin_function_completions(
     let Some(prefix) = builtin_function_context(text, position) else {
         return;
     };
-    let mut catalog =
-        builtin_signature_catalog_for(dialect, schema.and_then(Schema::server_version_tuple))
-            .into_iter()
-            .filter(|signature| {
-                prefix.is_empty() || signature.name.to_ascii_lowercase().starts_with(&prefix)
-            })
-            .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS)
-            .collect::<Vec<_>>();
-    let mut values = builtin_value_catalog_for(dialect)
+    let full_catalog =
+        builtin_signature_catalog_for(dialect, schema.and_then(Schema::server_version_tuple));
+    let full_values = builtin_value_catalog_for(dialect);
+    if full_catalog.is_empty() && full_values.is_empty() {
+        return;
+    }
+    let authoritative_function_names = full_catalog
+        .iter()
+        .map(|signature| signature.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let authoritative_value_names = full_values
+        .iter()
+        .map(|value| value.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let mut catalog = full_catalog
+        .into_iter()
+        .filter(|signature| {
+            prefix.is_empty() || signature.name.to_ascii_lowercase().starts_with(&prefix)
+        })
+        .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS)
+        .collect::<Vec<_>>();
+    let mut values = full_values
         .into_iter()
         .filter(|value| prefix.is_empty() || value.name.to_ascii_lowercase().starts_with(&prefix))
         .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS.saturating_sub(catalog.len()))
         .collect::<Vec<_>>();
-    if catalog.is_empty() && values.is_empty() {
-        return;
-    }
 
     let live_names = items
         .iter()
@@ -1313,8 +1323,18 @@ fn add_builtin_function_completions(
         .collect::<HashSet<_>>();
     items.retain(|item| {
         let name = SqlParser::identifier_last_part(&item.label).to_ascii_lowercase();
-        (!catalog_names.contains(&name) && !value_names.contains(&name))
-            || completion_item_is_live_routine(item)
+        if completion_item_is_live_routine(item) {
+            return true;
+        }
+        if item.kind == Some(CompletionItemKind::FUNCTION)
+            && !authoritative_function_names.contains(&name)
+        {
+            return false;
+        }
+        if catalog_names.contains(&name) || value_names.contains(&name) {
+            return false;
+        }
+        !authoritative_value_names.contains(&name)
     });
 
     catalog.retain(|signature| !live_names.contains(&signature.name.to_ascii_lowercase()));
@@ -7374,6 +7394,47 @@ mod tests {
                 .and_then(|item| item.insert_text.as_deref()),
             Some("ADD_DAYS(${1:datetime}, ${2:days})")
         );
+    }
+
+    #[test]
+    fn manticore_catalog_and_cloudflare_d1_now_boundary_are_expression_scoped() {
+        let poly_sql = "SELECT pol";
+        let mut manticore_items = Vec::new();
+        add_builtin_function_completions(
+            poly_sql,
+            lsp_position_at_end(poly_sql),
+            "manticoresearch",
+            None,
+            &mut manticore_items,
+        );
+        let poly2d = manticore_items
+            .iter()
+            .find(|item| item.label == "POLY2D")
+            .expect("Manticore POLY2D completion");
+        assert_eq!(poly2d.insert_text.as_deref(), Some("POLY2D(${1:points})"));
+
+        let now_sql = "SELECT now";
+        let mut sqlite_items = Vec::new();
+        add_builtin_function_completions(
+            now_sql,
+            lsp_position_at_end(now_sql),
+            "sqlite",
+            None,
+            &mut sqlite_items,
+        );
+        assert!(sqlite_items
+            .iter()
+            .any(|item| { item.label == "NOW" && item.insert_text.as_deref() == Some("NOW()") }));
+
+        let mut d1_items = Vec::new();
+        add_builtin_function_completions(
+            now_sql,
+            lsp_position_at_end(now_sql),
+            "cloudflare-d1",
+            None,
+            &mut d1_items,
+        );
+        assert!(!d1_items.iter().any(|item| item.label == "NOW"));
     }
 
     #[test]
