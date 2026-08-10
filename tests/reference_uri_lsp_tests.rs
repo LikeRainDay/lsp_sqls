@@ -852,24 +852,36 @@ fn missing_join_condition_code_action_uses_metadata_and_product_quoting() {
                     "tables": [
                         {
                             "name": "orders",
-                            "columns": [{
-                                "name": "Customer ID",
-                                "data_type": "bigint",
-                                "nullable": false,
-                                "primary_key": false,
-                                "unique": false,
-                                "indexed": true,
-                                "comment": null,
-                                "source_location": null
-                            }],
+                            "columns": [
+                                {
+                                    "name": "Tenant ID",
+                                    "data_type": "bigint",
+                                    "nullable": false,
+                                    "primary_key": false,
+                                    "unique": false,
+                                    "indexed": true,
+                                    "comment": null,
+                                    "source_location": null
+                                },
+                                {
+                                    "name": "Customer ID",
+                                    "data_type": "bigint",
+                                    "nullable": false,
+                                    "primary_key": false,
+                                    "unique": false,
+                                    "indexed": true,
+                                    "comment": null,
+                                    "source_location": null
+                                }
+                            ],
                             "indexes": [],
                             "constraints": [{
                                 "name": "orders_customer_fk",
                                 "constraint_type": "FOREIGN KEY",
-                                "columns": ["Customer ID"],
+                                "columns": ["Tenant ID", "Customer ID"],
                                 "referenced_schema": "app",
                                 "referenced_table": "customers",
-                                "referenced_columns": ["Customer ID"],
+                                "referenced_columns": ["Tenant ID", "Customer ID"],
                                 "definition": null
                             }],
                             "comment": null,
@@ -877,16 +889,28 @@ fn missing_join_condition_code_action_uses_metadata_and_product_quoting() {
                         },
                         {
                             "name": "customers",
-                            "columns": [{
-                                "name": "Customer ID",
-                                "data_type": "bigint",
-                                "nullable": false,
-                                "primary_key": true,
-                                "unique": true,
-                                "indexed": true,
-                                "comment": null,
-                                "source_location": null
-                            }],
+                            "columns": [
+                                {
+                                    "name": "Tenant ID",
+                                    "data_type": "bigint",
+                                    "nullable": false,
+                                    "primary_key": true,
+                                    "unique": true,
+                                    "indexed": true,
+                                    "comment": null,
+                                    "source_location": null
+                                },
+                                {
+                                    "name": "Customer ID",
+                                    "data_type": "bigint",
+                                    "nullable": false,
+                                    "primary_key": true,
+                                    "unique": true,
+                                    "indexed": true,
+                                    "comment": null,
+                                    "source_location": null
+                                }
+                            ],
                             "indexes": [],
                             "constraints": [],
                             "comment": null,
@@ -953,7 +977,7 @@ fn missing_join_condition_code_action_uses_metadata_and_product_quoting() {
         inferred
             .pointer("/edit/changes/file:~1~1~1workspace~1join-fix.sqlserver.sql/0/newText")
             .and_then(Value::as_str),
-        Some(" ON o.[Customer ID] = c.[Customer ID]"),
+        Some(" ON o.[Tenant ID] = c.[Tenant ID] AND o.[Customer ID] = c.[Customer ID]"),
         "{inferred}"
     );
 }
