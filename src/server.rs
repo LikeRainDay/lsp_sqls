@@ -1151,6 +1151,44 @@ fn deduplicate_simple_completion_items(items: &mut Vec<CompletionItem>) {
     });
 }
 
+fn next_snippet_tabstop_index(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut largest = 0usize;
+    let mut cursor = 0usize;
+
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] != b'$' {
+            cursor += 1;
+            continue;
+        }
+
+        let mut digit_start = cursor + 1;
+        let braced = bytes[digit_start] == b'{';
+        if braced {
+            digit_start += 1;
+        }
+        let mut digit_end = digit_start;
+        while digit_end < bytes.len() && bytes[digit_end].is_ascii_digit() {
+            digit_end += 1;
+        }
+        if digit_end == digit_start
+            || (braced
+                && !bytes
+                    .get(digit_end)
+                    .is_some_and(|character| matches!(*character, b':' | b'}' | b'|')))
+        {
+            cursor += 1;
+            continue;
+        }
+        if let Ok(index) = value[digit_start..digit_end].parse::<usize>() {
+            largest = largest.max(index);
+        }
+        cursor = digit_end;
+    }
+
+    largest.saturating_add(1).max(1)
+}
+
 fn apply_completion_preferences(
     text: &str,
     position: Position,
@@ -1176,7 +1214,10 @@ fn apply_completion_preferences(
             let Some(alias) = table_alias_initials(&item.label) else {
                 continue;
             };
-            let append_alias = |value: &str| format!("{value} ${{1:{alias}}}");
+            let append_alias = |value: &str| {
+                let tabstop = next_snippet_tabstop_index(value);
+                format!("{value} ${{{tabstop}:{alias}}}")
+            };
             if let Some(insert_text) = item.insert_text.as_mut() {
                 *insert_text = append_alias(insert_text);
             } else {
@@ -1234,7 +1275,7 @@ fn builtin_function_context(text: &str, position: Position) -> Option<String> {
     Some(SqlParser::identifier_last_part(raw_prefix).to_ascii_lowercase())
 }
 
-fn clickhouse_table_function_context(text: &str, position: Position) -> Option<String> {
+fn relation_function_context(text: &str, position: Position) -> Option<String> {
     let offset = position_to_byte_offset(text, position).min(text.len());
     let mut scan_start = offset.saturating_sub(SIGNATURE_HELP_MAX_SCAN_BYTES);
     while scan_start < offset && !text.is_char_boundary(scan_start) {
@@ -1428,7 +1469,7 @@ fn add_clickhouse_table_function_completions(
     dialect: &str,
     items: &mut Vec<CompletionItem>,
 ) {
-    let Some(prefix) = clickhouse_table_function_context(text, position) else {
+    let Some(prefix) = relation_function_context(text, position) else {
         return;
     };
     let catalog = builtin_table_signature_completion_catalog_for(
@@ -1468,6 +1509,211 @@ fn add_clickhouse_table_function_completions(
             ..Default::default()
         })
     }));
+}
+
+fn is_oracle_like_dialect(dialect: &str) -> bool {
+    matches!(
+        dialect.to_ascii_lowercase().as_str(),
+        "oracle" | "oceanbase-oracle"
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OracleTableRoutineContext {
+    prefix: String,
+    qualifier: Option<String>,
+}
+
+fn previous_ascii_word(text: &str) -> (&str, &str) {
+    let trimmed = text.trim_end();
+    let start = trimmed
+        .char_indices()
+        .rev()
+        .find_map(|(index, character)| {
+            (!character.is_ascii_alphanumeric() && character != '_')
+                .then_some(index + character.len_utf8())
+        })
+        .unwrap_or(0);
+    (&trimmed[..start], &trimmed[start..])
+}
+
+fn oracle_table_routine_context(
+    text: &str,
+    position: Position,
+) -> Option<OracleTableRoutineContext> {
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let mut scan_start = offset.saturating_sub(SIGNATURE_HELP_MAX_SCAN_BYTES);
+    while scan_start < offset && !text.is_char_boundary(scan_start) {
+        scan_start += 1;
+    }
+    let window = text.get(scan_start..offset)?;
+    let masked = SqlParser::mask_sql_noise(window);
+    let path_start = identifier_path_start_before_cursor(window).unwrap_or(window.len());
+    let raw_path = window.get(path_start..)?.trim();
+    let masked_path = masked.get(path_start..)?.trim();
+    if raw_path.is_empty()
+        || masked_path.is_empty()
+        || raw_path.starts_with(['\'', '`', '['])
+        || raw_path.ends_with([']', '`'])
+    {
+        return None;
+    }
+
+    let before_path = masked.get(..path_start)?.trim_end();
+    let before_open = before_path.strip_suffix('(')?.trim_end();
+    let (before_table, table_word) = previous_ascii_word(before_open);
+    if !table_word.eq_ignore_ascii_case("table") {
+        return None;
+    }
+    let (_, relation_word) = previous_ascii_word(before_table);
+    if !matches!(relation_word.to_ascii_lowercase().as_str(), "from" | "join") {
+        return None;
+    }
+
+    let (qualifier, prefix) = raw_path
+        .rsplit_once('.')
+        .map(|(qualifier, prefix)| (Some(qualifier.trim().to_string()), prefix))
+        .unwrap_or((None, raw_path));
+    if qualifier
+        .as_ref()
+        .is_some_and(|qualifier| qualifier.is_empty())
+    {
+        return None;
+    }
+    Some(OracleTableRoutineContext {
+        prefix: SqlParser::identifier_last_part(prefix).to_ascii_lowercase(),
+        qualifier,
+    })
+}
+
+fn add_oracle_table_function_completions(
+    text: &str,
+    position: Position,
+    dialect: &str,
+    schema: Option<&Schema>,
+    items: &mut Vec<CompletionItem>,
+) {
+    if !is_oracle_like_dialect(dialect) {
+        return;
+    }
+
+    if let Some(context) = oracle_table_routine_context(text, position) {
+        items.clear();
+        let Some(schema) = schema else {
+            return;
+        };
+        let existing = items
+            .iter()
+            .map(|item| item.label.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        items.extend(schema.functions.iter().filter_map(|function| {
+            if function
+                .routine_type
+                .as_deref()
+                .is_some_and(|routine_type| routine_type.eq_ignore_ascii_case("procedure"))
+            {
+                return None;
+            }
+            let simple_name = SqlParser::identifier_last_part(&function.name);
+            if !context.prefix.is_empty()
+                && !simple_name
+                    .to_ascii_lowercase()
+                    .starts_with(&context.prefix)
+            {
+                return None;
+            }
+            if existing.contains(&simple_name.to_ascii_lowercase()) {
+                return None;
+            }
+            let apply_name = context
+                .qualifier
+                .as_ref()
+                .map(|qualifier| format!("{qualifier}.{simple_name}"))
+                .unwrap_or_else(|| function.name.clone());
+            let arguments = function
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let label = if parameter.name.trim().is_empty() {
+                        parameter.data_type.as_str()
+                    } else {
+                        parameter.name.as_str()
+                    };
+                    format!("${{{}:{}}}", index + 1, snippet_placeholder_label(label))
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            Some(CompletionItem {
+                label: simple_name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(format!(
+                    "Oracle table function: {} -> {}",
+                    function.signature(),
+                    function.return_type
+                )),
+                documentation: Some(Documentation::String(function.documentation())),
+                sort_text: Some(format!(
+                    "0:oracle-table-routine:{}",
+                    simple_name.to_ascii_lowercase()
+                )),
+                filter_text: Some(simple_name.to_string()),
+                insert_text: Some(format!("{apply_name}({arguments})")),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            })
+        }));
+        return;
+    }
+
+    let Some(prefix) = relation_function_context(text, position) else {
+        return;
+    };
+    const ORACLE_TABLE_FUNCTIONS: &[(&str, &[&str], &str)] = &[
+        ("TABLE", &["function_call"], "Oracle table function"),
+        ("THE", &["subquery"], "Oracle nested-table expression"),
+        ("XMLTABLE", &["xpath"], "XML to relational rows"),
+        ("JSON_TABLE", &["expr", "path"], "JSON to relational rows"),
+    ];
+    let existing_relations = items
+        .iter()
+        .filter(|item| is_relation_completion_kind(item.kind))
+        .map(|item| item.label.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    items.extend(
+        ORACLE_TABLE_FUNCTIONS
+            .iter()
+            .filter(|(name, _, _)| {
+                prefix.is_empty() || name.to_ascii_lowercase().starts_with(&prefix)
+            })
+            .filter_map(|(name, parameters, detail)| {
+                if existing_relations.contains(&name.to_ascii_lowercase()) {
+                    return None;
+                }
+                let arguments = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| format!("${{{}:{parameter}}}", index + 1))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(CompletionItem {
+                    label: (*name).to_string(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some((*detail).to_string()),
+                    documentation: Some(Documentation::String(format!(
+                        "Oracle-family relation-source block for `{name}`."
+                    ))),
+                    sort_text: Some(format!(
+                        "1:oracle-table-function:{}",
+                        name.to_ascii_lowercase()
+                    )),
+                    filter_text: Some((*name).to_string()),
+                    insert_text: Some(format!("{name}({arguments})")),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
+                    ..Default::default()
+                })
+            }),
+    );
 }
 
 fn add_window_function_completions(
@@ -2691,6 +2937,13 @@ impl LanguageServer for SqlLspServer {
                 completion_text,
                 completion_position,
                 &dialect_identity,
+                &mut items,
+            );
+            add_oracle_table_function_completions(
+                completion_text,
+                completion_position,
+                &dialect_identity,
+                schema.as_ref(),
                 &mut items,
             );
             let preferences = self
@@ -7248,23 +7501,24 @@ mod tests {
     use super::{
         add_builtin_function_completions, add_clickhouse_table_function_completions,
         add_insert_all_columns_completion, add_insert_statement_snippets,
-        add_join_condition_actions, add_referenced_alias_completions,
-        add_window_function_completions, apply_completed_sql_context_completion_edits,
-        apply_completion_preferences, apply_qualified_identifier_completion_edits,
-        augment_schema_with_local_relations, calculate_schema_match_score,
-        client_supports_completion_documentation_resolve, code_action_kind_available,
-        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
-        completion_statement_prefix, deduplicate_simple_completion_items,
-        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, insert_value_hints, live_overload_accepts_call,
-        position_to_byte_offset, project_sql_symbol_occurrences, project_sql_symbols_match,
-        qualify_identifier_actions, range_for_offsets, resolve_completion_documentation,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
-        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
-        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
-        CompletionPreferences, CompletionResolveCache, FormattingPreferences, FromClauseLayout,
-        KeywordCase, LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        add_join_condition_actions, add_oracle_table_function_completions,
+        add_referenced_alias_completions, add_window_function_completions,
+        apply_completed_sql_context_completion_edits, apply_completion_preferences,
+        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
+        calculate_schema_match_score, client_supports_completion_documentation_resolve,
+        code_action_kind_available, code_action_kind_explicitly_requested,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
+        deduplicate_simple_completion_items, defer_completion_documentation,
+        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, insert_value_hints,
+        live_overload_accepts_call, oracle_table_routine_context, position_to_byte_offset,
+        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
+        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, routine_call_at_position,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
+        CompletionResolveCache, FormattingPreferences, FromClauseLayout, KeywordCase,
+        LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
         LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
@@ -7664,6 +7918,97 @@ mod tests {
             &mut postgres_items,
         );
         assert!(!postgres_items.iter().any(|item| item.label == "SYSDATE"));
+    }
+
+    #[test]
+    fn oracle_relation_blocks_and_table_routine_context_align_dbx() {
+        let relation_sql = "SELECT * FROM json_";
+        let mut relation_items = Vec::new();
+        add_oracle_table_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "oracle",
+            None,
+            &mut relation_items,
+        );
+        let json_table = relation_items
+            .iter()
+            .find(|item| item.label == "JSON_TABLE")
+            .expect("Oracle JSON_TABLE relation block");
+        assert_eq!(json_table.kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(
+            json_table.insert_text.as_deref(),
+            Some("JSON_TABLE(${1:expr}, ${2:path})")
+        );
+
+        let mut postgres_items = Vec::new();
+        add_oracle_table_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "postgres",
+            None,
+            &mut postgres_items,
+        );
+        assert!(postgres_items.is_empty());
+
+        let routine_sql = "SELECT * FROM TABLE(pkg.fe";
+        let context = oracle_table_routine_context(routine_sql, lsp_position_at_end(routine_sql))
+            .expect("Oracle TABLE routine context");
+        assert_eq!(context.prefix, "fe");
+        assert_eq!(context.qualifier.as_deref(), Some("pkg"));
+
+        let mut schema = test_schema("APP", &[]);
+        schema.functions = vec![
+            Function {
+                name: "fetch_rows".to_string(),
+                routine_type: Some("function".to_string()),
+                parameters: vec![FunctionParameter {
+                    name: "limit".to_string(),
+                    data_type: "NUMBER".to_string(),
+                    optional: false,
+                }],
+                return_type: "ROWSET".to_string(),
+                description: Some("Fetch rows".to_string()),
+            },
+            Function {
+                name: "refresh_rows".to_string(),
+                routine_type: Some("procedure".to_string()),
+                parameters: Vec::new(),
+                return_type: "void".to_string(),
+                description: None,
+            },
+        ];
+        let mut routine_items = vec![CompletionItem {
+            label: "orders".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            ..Default::default()
+        }];
+        add_oracle_table_function_completions(
+            routine_sql,
+            lsp_position_at_end(routine_sql),
+            "oceanbase-oracle",
+            Some(&schema),
+            &mut routine_items,
+        );
+        assert_eq!(routine_items.len(), 1);
+        assert_eq!(routine_items[0].label, "fetch_rows");
+        assert_eq!(
+            routine_items[0].insert_text.as_deref(),
+            Some("pkg.fetch_rows(${1:limit})")
+        );
+        apply_qualified_identifier_completion_edits(
+            routine_sql,
+            lsp_position_at_end(routine_sql),
+            &mut routine_items,
+        );
+        let CompletionTextEdit::Edit(edit) = routine_items[0]
+            .text_edit
+            .as_ref()
+            .expect("qualified routine replacement edit")
+        else {
+            panic!("expected a plain text edit");
+        };
+        assert_eq!(edit.new_text, "pkg.fetch_rows(${1:limit})");
     }
 
     #[test]
@@ -8681,6 +9026,24 @@ mod tests {
         assert_eq!(
             table_alias_initials("audit.userAccounts"),
             Some("ua".to_string())
+        );
+
+        let mut table_function_items = vec![CompletionItem {
+            label: "JSON_TABLE".to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            insert_text: Some("JSON_TABLE(${1:expr}, ${2:path})".to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..CompletionItem::default()
+        }];
+        apply_completion_preferences(
+            "SELECT * FROM json_",
+            Position::new(0, 19),
+            &mut table_function_items,
+            &preferences,
+        );
+        assert_eq!(
+            table_function_items[0].insert_text.as_deref(),
+            Some("JSON_TABLE(${1:expr}, ${2:path}) ${3:jt}")
         );
     }
 

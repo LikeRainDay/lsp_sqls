@@ -1284,6 +1284,101 @@ fn portable_window_blocks_and_clickhouse_calls_keep_distinct_completion_shapes()
 }
 
 #[test]
+fn oracle_table_sources_and_table_wrapped_routines_follow_dbx_context() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let relation_uri = "file:///workspace/oracle-table-source.sql";
+    let routine_uri = "file:///workspace/oracle-table-routine.sql";
+    let schema_id = "77777777-7777-4777-8777-777777777777";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "schemas": [{
+                    "id": schema_id,
+                    "database": "APP",
+                    "tables": [],
+                    "functions": [
+                        {
+                            "name": "fetch_rows",
+                            "routine_type": "function",
+                            "parameters": [{
+                                "name": "limit",
+                                "data_type": "NUMBER",
+                                "optional": false
+                            }],
+                            "return_type": "ROWSET",
+                            "description": "Fetch rows"
+                        },
+                        {
+                            "name": "refresh_rows",
+                            "routine_type": "procedure",
+                            "parameters": [],
+                            "return_type": "void",
+                            "description": null
+                        }
+                    ],
+                    "source_uri": null
+                }],
+                "fileSchemas": {
+                    (relation_uri): schema_id,
+                    (routine_uri): schema_id
+                },
+                "fileDialects": {
+                    (relation_uri): "oracle",
+                    (routine_uri): "oceanbase-oracle"
+                }
+            }
+        }),
+    );
+    let relation_sql = "SELECT * FROM json_";
+    let routine_sql = "SELECT * FROM TABLE(pkg.fe";
+    lsp.open(relation_uri, "sql", relation_sql);
+    lsp.open(routine_uri, "sql", routine_sql);
+
+    let completion_at = |lsp: &mut LspProcess, uri: &str, character: usize| {
+        lsp.request(
+            "textDocument/completion",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": character },
+                "context": { "triggerKind": 1 }
+            }),
+        )
+    };
+    let relation = completion_at(&mut lsp, relation_uri, relation_sql.len());
+    let routine = completion_at(&mut lsp, routine_uri, routine_sql.len());
+    let find = |completion: &Value, label: &str| {
+        completion
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item.get("label").and_then(Value::as_str) == Some(label))
+            })
+            .cloned()
+    };
+
+    assert_eq!(
+        find(&relation, "JSON_TABLE")
+            .as_ref()
+            .and_then(|item| item.get("insertText"))
+            .and_then(Value::as_str),
+        Some("JSON_TABLE(${1:expr}, ${2:path})")
+    );
+    let fetch_rows = find(&routine, "fetch_rows").expect("Oracle table routine completion");
+    assert_eq!(
+        fetch_rows
+            .pointer("/textEdit/newText")
+            .and_then(Value::as_str),
+        Some("pkg.fetch_rows(${1:limit})")
+    );
+    assert!(find(&routine, "refresh_rows").is_none());
+    assert!(find(&routine, "JSON_TABLE").is_none());
+}
+
+#[test]
 fn semantic_rename_updates_open_documents_in_the_same_schema() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();
