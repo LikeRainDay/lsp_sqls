@@ -813,6 +813,7 @@ impl SqlLspServer {
         };
         let schema = self.get_schema_for_position(&uri, &text, position);
         let mut raw_candidates = dialect.completion(&text, position, schema.as_ref()).await;
+        apply_high_frequency_keyword_ranking(&mut raw_candidates);
         raw_candidates.sort_by(|left, right| {
             left.sort_text
                 .as_deref()
@@ -1044,6 +1045,67 @@ const COMPLETED_SQL_CONTEXT_KEYWORDS: &[&str] = &[
     "select", "from", "join", "where", "on", "by", "having", "limit", "offset", "values", "set",
     "into",
 ];
+
+// Mirrors DBX's static frequency boost. The alphabetical rank deliberately
+// stays behind the semantic group and ahead of the label: Monaco's local
+// numeric usage rank can still be inserted between the group and this rank.
+const HIGH_FREQUENCY_SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "AND", "OR", "JOIN", "ON", "IN", "AS", "GROUP BY", "ORDER BY",
+    "LEFT", "RIGHT", "INNER", "OUTER", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+    "NOT", "NULL", "IS", "LIKE", "DISTINCT", "HAVING", "LIMIT", "COUNT", "SUM", "AVG", "MAX",
+    "MIN", "CASE", "UNION", "ALL", "ASC", "DESC", "BETWEEN", "EXISTS",
+];
+
+fn apply_high_frequency_keyword_ranking(items: &mut [CompletionItem]) {
+    for item in items {
+        if item.kind != Some(CompletionItemKind::KEYWORD) {
+            continue;
+        }
+
+        let frequency_rank = if HIGH_FREQUENCY_SQL_KEYWORDS
+            .iter()
+            .any(|keyword| item.label.eq_ignore_ascii_case(keyword))
+        {
+            "a"
+        } else {
+            "b"
+        };
+        let fallback_label = item.label.to_ascii_lowercase();
+        let current = item.sort_text.as_deref().unwrap_or_default();
+
+        if let Some((semantic_group, remainder)) = current.split_once(':') {
+            item.sort_text = Some(format!(
+                "{semantic_group}:{frequency_rank}:{}",
+                remainder.to_ascii_lowercase()
+            ));
+            continue;
+        }
+
+        let bytes = current.as_bytes();
+        let mut group_end = usize::from(bytes.first() == Some(&b'-'));
+        while bytes
+            .get(group_end)
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            group_end += 1;
+        }
+        let has_numeric_group = group_end > 0 && !(group_end == 1 && bytes.first() == Some(&b'-'));
+        if has_numeric_group {
+            let semantic_group = &current[..group_end];
+            let remainder = current[group_end..].trim_start_matches(':');
+            let normalized_remainder = if remainder.is_empty() {
+                fallback_label.clone()
+            } else {
+                remainder.to_ascii_lowercase()
+            };
+            item.sort_text = Some(format!(
+                "{semantic_group}:{frequency_rank}:{normalized_remainder}"
+            ));
+        } else {
+            item.sort_text = Some(format!("0:{frequency_rank}:{fallback_label}"));
+        }
+    }
+}
 
 fn completed_sql_context_keyword_at_position(text: &str, position: Position) -> Option<String> {
     let offset = position_to_byte_offset(text, position);
@@ -2982,6 +3044,7 @@ impl LanguageServer for SqlLspServer {
                 apply_completion_preferences(&text, position, &mut items, &preferences);
             }
             deduplicate_simple_completion_items(&mut items);
+            apply_high_frequency_keyword_ranking(&mut items);
             if self
                 .completion_documentation_resolve_supported
                 .load(Ordering::Relaxed)
@@ -7504,16 +7567,17 @@ mod tests {
         add_join_condition_actions, add_oracle_table_function_completions,
         add_referenced_alias_completions, add_window_function_completions,
         apply_completed_sql_context_completion_edits, apply_completion_preferences,
-        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
-        calculate_schema_match_score, client_supports_completion_documentation_resolve,
-        code_action_kind_available, code_action_kind_explicitly_requested,
-        completed_sql_context_keyword_at_position, completion_statement_prefix,
-        deduplicate_simple_completion_items, defer_completion_documentation,
-        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
-        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, insert_value_hints,
-        live_overload_accepts_call, oracle_table_routine_context, position_to_byte_offset,
-        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
-        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
+        apply_high_frequency_keyword_ranking, apply_qualified_identifier_completion_edits,
+        augment_schema_with_local_relations, calculate_schema_match_score,
+        client_supports_completion_documentation_resolve, code_action_kind_available,
+        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
+        completion_statement_prefix, deduplicate_simple_completion_items,
+        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
+        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
+        infer_schema_id_from_tables, insert_value_hints, live_overload_accepts_call,
+        oracle_table_routine_context, position_to_byte_offset, project_sql_symbol_occurrences,
+        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
+        resolve_completion_documentation, rewrite_current_document_location_uri,
         rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
@@ -8943,6 +9007,59 @@ mod tests {
             items[0].detail.as_deref(),
             Some("Boolean value for enabled")
         );
+    }
+
+    #[test]
+    fn completion_ranks_high_frequency_keywords_within_their_semantic_group() {
+        let mut items = vec![
+            CompletionItem {
+                label: "WHEN".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some("0:when".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "where".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some("0where".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "WHERE".to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                sort_text: Some("2:where".to_string()),
+                ..CompletionItem::default()
+            },
+        ];
+
+        apply_high_frequency_keyword_ranking(&mut items);
+
+        assert_eq!(items[0].sort_text.as_deref(), Some("0:b:when"));
+        assert_eq!(items[1].sort_text.as_deref(), Some("0:a:where"));
+        assert!(items[1].sort_text < items[0].sort_text);
+        assert_eq!(items[2].sort_text.as_deref(), Some("2:where"));
+    }
+
+    #[test]
+    fn completion_frequency_rank_does_not_cross_semantic_groups() {
+        let mut items = vec![
+            CompletionItem {
+                label: "WHERE".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some("2:where".to_string()),
+                ..CompletionItem::default()
+            },
+            CompletionItem {
+                label: "WHEN".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                sort_text: Some("1:when".to_string()),
+                ..CompletionItem::default()
+            },
+        ];
+
+        apply_high_frequency_keyword_ranking(&mut items);
+
+        assert!(items[0].sort_text > items[1].sort_text);
     }
 
     #[test]
