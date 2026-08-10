@@ -115,6 +115,17 @@ pub struct Column {
     /// 是否索引列
     #[serde(default)]
     pub indexed: bool,
+    /// Database-owned default expression. Used to distinguish required
+    /// INSERT inputs from optional writable columns.
+    #[serde(default)]
+    pub default_value: Option<String>,
+    /// Identity/serial/auto-increment columns should not appear in regular
+    /// INSERT snippets.
+    #[serde(default)]
+    pub auto_increment: bool,
+    /// Computed/generated columns cannot be assigned by regular INSERTs.
+    #[serde(default)]
+    pub generated: bool,
     /// 列注释
     pub comment: Option<String>,
     /// 列定义位置的 URI 和行号 (可选)

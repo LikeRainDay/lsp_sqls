@@ -1542,16 +1542,66 @@ fn add_insert_all_columns_completion(
     else {
         return;
     };
-    if table.columns.is_empty() {
+    let writable_columns = table
+        .columns
+        .iter()
+        .filter(|column| !column.auto_increment && !column.generated)
+        .collect::<Vec<_>>();
+    if writable_columns.is_empty() {
         return;
     }
 
-    let label = format!("{}.*", table.name);
-    if items.iter().any(|item| item.label == label) {
+    let required_columns = writable_columns
+        .iter()
+        .copied()
+        .filter(|column| {
+            !column.nullable
+                && column
+                    .default_value
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+
+    if !required_columns.is_empty() && required_columns.len() != writable_columns.len() {
+        add_insert_columns_completion_item(
+            table,
+            &format!("{}.required", table.name),
+            "Required writable",
+            &required_columns,
+            items,
+            preferences,
+            dialect_name,
+            0,
+        );
+    }
+    add_insert_columns_completion_item(
+        table,
+        &format!("{}.*", table.name),
+        "All writable",
+        &writable_columns,
+        items,
+        preferences,
+        dialect_name,
+        1,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_insert_columns_completion_item(
+    table: &Table,
+    label: &str,
+    detail_prefix: &str,
+    source_columns: &[&Column],
+    items: &mut Vec<CompletionItem>,
+    preferences: &CompletionPreferences,
+    dialect_name: &str,
+    sort_rank: usize,
+) {
+    if source_columns.is_empty() || items.iter().any(|item| item.label == label) {
         return;
     }
-    let columns = table
-        .columns
+    let columns = source_columns
         .iter()
         .map(|column| quote_completion_identifier(&column.name, dialect_name))
         .collect::<Vec<_>>();
@@ -1564,15 +1614,18 @@ fn add_insert_all_columns_completion(
     let values_keyword = keyword_with_completion_case("VALUES", preferences.keyword_case);
     let insert_text = format!("{}) {values_keyword} ({values})", columns.join(", "));
     items.push(CompletionItem {
-        label,
+        label: label.to_string(),
         kind: Some(CompletionItemKind::SNIPPET),
         detail: Some(format!(
-            "{} columns: {}) {} (value, ...)",
+            "{detail_prefix} · {} columns: {}) {} (value, ...)",
             columns.len(),
             columns.join(", "),
             values_keyword
         )),
-        sort_text: Some(format!("0:0000:{}", table.name.to_ascii_lowercase())),
+        sort_text: Some(format!(
+            "0:{sort_rank:04}:{}",
+            table.name.to_ascii_lowercase()
+        )),
         filter_text: Some(table.name.clone()),
         insert_text: Some(insert_text),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -4968,6 +5021,9 @@ fn parse_temporary_column(definition: &str, uri: &str, line: u32) -> Option<Colu
         primary_key: definition.to_ascii_uppercase().contains("PRIMARY KEY"),
         unique: definition.to_ascii_uppercase().contains("UNIQUE"),
         indexed: false,
+        default_value: None,
+        auto_increment: false,
+        generated: false,
         comment: Some("Column from a temporary table in the current console".to_string()),
         source_location: Some((uri.to_string(), line)),
     })
@@ -5361,6 +5417,9 @@ fn local_relation_column(name: String, data_type: &str, uri: &str, line: u32) ->
         primary_key: false,
         unique: false,
         indexed: false,
+        default_value: None,
+        auto_increment: false,
+        generated: false,
         comment: Some("Output column inferred from the current console".to_string()),
         source_location: Some((uri.to_string(), line)),
     }
@@ -7327,6 +7386,75 @@ mod tests {
             "postgres",
         );
         assert!(nested_items.is_empty());
+    }
+
+    #[test]
+    fn insert_completion_prefers_required_columns_and_skips_database_owned_columns() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].columns = vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                auto_increment: true,
+                ..Default::default()
+            },
+            Column {
+                name: "customer_id".to_string(),
+                data_type: "bigint".to_string(),
+                ..Default::default()
+            },
+            Column {
+                name: "note".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                ..Default::default()
+            },
+            Column {
+                name: "created_at".to_string(),
+                data_type: "timestamp".to_string(),
+                default_value: Some("CURRENT_TIMESTAMP".to_string()),
+                ..Default::default()
+            },
+            Column {
+                name: "search_vector".to_string(),
+                data_type: "tsvector".to_string(),
+                generated: true,
+                ..Default::default()
+            },
+        ];
+
+        let sql = "INSERT INTO app.orders (";
+        let mut items = Vec::new();
+        add_insert_all_columns_completion(
+            sql,
+            lsp_position_at_end(sql),
+            Some(&schema),
+            &mut items,
+            &CompletionPreferences::default(),
+            "postgres",
+        );
+
+        let required = items
+            .iter()
+            .find(|item| item.label == "orders.required")
+            .expect("required-column completion");
+        assert_eq!(
+            required.insert_text.as_deref(),
+            Some("customer_id) VALUES (${1:value})")
+        );
+        let writable = items
+            .iter()
+            .find(|item| item.label == "orders.*")
+            .expect("writable-column completion");
+        assert_eq!(
+            writable.insert_text.as_deref(),
+            Some("customer_id, note, created_at) VALUES (${1:value}, ${2:value}, ${3:value})")
+        );
+        assert!(!writable
+            .insert_text
+            .as_deref()
+            .unwrap()
+            .contains("search_vector"));
     }
 
     #[test]
