@@ -401,6 +401,7 @@ fn rewrite_current_document_location_uris(locations: &mut [Location], document_u
 struct DocumentManager {
     documents: Arc<DashMap<String, String>>,
     revisions: Arc<DashMap<String, u64>>,
+    versions: Arc<DashMap<String, i32>>,
 }
 
 #[derive(Clone)]
@@ -414,11 +415,13 @@ impl DocumentManager {
         Self {
             documents: Arc::new(DashMap::new()),
             revisions: Arc::new(DashMap::new()),
+            versions: Arc::new(DashMap::new()),
         }
     }
 
-    fn update(&self, uri: String, text: String) {
+    fn update(&self, uri: String, text: String, version: i32) {
         self.documents.insert(uri.clone(), text);
+        self.versions.insert(uri.clone(), version);
         self.revisions
             .entry(uri)
             .and_modify(|revision| *revision = revision.saturating_add(1))
@@ -440,9 +443,14 @@ impl DocumentManager {
         self.revisions.get(uri).map(|revision| *revision)
     }
 
+    fn version(&self, uri: &str) -> Option<i32> {
+        self.versions.get(uri).map(|version| *version)
+    }
+
     fn remove(&self, uri: &str) {
         self.documents.remove(uri);
         self.revisions.remove(uri);
+        self.versions.remove(uri);
     }
 }
 
@@ -590,7 +598,11 @@ impl SqlLspServer {
                 let schema = self.get_schema_for_file(&uri);
                 let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
                 self.client
-                    .publish_diagnostics(parsed_uri, diagnostics, None)
+                    .publish_diagnostics(
+                        parsed_uri,
+                        diagnostics,
+                        self.document_manager.version(&uri),
+                    )
                     .await;
             }
         }
@@ -3141,7 +3153,8 @@ impl LanguageServer for SqlLspServer {
         self.inferred_file_schemas.remove(&uri);
 
         // 存储文档内容
-        self.document_manager.update(uri.clone(), text.clone());
+        self.document_manager
+            .update(uri.clone(), text.clone(), params.text_document.version);
         self.document_languages
             .insert(uri.clone(), language_id.clone());
 
@@ -3154,7 +3167,11 @@ impl LanguageServer for SqlLspServer {
             let schema = self.get_schema_for_file(&uri);
             let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
             self.client
-                .publish_diagnostics(params.text_document.uri, diagnostics, None)
+                .publish_diagnostics(
+                    params.text_document.uri,
+                    diagnostics,
+                    self.document_manager.version(&uri),
+                )
                 .await;
         }
     }
@@ -3175,32 +3192,37 @@ impl LanguageServer for SqlLspServer {
                     // 应用变更
                     current_text.replace_range(start_offset..end_offset, &change.text);
                     self.document_manager
-                        .update(uri.clone(), current_text.clone());
+                        .update(uri.clone(), current_text.clone(), params.text_document.version);
 
                     // 重新解析并发布诊断
                     if let Some(dialect) = self.get_dialect_for_file(&uri) {
                         let schema = self.get_schema_for_file(&uri);
                         let diagnostics =
                             document_diagnostics(&*dialect, &current_text, schema.as_ref()).await;
-                        self.client
-                            .publish_diagnostics(
-                                params.text_document.uri.clone(),
-                                diagnostics,
-                                None,
-                            )
-                            .await;
+                            self.client
+                                .publish_diagnostics(
+                                    params.text_document.uri.clone(),
+                                    diagnostics,
+                                    self.document_manager.version(&uri),
+                                )
+                                .await;
                     }
                 }
             } else {
                 // 完整文档更新
                 let text = change.text.clone();
-                self.document_manager.update(uri.clone(), text.clone());
+                self.document_manager
+                    .update(uri.clone(), text.clone(), params.text_document.version);
 
                 if let Some(dialect) = self.get_dialect_for_file(&uri) {
                     let schema = self.get_schema_for_file(&uri);
                     let diagnostics = document_diagnostics(&*dialect, &text, schema.as_ref()).await;
                     self.client
-                        .publish_diagnostics(params.text_document.uri.clone(), diagnostics, None)
+                        .publish_diagnostics(
+                            params.text_document.uri.clone(),
+                            diagnostics,
+                            self.document_manager.version(&uri),
+                        )
                         .await;
                 }
             }
