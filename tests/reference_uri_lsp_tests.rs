@@ -1048,6 +1048,50 @@ fn signature_help_falls_back_to_dialect_builtins_without_schema_metadata() {
 }
 
 #[test]
+fn oracle_system_values_complete_without_function_parentheses() {
+    let mut lsp = LspProcess::spawn();
+    lsp.initialize();
+
+    let uri = "file:///workspace/system-value.oracle.sql";
+    lsp.notify(
+        "workspace/didChangeConfiguration",
+        json!({
+            "settings": {
+                "fileDialects": { (uri): "oracle" }
+            }
+        }),
+    );
+    let sql = "SELECT sys";
+    lsp.open(uri, "sql", sql);
+
+    let completion = lsp.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": sql.len() },
+            "context": { "triggerKind": 1 }
+        }),
+    );
+    let sysdate = completion
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("label").and_then(Value::as_str) == Some("SYSDATE"))
+        })
+        .expect("Oracle SYSDATE completion");
+    assert_eq!(sysdate.get("kind").and_then(Value::as_u64), Some(12));
+    assert_eq!(
+        sysdate.get("insertText").and_then(Value::as_str),
+        Some("SYSDATE")
+    );
+    assert_eq!(
+        sysdate.get("insertTextFormat").and_then(Value::as_u64),
+        Some(1)
+    );
+}
+
+#[test]
 fn semantic_rename_updates_open_documents_in_the_same_schema() {
     let mut lsp = LspProcess::spawn();
     lsp.initialize();

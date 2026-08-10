@@ -6,6 +6,12 @@ pub(crate) struct BuiltinSignature {
     pub parameter_groups: Vec<Vec<&'static str>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BuiltinValue {
+    pub name: &'static str,
+    pub category: &'static str,
+}
+
 impl BuiltinSignature {
     fn single(name: &'static str, parameters: &'static [&'static str]) -> Self {
         Self {
@@ -182,6 +188,21 @@ const MANTICORE_SIGNATURES: &[(&str, &[&str])] = &[
     ("KNN_DIST", &[]),
 ];
 
+// DBX exposes these Oracle system values as expression completions without
+// call parentheses. Keep them separate from function signatures so accepting
+// SYSDATE never produces the invalid/needlessly transformed SYSDATE().
+const ORACLE_SYSTEM_VALUES: &[&str] = &[
+    "SYSDATE",
+    "SYSTIMESTAMP",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "LOCALTIMESTAMP",
+    "SESSIONTIMEZONE",
+    "DBTIMEZONE",
+    "USER",
+    "UID",
+];
+
 fn lookup(
     entries: &'static [(&'static str, &'static [&'static str])],
     name: &str,
@@ -329,6 +350,19 @@ pub(crate) fn builtin_signature_catalog_for(
     signatures
 }
 
+pub(crate) fn builtin_value_catalog_for(dialect: &str) -> Vec<BuiltinValue> {
+    match dialect.to_ascii_lowercase().as_str() {
+        "oracle" | "oceanbase-oracle" => ORACLE_SYSTEM_VALUES
+            .iter()
+            .map(|name| BuiltinValue {
+                name,
+                category: "Oracle system value",
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn builtin_signatures_for(
     dialect: &str,
     name: &str,
@@ -359,7 +393,7 @@ pub(crate) fn builtin_signatures_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_signature_catalog_for, builtin_signatures_for};
+    use super::{builtin_signature_catalog_for, builtin_signatures_for, builtin_value_catalog_for};
 
     #[test]
     fn dialect_override_wins_over_common_signature() {
@@ -402,5 +436,15 @@ mod tests {
             .iter()
             .any(|signature| signature.name == "JSON_VALUE"));
         assert!(builtin_signature_catalog_for("mongodb", None).is_empty());
+    }
+
+    #[test]
+    fn oracle_system_values_are_not_function_signatures() {
+        let values = builtin_value_catalog_for("oracle");
+        assert!(values.iter().any(|value| value.name == "SYSDATE"));
+        assert!(values.iter().any(|value| value.name == "SESSIONTIMEZONE"));
+        assert_eq!(builtin_value_catalog_for("oceanbase-oracle"), values);
+        assert!(builtin_value_catalog_for("postgres").is_empty());
+        assert!(builtin_signatures_for("oracle", "SYSDATE", None).is_empty());
     }
 }

@@ -1,5 +1,6 @@
 use crate::builtin_signatures::{
-    builtin_signature_catalog_for, builtin_signatures_for, BuiltinSignature,
+    builtin_signature_catalog_for, builtin_signatures_for, builtin_value_catalog_for,
+    BuiltinSignature,
 };
 use crate::dialect::Dialect;
 use crate::dialects::common::{apply_formatter_layout, LogicalOperatorLayout};
@@ -1288,7 +1289,12 @@ fn add_builtin_function_completions(
             })
             .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS)
             .collect::<Vec<_>>();
-    if catalog.is_empty() {
+    let mut values = builtin_value_catalog_for(dialect)
+        .into_iter()
+        .filter(|value| prefix.is_empty() || value.name.to_ascii_lowercase().starts_with(&prefix))
+        .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS.saturating_sub(catalog.len()))
+        .collect::<Vec<_>>();
+    if catalog.is_empty() && values.is_empty() {
         return;
     }
 
@@ -1301,14 +1307,18 @@ fn add_builtin_function_completions(
         .iter()
         .map(|signature| signature.name.to_ascii_lowercase())
         .collect::<HashSet<_>>();
+    let value_names = values
+        .iter()
+        .map(|value| value.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
     items.retain(|item| {
-        item.kind != Some(CompletionItemKind::FUNCTION)
-            || !catalog_names
-                .contains(&SqlParser::identifier_last_part(&item.label).to_ascii_lowercase())
+        let name = SqlParser::identifier_last_part(&item.label).to_ascii_lowercase();
+        (!catalog_names.contains(&name) && !value_names.contains(&name))
             || completion_item_is_live_routine(item)
     });
 
     catalog.retain(|signature| !live_names.contains(&signature.name.to_ascii_lowercase()));
+    values.retain(|value| !live_names.contains(&value.name.to_ascii_lowercase()));
     items.extend(catalog.into_iter().map(|signature| CompletionItem {
         label: signature.name.to_string(),
         kind: Some(CompletionItemKind::FUNCTION),
@@ -1327,6 +1337,22 @@ fn add_builtin_function_completions(
         filter_text: Some(signature.name.to_string()),
         insert_text: Some(builtin_function_snippet(&signature)),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    }));
+    items.extend(values.into_iter().map(|value| CompletionItem {
+        label: value.name.to_string(),
+        kind: Some(CompletionItemKind::VALUE),
+        detail: Some(value.category.to_string()),
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: format!(
+                "Built-in system value for the active `{dialect}` SQL profile. It is inserted as a bare expression without function-call parentheses."
+            ),
+        })),
+        sort_text: Some(format!("1:builtin-value:{}", value.name.to_ascii_lowercase())),
+        filter_text: Some(value.name.to_string()),
+        insert_text: Some(value.name.to_string()),
+        insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
         ..Default::default()
     }));
 }
@@ -7259,6 +7285,44 @@ mod tests {
                 .and_then(|item| item.detail.as_deref()),
             live.detail.as_deref()
         );
+    }
+
+    #[test]
+    fn oracle_system_value_completion_is_bare_and_expression_scoped() {
+        let sql = "SELECT sys";
+        let mut items = Vec::new();
+        add_builtin_function_completions(sql, lsp_position_at_end(sql), "oracle", None, &mut items);
+        let sysdate = items
+            .iter()
+            .find(|item| item.label == "SYSDATE")
+            .expect("Oracle SYSDATE completion");
+        assert_eq!(sysdate.kind, Some(CompletionItemKind::VALUE));
+        assert_eq!(sysdate.insert_text.as_deref(), Some("SYSDATE"));
+        assert_eq!(
+            sysdate.insert_text_format,
+            Some(InsertTextFormat::PLAIN_TEXT)
+        );
+
+        let relation_sql = "SELECT * FROM sys";
+        let mut relation_items = Vec::new();
+        add_builtin_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "oracle",
+            None,
+            &mut relation_items,
+        );
+        assert!(relation_items.is_empty());
+
+        let mut postgres_items = Vec::new();
+        add_builtin_function_completions(
+            sql,
+            lsp_position_at_end(sql),
+            "postgres",
+            None,
+            &mut postgres_items,
+        );
+        assert!(!postgres_items.iter().any(|item| item.label == "SYSDATE"));
     }
 
     #[test]
