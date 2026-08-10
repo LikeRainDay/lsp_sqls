@@ -2,6 +2,7 @@ use crate::builtin_signatures::{
     builtin_signature_catalog_for, builtin_signatures_for, BuiltinSignature,
 };
 use crate::dialect::Dialect;
+use crate::dialects::common::{apply_formatter_layout, LogicalOperatorLayout};
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
 use crate::placeholder::SqlPlaceholderDialect;
@@ -222,6 +223,42 @@ struct CompletionPreferences {
     table_alias: TableAliasStyle,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormattingPreferences {
+    #[serde(default)]
+    logical_operator_newline: LogicalOperatorNewline,
+    #[serde(default)]
+    from_clause_layout: FromClauseLayout,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum LogicalOperatorNewline {
+    #[default]
+    Before,
+    After,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum FromClauseLayout {
+    #[default]
+    NewLine,
+    SameLine,
+}
+
+impl FormattingPreferences {
+    fn logical_operator_layout(&self) -> LogicalOperatorLayout {
+        match self.logical_operator_newline {
+            LogicalOperatorNewline::Before => LogicalOperatorLayout::Before,
+            LogicalOperatorNewline::After => LogicalOperatorLayout::After,
+            LogicalOperatorNewline::None => LogicalOperatorLayout::SameLine,
+        }
+    }
+}
+
 impl Default for CompletionPreferences {
     fn default() -> Self {
         Self {
@@ -371,6 +408,7 @@ pub struct SqlLspServer {
     /// 无法从 URI/languageId 推断时使用的默认方言
     default_dialect: Arc<RwLock<String>>,
     completion_preferences: Arc<RwLock<CompletionPreferences>>,
+    formatting_preferences: Arc<RwLock<FormattingPreferences>>,
     /// 打开文档的 languageId，用于配置刷新后恢复推断方言
     document_languages: Arc<DashMap<String, String>>,
     /// 文档管理器
@@ -395,6 +433,7 @@ impl SqlLspServer {
             inferred_file_schemas: Arc::new(DashMap::new()),
             default_dialect: Arc::new(RwLock::new("postgres".to_string())),
             completion_preferences: Arc::new(RwLock::new(CompletionPreferences::default())),
+            formatting_preferences: Arc::new(RwLock::new(FormattingPreferences::default())),
             document_languages: Arc::new(DashMap::new()),
             document_manager: DocumentManager::new(),
             analysis_cache: Arc::new(DashMap::new()),
@@ -1983,6 +2022,24 @@ impl LanguageServer for SqlLspServer {
                 }
             }
 
+            if let Some(preferences_value) = settings.get("formattingPreferences") {
+                match serde_json::from_value::<FormattingPreferences>(preferences_value.clone()) {
+                    Ok(preferences) => {
+                        if let Ok(mut current_preferences) = self.formatting_preferences.write() {
+                            *current_preferences = preferences;
+                        }
+                    }
+                    Err(error) => {
+                        self.client
+                            .log_message(
+                                MessageType::WARNING,
+                                format!("Ignoring invalid formatting preferences: {error}"),
+                            )
+                            .await;
+                    }
+                }
+            }
+
             // 处理 schemas 配置
             if let Some(schemas_value) = settings.get("schemas") {
                 if let Ok(schemas) =
@@ -2527,6 +2584,16 @@ impl LanguageServer for SqlLspServer {
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
             let formatted = dialect.format(&text).await;
+            let preferences = self
+                .formatting_preferences
+                .read()
+                .map(|preferences| preferences.clone())
+                .unwrap_or_default();
+            let formatted = apply_formatter_layout(
+                &formatted,
+                preferences.logical_operator_layout(),
+                matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
+            );
             let range = Range {
                 start: Position {
                     line: 0,
@@ -2558,6 +2625,16 @@ impl LanguageServer for SqlLspServer {
             return Ok(None);
         };
         let formatted = dialect.format(selected).await;
+        let preferences = self
+            .formatting_preferences
+            .read()
+            .map(|preferences| preferences.clone())
+            .unwrap_or_default();
+        let formatted = apply_formatter_layout(
+            &formatted,
+            preferences.logical_operator_layout(),
+            matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
+        );
         Ok(Some(vec![TextEdit {
             range: params.range,
             new_text: formatted,
@@ -6015,7 +6092,8 @@ mod tests {
         rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
-        CompletionResolveCache, KeywordCase, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        CompletionResolveCache, FormattingPreferences, FromClauseLayout, KeywordCase,
+        LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
         LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
@@ -6033,6 +6111,21 @@ mod tests {
         CompletionTextEdit, Documentation, InitializeParams, InsertTextFormat, Location, Position,
         Range, TextEdit, Url,
     };
+
+    #[test]
+    fn formatting_preferences_decode_editor_layout_values() {
+        let preferences: FormattingPreferences = serde_json::from_value(serde_json::json!({
+            "logicalOperatorNewline": "none",
+            "fromClauseLayout": "sameLine"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            preferences.logical_operator_newline,
+            LogicalOperatorNewline::None
+        );
+        assert_eq!(preferences.from_clause_layout, FromClauseLayout::SameLine);
+    }
 
     #[test]
     fn completion_documentation_is_deferred_only_for_capable_clients() {
