@@ -1367,15 +1367,15 @@ fn apply_completion_preferences(
         && relation_alias_context_at_position(text, position);
 
     for item in items {
-        if item.kind == Some(CompletionItemKind::KEYWORD)
-            || completion_item_uses_generated_keyword_case(item)
-        {
+        if item.kind == Some(CompletionItemKind::KEYWORD) {
             let transform = |value: &str| apply_identifier_case(value, preferences.keyword_case);
             item.label = transform(&item.label);
             if let Some(insert_text) = item.insert_text.as_mut() {
                 *insert_text = transform(insert_text);
             }
             update_completion_text_edit(item, &transform);
+        } else if completion_item_uses_generated_keyword_case(item) {
+            apply_generated_function_case(item, preferences.keyword_case);
         }
 
         if completion_item_uses_generated_function_case(item) {
@@ -9187,6 +9187,10 @@ mod tests {
         );
         assert_eq!(items[2].label, "current_date");
         assert_eq!(items[3].label, "table");
+        assert_eq!(
+            items[3].insert_text.as_deref(),
+            Some("table(${1:function_call})")
+        );
         assert_eq!(items[4].label, "json_table");
         assert_eq!(items[5].label, "MixedCaseRoutine");
         assert_eq!(items[5].insert_text.as_deref(), Some("MixedCaseRoutine()"));
