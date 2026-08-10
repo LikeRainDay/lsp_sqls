@@ -7670,10 +7670,9 @@ fn schema_for_table_column_at_position(
             let node = parser.get_node_at_position(tree, byte_position)?;
             parser.get_table_name_for_column(node, text)
         })?;
-    let aliases = parser.extract_aliases_at_position(tree, text, byte_position);
-    let table_reference = aliases
-        .get(&table_name)
-        .map(String::as_str)
+    let aliases = SqlParser::relation_aliases_at_position(text, byte_position);
+    let table_reference = SqlParser::resolve_relation_alias(&aliases, &table_name)
+        .map(|alias| alias.relation.as_str())
         .unwrap_or(table_name.as_str());
 
     find_schema_by_table_reference(schema_manager, table_reference)
@@ -10596,6 +10595,27 @@ mod tests {
         manager.register(test_schema("app", &["users"]));
         let audit_id = manager.register(test_schema("audit", &["events"]));
         let sql = "SELECT * FROM audit.events e WHERE e.";
+
+        assert_eq!(
+            schema_for_table_column_at_position(
+                &manager,
+                sql,
+                tower_lsp::lsp_types::Position {
+                    line: 0,
+                    character: sql.encode_utf16().count() as u32,
+                },
+            )
+            .map(|schema| schema.id),
+            Some(audit_id)
+        );
+    }
+
+    #[test]
+    fn resolves_mixed_case_unquoted_aliases_for_column_schema_selection() {
+        let manager = SchemaManager::new();
+        manager.register(test_schema("app", &["users"]));
+        let audit_id = manager.register(test_schema("audit", &["events"]));
+        let sql = "SELECT * FROM audit.events EventAlias WHERE eventalias.";
 
         assert_eq!(
             schema_for_table_column_at_position(

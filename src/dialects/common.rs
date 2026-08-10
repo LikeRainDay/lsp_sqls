@@ -2018,11 +2018,15 @@ pub(crate) fn referenced_table_names_at_position(
     position: Position,
 ) -> Vec<String> {
     let referenced_tables = parser.extract_referenced_tables_at_position(tree, sql, position);
-    let aliases = parser.extract_aliases_at_position(tree, sql, position);
+    let aliases = SqlParser::relation_aliases_at_position(sql, position);
     let mut seen = HashSet::new();
     referenced_tables
         .iter()
-        .map(|table| aliases.get(table).unwrap_or(table).clone())
+        .map(|table| {
+            SqlParser::resolve_relation_alias(&aliases, table)
+                .map(|alias| alias.relation.clone())
+                .unwrap_or_else(|| table.clone())
+        })
         .filter(|table| seen.insert(table.to_ascii_lowercase()))
         .collect()
 }
