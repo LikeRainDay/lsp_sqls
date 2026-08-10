@@ -1543,7 +1543,7 @@ fn add_insert_statement_snippets(
         let writable = table
             .columns
             .iter()
-            .filter(|column| !column.auto_increment && !column.generated)
+            .filter(|column| !column.auto_increment && !column.generated && !column.hidden)
             .collect::<Vec<_>>();
         if writable.is_empty() || writable.len() > INSERT_STATEMENT_SNIPPET_MAX_COLUMNS {
             continue;
@@ -1726,7 +1726,7 @@ fn add_insert_all_columns_completion(
     let writable_columns = table
         .columns
         .iter()
-        .filter(|column| !column.auto_increment && !column.generated)
+        .filter(|column| !column.auto_increment && !column.generated && !column.hidden)
         .collect::<Vec<_>>();
     if writable_columns.is_empty() {
         return;
@@ -5032,14 +5032,23 @@ fn expand_select_star_action(
             sources.push((table, source_qualifier));
         }
     }
-    if sources.is_empty() || sources.iter().any(|(table, _)| table.columns.is_empty()) {
+    if sources.is_empty()
+        || sources
+            .iter()
+            .any(|(table, _)| table.columns.iter().all(|column| column.hidden))
+    {
         return None;
     }
 
     let qualified_expansion = qualifier.is_none() && sources.len() > 1;
     let mut replacement_columns = Vec::new();
     for (table, source_qualifier) in &sources {
-        for (index, column) in table.columns.iter().enumerate() {
+        for (index, column) in table
+            .columns
+            .iter()
+            .filter(|column| !column.hidden)
+            .enumerate()
+        {
             let column_name = if qualifier.is_some() {
                 // The original `alias.` remains before the replacement range.
                 if index == 0 {
@@ -5464,6 +5473,7 @@ fn parse_temporary_column(definition: &str, uri: &str, line: u32) -> Option<Colu
         default_value: None,
         auto_increment: false,
         generated: false,
+        hidden: false,
         comment: Some("Column from a temporary table in the current console".to_string()),
         source_location: Some((uri.to_string(), line)),
     })
@@ -5860,6 +5870,7 @@ fn local_relation_column(name: String, data_type: &str, uri: &str, line: u32) ->
         default_value: None,
         auto_increment: false,
         generated: false,
+        hidden: false,
         comment: Some("Output column inferred from the current console".to_string()),
         source_location: Some((uri.to_string(), line)),
     }
@@ -7862,6 +7873,12 @@ mod tests {
                 generated: true,
                 ..Default::default()
             },
+            Column {
+                name: "period_start".to_string(),
+                data_type: "timestamp".to_string(),
+                hidden: true,
+                ..Default::default()
+            },
         ];
 
         let sql = "INSERT INTO app.orders (";
@@ -7896,6 +7913,11 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("search_vector"));
+        assert!(!writable
+            .insert_text
+            .as_deref()
+            .unwrap()
+            .contains("period_start"));
     }
 
     #[test]
@@ -7992,14 +8014,29 @@ mod tests {
         let mut schema = completion_schema_with_columns();
         schema.tables.push(Table {
             name: "事件".to_string(),
-            columns: ["id", "order", "显示名称"]
-                .into_iter()
-                .map(|name| Column {
-                    name: name.to_string(),
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
                     data_type: "text".to_string(),
                     ..Default::default()
-                })
-                .collect(),
+                },
+                Column {
+                    name: "order".to_string(),
+                    data_type: "text".to_string(),
+                    ..Default::default()
+                },
+                Column {
+                    name: "显示名称".to_string(),
+                    data_type: "text".to_string(),
+                    ..Default::default()
+                },
+                Column {
+                    name: "隐藏值".to_string(),
+                    data_type: "text".to_string(),
+                    hidden: true,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         });
         let insert_sql = "INSERT INTO app.事件 (";

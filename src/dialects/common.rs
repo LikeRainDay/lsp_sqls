@@ -1164,11 +1164,12 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         column.name.clone()
     };
 
-    let detail = if let Some(table) = table_name {
+    let mut detail = if let Some(table) = table_name {
         format!("Column: {}.{} ({})", table, column.name, column.data_type)
     } else {
         format!("Column: {} ({})", column.name, column.data_type)
     };
+    detail.push_str(column_visibility_suffix(column));
 
     CompletionItem {
         label: label.clone(),
@@ -1177,7 +1178,10 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         documentation: column.documentation().map(Documentation::String),
         deprecated: None,
         preselect: None,
-        sort_text: Some(completion_sort_text("2", &column.name)),
+        sort_text: Some(completion_sort_text(
+            if column.hidden { "3" } else { "2" },
+            &column.name,
+        )),
         filter_text: Some(column.name.clone()),
         insert_text: Some(label),
         insert_text_format: None,
@@ -1189,6 +1193,16 @@ pub(crate) fn create_column_item(column: &Column, table_name: Option<&str>) -> C
         data: None,
         tags: None,
         label_details: None,
+    }
+}
+
+fn column_visibility_suffix(column: &Column) -> &'static str {
+    if column.hidden {
+        " · hidden"
+    } else if column.generated {
+        " · generated"
+    } else {
+        ""
     }
 }
 
@@ -1565,8 +1579,12 @@ pub(crate) fn add_schema_columns(
                 .map(|catalog| format!("{catalog}.{}", schema.database))
                 .unwrap_or_else(|| schema.database.clone());
             item.detail = Some(format!(
-                "Column: {}.{}.{} ({})",
-                namespace, table.name, column.name, column.data_type
+                "Column: {}.{}.{} ({}){}",
+                namespace,
+                table.name,
+                column.name,
+                column.data_type,
+                column_visibility_suffix(column)
             ));
             item.data = Some(json!({
                 "oxide": {
@@ -1578,8 +1596,9 @@ pub(crate) fn add_schema_columns(
                 }
             }));
             item.sort_text = Some(format!(
-                "{}:{:02}:{:04}:{}:{}",
+                "{}:{:01}:{:02}:{:04}:{}:{}",
                 sort_prefix,
+                u8::from(column.hidden),
                 match_rank,
                 relation_order,
                 column.name.to_ascii_lowercase(),
@@ -2047,6 +2066,62 @@ mod tests {
         assert_eq!(qualified.label, "app.users");
         assert_eq!(qualified.insert_text.as_deref(), Some("app.users"));
         assert_eq!(qualified.filter_text.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn column_completion_marks_database_owned_visibility_without_hiding_the_item() {
+        let hidden = create_column_item(
+            &Column {
+                name: "period start".to_string(),
+                data_type: "timestamp".to_string(),
+                hidden: true,
+                ..Default::default()
+            },
+            Some("events"),
+        );
+        assert_eq!(hidden.label, "events.period start");
+        assert!(hidden
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("· hidden")));
+        assert!(hidden
+            .sort_text
+            .as_deref()
+            .is_some_and(|sort| sort.starts_with("3:")));
+
+        let generated = create_column_item(
+            &Column {
+                name: "search_vector".to_string(),
+                data_type: "tsvector".to_string(),
+                generated: true,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(generated
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("· generated")));
+
+        let mut schema = test_schema();
+        schema.tables[0].columns.push(Column {
+            name: "period_start".to_string(),
+            data_type: "timestamp".to_string(),
+            hidden: true,
+            ..Default::default()
+        });
+        let mut items = Vec::new();
+        add_schema_columns(&mut items, &schema, &["users".to_string()], false, "", "0");
+        let visible = items.iter().find(|item| item.label == "name").unwrap();
+        let hidden = items
+            .iter()
+            .find(|item| item.label == "period_start")
+            .unwrap();
+        assert!(hidden
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.ends_with("· hidden")));
+        assert!(visible.sort_text < hidden.sort_text);
     }
 
     #[test]

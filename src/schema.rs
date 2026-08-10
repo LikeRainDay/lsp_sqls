@@ -126,6 +126,10 @@ pub struct Column {
     /// Computed/generated columns cannot be assigned by regular INSERTs.
     #[serde(default)]
     pub generated: bool,
+    /// Database-hidden columns are omitted by ordinary wildcard projections
+    /// and cannot be treated as regular INSERT inputs.
+    #[serde(default)]
+    pub hidden: bool,
     /// 列注释
     pub comment: Option<String>,
     /// 列定义位置的 URI 和行号 (可选)
