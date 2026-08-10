@@ -5,7 +5,10 @@ use crate::builtin_signatures::{
     builtin_window_function_catalog_is_available_for, BuiltinSignature,
 };
 use crate::dialect::Dialect;
-use crate::dialects::common::{apply_formatter_layout, LogicalOperatorLayout};
+use crate::dialects::common::{
+    apply_formatter_function_case, apply_formatter_layout, format_sql_pretty_with_keyword_case,
+    LogicalOperatorLayout,
+};
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
 use crate::placeholder::SqlPlaceholderDialect;
@@ -231,13 +234,28 @@ struct CompletionPreferences {
     table_alias: TableAliasStyle,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FormattingPreferences {
+    #[serde(default = "default_keyword_case")]
+    keyword_case: KeywordCase,
+    #[serde(default = "default_function_case")]
+    function_case: KeywordCase,
     #[serde(default)]
     logical_operator_newline: LogicalOperatorNewline,
     #[serde(default)]
     from_clause_layout: FromClauseLayout,
+}
+
+impl Default for FormattingPreferences {
+    fn default() -> Self {
+        Self {
+            keyword_case: KeywordCase::Upper,
+            function_case: KeywordCase::Preserve,
+            logical_operator_newline: LogicalOperatorNewline::Before,
+            from_clause_layout: FromClauseLayout::NewLine,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -265,6 +283,14 @@ impl FormattingPreferences {
             LogicalOperatorNewline::None => LogicalOperatorLayout::SameLine,
         }
     }
+
+    fn keyword_uppercase(&self) -> Option<bool> {
+        self.keyword_case.uppercase_option()
+    }
+
+    fn function_uppercase(&self) -> Option<bool> {
+        self.function_case.uppercase_option()
+    }
 }
 
 impl Default for CompletionPreferences {
@@ -285,12 +311,29 @@ enum KeywordCase {
     Preserve,
 }
 
+impl KeywordCase {
+    fn uppercase_option(self) -> Option<bool> {
+        match self {
+            Self::Upper => Some(true),
+            Self::Lower => Some(false),
+            Self::Preserve => None,
+        }
+    }
+}
+
 fn default_keyword_case() -> KeywordCase {
     KeywordCase::Upper
 }
 
 fn default_function_case() -> KeywordCase {
     KeywordCase::Preserve
+}
+
+fn dialect_uses_sql_preferences(dialect: &str) -> bool {
+    matches!(
+        dialect,
+        "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
+    )
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -861,10 +904,7 @@ impl SqlLspServer {
             .read()
             .map(|preferences| preferences.clone())
             .unwrap_or_default();
-        let relational_completion = matches!(
-            dialect.name(),
-            "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
-        );
+        let relational_completion = dialect_uses_sql_preferences(dialect.name());
         if relational_completion {
             add_insert_statement_snippets(
                 text,
@@ -3544,17 +3584,24 @@ impl LanguageServer for SqlLspServer {
         let text = self.document_manager.get(&uri).unwrap_or_default();
 
         if let Some(dialect) = self.get_dialect_for_file(&uri) {
-            let formatted = dialect.format(&text).await;
             let preferences = self
                 .formatting_preferences
                 .read()
                 .map(|preferences| preferences.clone())
                 .unwrap_or_default();
-            let formatted = apply_formatter_layout(
-                &formatted,
-                preferences.logical_operator_layout(),
-                matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
-            );
+            let formatted = if dialect_uses_sql_preferences(dialect.name()) {
+                let formatted =
+                    format_sql_pretty_with_keyword_case(&text, preferences.keyword_uppercase());
+                let formatted =
+                    apply_formatter_function_case(&formatted, preferences.function_uppercase());
+                apply_formatter_layout(
+                    &formatted,
+                    preferences.logical_operator_layout(),
+                    matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
+                )
+            } else {
+                dialect.format(&text).await
+            };
             let range = Range {
                 start: Position {
                     line: 0,
@@ -3585,17 +3632,24 @@ impl LanguageServer for SqlLspServer {
         let Some(selected) = text.get(start.min(end)..end.max(start)) else {
             return Ok(None);
         };
-        let formatted = dialect.format(selected).await;
         let preferences = self
             .formatting_preferences
             .read()
             .map(|preferences| preferences.clone())
             .unwrap_or_default();
-        let formatted = apply_formatter_layout(
-            &formatted,
-            preferences.logical_operator_layout(),
-            matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
-        );
+        let formatted = if dialect_uses_sql_preferences(dialect.name()) {
+            let formatted =
+                format_sql_pretty_with_keyword_case(selected, preferences.keyword_uppercase());
+            let formatted =
+                apply_formatter_function_case(&formatted, preferences.function_uppercase());
+            apply_formatter_layout(
+                &formatted,
+                preferences.logical_operator_layout(),
+                matches!(preferences.from_clause_layout, FromClauseLayout::SameLine),
+            )
+        } else {
+            dialect.format(selected).await
+        };
         Ok(Some(vec![TextEdit {
             range: params.range,
             new_text: formatted,
@@ -7746,11 +7800,15 @@ mod tests {
     #[test]
     fn formatting_preferences_decode_editor_layout_values() {
         let preferences: FormattingPreferences = serde_json::from_value(serde_json::json!({
+            "keywordCase": "lower",
+            "functionCase": "upper",
             "logicalOperatorNewline": "none",
             "fromClauseLayout": "sameLine"
         }))
         .unwrap();
 
+        assert!(matches!(preferences.keyword_case, KeywordCase::Lower));
+        assert!(matches!(preferences.function_case, KeywordCase::Upper));
         assert_eq!(
             preferences.logical_operator_newline,
             LogicalOperatorNewline::None

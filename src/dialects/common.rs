@@ -8,14 +8,72 @@ use tower_lsp::lsp_types::{
 };
 
 pub(crate) fn format_sql_pretty(source: &str) -> String {
+    format_sql_pretty_with_keyword_case(source, Some(true))
+}
+
+pub(crate) fn format_sql_pretty_with_keyword_case(source: &str, uppercase: Option<bool>) -> String {
     use sqlformat::{FormatOptions, Indent, QueryParams};
     let options = FormatOptions {
         indent: Indent::Spaces(2),
-        uppercase: Some(true),
+        uppercase,
         lines_between_queries: 1,
         ..FormatOptions::default()
     };
     sqlformat::format(source, &QueryParams::None, &options)
+}
+
+fn collect_invocation_name_ranges(node: tree_sitter::Node<'_>, ranges: &mut Vec<(usize, usize)>) {
+    if node.kind() == "invocation" {
+        let mut cursor = node.walk();
+        if let Some(reference) = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "object_reference")
+        {
+            if let Some(name) = reference.child_by_field_name("name") {
+                ranges.push((name.start_byte(), name.end_byte()));
+            }
+        };
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_invocation_name_ranges(child, ranges);
+    }
+}
+
+/// Apply function casing only to Tree-sitter invocation-name nodes. This keeps
+/// relation names, CTE column lists, parameter placeholders, data types,
+/// comments, strings, and quoted identifiers byte-for-byte intact.
+pub(crate) fn apply_formatter_function_case(source: &str, uppercase: Option<bool>) -> String {
+    let Some(uppercase) = uppercase else {
+        return source.to_string();
+    };
+    let mut parser = SqlParser::new();
+    let parsed = parser.parse(source);
+    let Some(tree) = parsed.tree.as_ref() else {
+        return source.to_string();
+    };
+    let mut ranges = Vec::new();
+    collect_invocation_name_ranges(tree.root_node(), &mut ranges);
+    ranges.sort_unstable();
+    ranges.dedup();
+
+    let mut formatted = source.to_string();
+    for (start, end) in ranges.into_iter().rev() {
+        let Some(name) = source.get(start..end) else {
+            continue;
+        };
+        if name.starts_with(['"', '`', '[']) {
+            continue;
+        }
+        let replacement = if uppercase {
+            name.to_uppercase()
+        } else {
+            name.to_lowercase()
+        };
+        formatted.replace_range(start..end, &replacement);
+    }
+    formatted
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2306,6 +2364,31 @@ mod tests {
             ),
             "SELECT 'it''s  spaced', `my  column`, [also  spaced] FROM t"
         );
+    }
+
+    #[test]
+    fn formatter_keyword_case_supports_upper_lower_and_preserve() {
+        let source = "seLEct value frOM users whERE active = true";
+
+        assert!(format_sql_pretty_with_keyword_case(source, Some(true)).contains("SELECT"));
+        assert!(format_sql_pretty_with_keyword_case(source, Some(false)).contains("select"));
+        let preserved = format_sql_pretty_with_keyword_case(source, None);
+        assert!(preserved.contains("seLEct"), "formatted SQL: {preserved}");
+        assert!(preserved.contains("frOM"), "formatted SQL: {preserved}");
+    }
+
+    #[test]
+    fn formatter_function_case_rewrites_only_invocation_names() {
+        let source = "SELECT public.MixedFn(${value}), \"QuotedFn\"(), CAST(score AS DECIMAL(10, 2)) FROM AppTable WHERE id IN (SELECT id FROM OtherTable)";
+        let lower = apply_formatter_function_case(source, Some(false));
+
+        assert!(lower.contains("public.mixedfn(${value})"));
+        assert!(lower.contains("\"QuotedFn\"()"));
+        assert!(lower.contains("DECIMAL(10, 2)"));
+        assert!(lower.contains("FROM AppTable"));
+        assert!(lower.contains("FROM OtherTable"));
+        assert!(lower.contains("${value}"));
+        assert_eq!(apply_formatter_function_case(source, None), source);
     }
 
     #[test]
