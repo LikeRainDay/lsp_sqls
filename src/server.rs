@@ -7,7 +7,7 @@ use crate::builtin_signatures::{
 use crate::dialect::Dialect;
 use crate::dialects::common::{
     apply_formatter_function_case, apply_formatter_layout, format_sql_pretty_with_keyword_case,
-    LogicalOperatorLayout,
+    identifier_match_rank, LogicalOperatorLayout,
 };
 use crate::dialects::DialectRegistry;
 use crate::parser::SqlParser;
@@ -2149,7 +2149,7 @@ fn add_referenced_alias_completions(
     let prefix = prefix_sql
         .trim_start_matches(['"', '`', '['])
         .trim_end_matches(['"', '`', ']'])
-        .to_ascii_lowercase();
+        .to_lowercase();
     if prefix.is_empty() {
         return;
     }
@@ -2159,14 +2159,14 @@ fn add_referenced_alias_completions(
     // already produced its semantic completion candidates.
     let aliases = SqlParser::relation_aliases_at_position(text, position);
     for alias in aliases {
-        let normalized = alias.name.to_ascii_lowercase();
-        let initials = table_alias_initials(&alias.name).unwrap_or_default();
-        if !normalized.starts_with(&prefix) && !initials.starts_with(&prefix) {
+        let Some(match_rank) = identifier_match_rank(&alias.name, &prefix) else {
             continue;
-        }
+        };
+        let normalized = alias.name.to_lowercase();
         if items.iter().any(|item| {
             item.kind == Some(CompletionItemKind::VARIABLE)
-                && item.label.eq_ignore_ascii_case(&alias.name)
+                && item.label == alias.name
+                && item.insert_text.as_deref() == Some(alias.sql.as_str())
         }) {
             continue;
         }
@@ -2176,7 +2176,7 @@ fn add_referenced_alias_completions(
             detail: Some(format!("Table alias · {}", alias.relation)),
             filter_text: Some(alias.name.clone()),
             insert_text: Some(alias.sql),
-            sort_text: Some(format!("-2:alias:{}", normalized)),
+            sort_text: Some(format!("-2:alias:{match_rank}:{normalized}")),
             ..Default::default()
         });
     }
@@ -9395,6 +9395,35 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "User Alias");
         assert_eq!(items[0].insert_text.as_deref(), Some("\"User Alias\""));
+    }
+
+    #[test]
+    fn relation_alias_completion_keeps_quoted_collisions_and_fuzzy_matches() {
+        let collision_sql = "SELECT u FROM app.users u JOIN app.audit AS \"U\" ON TRUE";
+        let collision_position = Position::new(0, "SELECT u".len() as u32);
+        let mut collision_items = Vec::new();
+
+        add_referenced_alias_completions(collision_sql, collision_position, &mut collision_items);
+
+        assert_eq!(collision_items.len(), 2);
+        assert!(collision_items
+            .iter()
+            .any(|item| { item.label == "u" && item.insert_text.as_deref() == Some("u") }));
+        assert!(collision_items
+            .iter()
+            .any(|item| { item.label == "U" && item.insert_text.as_deref() == Some("\"U\"") }));
+
+        let fuzzy_sql = "SELECT cmo FROM app.customer_orders customerOrder";
+        let fuzzy_position = Position::new(0, "SELECT cmo".len() as u32);
+        let mut fuzzy_items = Vec::new();
+        add_referenced_alias_completions(fuzzy_sql, fuzzy_position, &mut fuzzy_items);
+
+        let alias = fuzzy_items
+            .iter()
+            .find(|item| item.label == "customerOrder")
+            .expect("ordered-subsequence alias completion");
+        assert_eq!(alias.insert_text.as_deref(), Some("customerOrder"));
+        assert_eq!(alias.sort_text.as_deref(), Some("-2:alias:3:customerorder"));
     }
 
     #[test]

@@ -935,10 +935,13 @@ impl Dialect for MysqlDialect {
                         common::table_column_reference_at_position(&parser, tree, sql, position)
                     {
                         if let Some(schema) = schema {
-                            let aliases = parser.extract_aliases_at_position(tree, sql, position);
+                            let aliases = SqlParser::relation_aliases_at_position(sql, position);
 
-                            // Resolve alias to real table name
-                            let real_table_name = aliases.get(&table_name).unwrap_or(&table_name);
+                            // Resolve aliases with SQL quoting/casing semantics.
+                            let real_table_name =
+                                SqlParser::resolve_relation_alias(&aliases, &table_name)
+                                    .map(|alias| alias.relation.as_str())
+                                    .unwrap_or(table_name.as_str());
 
                             if let Some(table) =
                                 Self::find_table_by_reference(schema, real_table_name)

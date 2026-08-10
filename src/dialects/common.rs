@@ -1667,13 +1667,17 @@ pub(crate) fn add_schema_columns(
     }
 }
 
-fn identifier_match_rank(candidate: &str, prefix: &str) -> Option<u8> {
+/// Returns a bounded semantic match tier shared by schema fields and local
+/// relation aliases. Keeping aliases on this same ladder makes the popup
+/// consistent with DBX's identifier completion: exact, prefix, abbreviation,
+/// then ordered-subsequence matches.
+pub(crate) fn identifier_match_rank(candidate: &str, prefix: &str) -> Option<u8> {
     if prefix.is_empty() {
         return Some(0);
     }
 
-    let candidate_lower = candidate.to_ascii_lowercase();
-    let prefix_lower = prefix.to_ascii_lowercase();
+    let candidate_lower = candidate.to_lowercase();
+    let prefix_lower = prefix.to_lowercase();
     if candidate_lower == prefix_lower {
         return Some(0);
     }
@@ -1693,16 +1697,16 @@ fn identifier_abbreviation(candidate: &str) -> String {
     let mut previous_is_separator = true;
     let mut previous_is_lowercase = false;
     for ch in candidate.chars() {
-        if !ch.is_ascii_alphanumeric() {
+        if !ch.is_alphanumeric() {
             previous_is_separator = true;
             previous_is_lowercase = false;
             continue;
         }
-        if previous_is_separator || (previous_is_lowercase && ch.is_ascii_uppercase()) {
-            abbreviation.push(ch.to_ascii_lowercase());
+        if previous_is_separator || (previous_is_lowercase && ch.is_uppercase()) {
+            abbreviation.extend(ch.to_lowercase());
         }
         previous_is_separator = false;
-        previous_is_lowercase = ch.is_ascii_lowercase();
+        previous_is_lowercase = ch.is_lowercase();
     }
     abbreviation
 }
@@ -2255,6 +2259,8 @@ mod tests {
     fn schema_columns_rank_abbreviation_and_fuzzy_matches_after_prefixes() {
         assert_eq!(identifier_match_rank("user_id", "ui"), Some(2));
         assert_eq!(identifier_match_rank("created_at", "cat"), Some(3));
+        assert_eq!(identifier_match_rank("ÄlphaOrders", "äl"), Some(1));
+        assert_eq!(identifier_match_rank("用户订单", "户单"), Some(3));
         assert_eq!(identifier_match_rank("account_id", "zzz"), None);
     }
 

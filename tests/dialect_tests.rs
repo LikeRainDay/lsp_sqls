@@ -222,6 +222,31 @@ async fn test_postgres_schema_aware_completion_filters_referenced_tables() {
         "alias column completion should stay scoped to the aliased table"
     );
 
+    let case_insensitive_alias_sql = "SELECT u. FROM users U";
+    let case_insensitive_alias_items = dialect
+        .completion(
+            case_insensitive_alias_sql,
+            tower_lsp::lsp_types::Position {
+                line: 0,
+                character: "SELECT u.".len() as u32,
+            },
+            Some(&schema),
+        )
+        .await;
+
+    assert!(
+        case_insensitive_alias_items
+            .iter()
+            .any(|item| item.label == "id"),
+        "unquoted aliases should resolve case-insensitively for member completion"
+    );
+    assert!(
+        case_insensitive_alias_items
+            .iter()
+            .any(|item| item.label == "name"),
+        "case-insensitive alias completion should retain the resolved table columns"
+    );
+
     let where_alias_sql = "SELECT * FROM users u JOIN orders o ON u.id = o.user_id WHERE o.";
     let where_alias_items = dialect
         .completion(

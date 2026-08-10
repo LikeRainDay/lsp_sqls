@@ -5042,7 +5042,7 @@ impl SqlParser {
         else {
             return aliases;
         };
-        if aliases.iter().any(|alias| alias.name == qualifier) {
+        if Self::resolve_relation_alias(&aliases, &qualifier).is_some() {
             return aliases;
         }
 
@@ -5060,11 +5060,8 @@ impl SqlParser {
             let outer_position = crate::position::byte_position_at_end(&source[..open]);
             let outer_scope = Self::completion_scope_source(source, outer_position);
             let outer_aliases = Self::extract_relation_alias_entries_from_source(&outer_scope);
-            if let Some(alias) = outer_aliases
-                .into_iter()
-                .find(|alias| alias.name == qualifier)
-            {
-                aliases.push(alias);
+            if let Some(alias) = Self::resolve_relation_alias(&outer_aliases, &qualifier) {
+                aliases.push(alias.clone());
                 break;
             }
             let (_, next_scope_open) =
@@ -5073,6 +5070,36 @@ impl SqlParser {
         }
         aliases.sort_by(|left, right| left.name.cmp(&right.name));
         aliases
+    }
+
+    /// Resolve a visible relation alias. Exact names retain scope order; SQL's
+    /// ordinary case-insensitive fallback is applied only to unquoted aliases.
+    pub fn resolve_relation_alias<'a>(
+        aliases: &'a [RelationAlias],
+        qualifier: &str,
+    ) -> Option<&'a RelationAlias> {
+        let qualifier = Self::normalize_identifier(qualifier);
+        if Self::identifier_parts(&qualifier).len() != 1 {
+            return None;
+        }
+
+        aliases
+            .iter()
+            .find(|alias| alias.name == qualifier)
+            .or_else(|| {
+                aliases.iter().find(|alias| {
+                    !Self::is_quoted_identifier_sql(&alias.sql)
+                        && alias.name.eq_ignore_ascii_case(&qualifier)
+                })
+            })
+    }
+
+    fn is_quoted_identifier_sql(value: &str) -> bool {
+        let value = value.trim();
+        matches!(
+            value.as_bytes(),
+            [b'"', .., b'"'] | [b'`', .., b'`'] | [b'[', .., b']']
+        )
     }
 
     fn extract_aliases_from_source(source: &str) -> HashMap<String, String> {
@@ -5272,7 +5299,7 @@ impl SqlParser {
 
 #[cfg(test)]
 mod tests {
-    use super::{minimal_input_edit, CompletionContext, SqlParser};
+    use super::{minimal_input_edit, CompletionContext, RelationAlias, SqlParser};
     use tower_lsp::lsp_types::{DiagnosticSeverity, Position, Range};
 
     fn position_at_end(source: &str) -> Position {
@@ -6983,6 +7010,21 @@ mod tests {
         assert!(aliases
             .iter()
             .any(|alias| { alias.name == "inner_order" && alias.relation == "app.orders" }));
+    }
+
+    #[test]
+    fn resolves_unquoted_relation_aliases_case_insensitively() {
+        let aliases = vec![RelationAlias {
+            name: "UserAlias".to_string(),
+            sql: "UserAlias".to_string(),
+            relation: "app.users".to_string(),
+        }];
+
+        let resolved = SqlParser::resolve_relation_alias(&aliases, "useralias")
+            .expect("unquoted alias should resolve case-insensitively");
+        assert_eq!(resolved.relation, "app.users");
+        assert_eq!(resolved.sql, "UserAlias");
+        assert!(SqlParser::resolve_relation_alias(&aliases, "app.useralias").is_none());
     }
 
     #[test]
