@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
+use crate::clickhouse_signatures::{self, CatalogKind as ClickHouseCatalogKind};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BuiltinSignature {
-    pub name: &'static str,
+    pub name: String,
     pub parameter_groups: Vec<Vec<&'static str>>,
 }
 
@@ -15,15 +17,8 @@ pub(crate) struct BuiltinValue {
 impl BuiltinSignature {
     fn single(name: &'static str, parameters: &'static [&'static str]) -> Self {
         Self {
-            name,
+            name: name.to_string(),
             parameter_groups: vec![parameters.to_vec()],
-        }
-    }
-
-    fn grouped(name: &'static str, groups: &[&[&'static str]]) -> Self {
-        Self {
-            name,
-            parameter_groups: groups.iter().map(|group| group.to_vec()).collect(),
         }
     }
 
@@ -333,55 +328,6 @@ fn version_allows(dialect: &str, name: &str, server_version: Option<(u32, u32)>)
     minimum.is_none_or(|minimum| version >= minimum)
 }
 
-fn clickhouse_signatures(name: &str) -> Vec<BuiltinSignature> {
-    if name.eq_ignore_ascii_case("toStartOfInterval") {
-        return [
-            &["value", "INTERVAL x unit"][..],
-            &["value", "INTERVAL x unit", "time_zone"][..],
-            &["value", "INTERVAL x unit", "origin", "time_zone?"][..],
-        ]
-        .into_iter()
-        .map(|parameters| BuiltinSignature::single("toStartOfInterval", parameters))
-        .collect();
-    }
-    if name.eq_ignore_ascii_case("quantilesTDigest") {
-        return vec![BuiltinSignature::grouped(
-            "quantilesTDigest",
-            &[&["level", "...levels"], &["expression"]],
-        )];
-    }
-    let signature = match name.to_ascii_lowercase().as_str() {
-        "arrayjoin" => Some(("arrayJoin", &["array"][..])),
-        "formatdatetime" => Some(("formatDateTime", &["time", "format", "time_zone?"][..])),
-        "todate" => Some(("toDate", &["value"][..])),
-        "todatetime" => Some(("toDateTime", &["value", "time_zone?"][..])),
-        "tuple" => Some(("tuple", &["...values"][..])),
-        "map" => Some(("map", &["key", "value", "...pairs"][..])),
-        "multiif" => Some(("multiIf", &["condition", "then", "...branches", "else"][..])),
-        _ => None,
-    };
-    signature
-        .map(|(name, parameters)| vec![BuiltinSignature::single(name, parameters)])
-        .unwrap_or_default()
-}
-
-fn clickhouse_signature_catalog() -> Vec<BuiltinSignature> {
-    [
-        "toStartOfInterval",
-        "quantilesTDigest",
-        "arrayJoin",
-        "formatDateTime",
-        "toDate",
-        "toDateTime",
-        "tuple",
-        "map",
-        "multiIf",
-    ]
-    .into_iter()
-    .flat_map(clickhouse_signatures)
-    .collect()
-}
-
 fn is_non_sql_dialect(dialect: &str) -> bool {
     matches!(
         dialect,
@@ -423,7 +369,7 @@ pub(crate) fn builtin_signature_catalog_for(
     }
 
     let mut signatures = if matches!(normalized_dialect.as_str(), "clickhouse" | "ch") {
-        clickhouse_signature_catalog()
+        clickhouse_signatures::direct_expression_catalog()
     } else {
         Vec::new()
     };
@@ -471,6 +417,61 @@ pub(crate) fn builtin_value_catalog_for(dialect: &str) -> Vec<BuiltinValue> {
     }
 }
 
+pub(crate) fn builtin_signature_completion_catalog_for(
+    dialect: &str,
+    server_version: Option<(u32, u32)>,
+    prefix: &str,
+    limit: usize,
+) -> Vec<BuiltinSignature> {
+    let normalized_dialect = dialect.to_ascii_lowercase();
+    if matches!(normalized_dialect.as_str(), "clickhouse" | "ch") {
+        return clickhouse_signatures::completion_catalog(
+            prefix,
+            ClickHouseCatalogKind::Expression,
+            limit,
+        );
+    }
+    builtin_signature_catalog_for(&normalized_dialect, server_version)
+        .into_iter()
+        .filter(|signature| {
+            prefix.is_empty()
+                || signature
+                    .name
+                    .to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+        })
+        .take(limit)
+        .collect()
+}
+
+pub(crate) fn builtin_table_signature_completion_catalog_for(
+    dialect: &str,
+    prefix: &str,
+    limit: usize,
+) -> Vec<BuiltinSignature> {
+    if matches!(dialect.to_ascii_lowercase().as_str(), "clickhouse" | "ch") {
+        clickhouse_signatures::completion_catalog(prefix, ClickHouseCatalogKind::Table, limit)
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn builtin_function_is_known_for(
+    dialect: &str,
+    name: &str,
+    server_version: Option<(u32, u32)>,
+) -> bool {
+    if matches!(dialect.to_ascii_lowercase().as_str(), "clickhouse" | "ch") {
+        clickhouse_signatures::contains_expression(name)
+    } else {
+        !builtin_signatures_for(dialect, name, server_version).is_empty()
+    }
+}
+
+pub(crate) fn builtin_function_catalog_is_available_for(dialect: &str) -> bool {
+    !is_non_sql_dialect(&dialect.to_ascii_lowercase())
+}
+
 pub(crate) fn builtin_signatures_for(
     dialect: &str,
     name: &str,
@@ -482,7 +483,7 @@ pub(crate) fn builtin_signatures_for(
     }
 
     if normalized_dialect == "clickhouse" || normalized_dialect == "ch" {
-        let clickhouse = clickhouse_signatures(name);
+        let clickhouse = clickhouse_signatures::signatures_for(name);
         if !clickhouse.is_empty() {
             return clickhouse;
         }
@@ -493,7 +494,7 @@ pub(crate) fn builtin_signatures_for(
         .or_else(|| lookup(COMMON_SIGNATURES, name));
     signature
         .filter(|signature| {
-            version_allows(normalized_dialect.as_str(), signature.name, server_version)
+            version_allows(normalized_dialect.as_str(), &signature.name, server_version)
         })
         .into_iter()
         .collect()
@@ -585,7 +586,8 @@ mod tests {
             manticore
                 .iter()
                 .filter(|signature| {
-                    ["POLY2D", "TO_STRING", "CRC32", "DATE_FORMAT"].contains(&signature.name)
+                    ["POLY2D", "TO_STRING", "CRC32", "DATE_FORMAT"]
+                        .contains(&signature.name.as_str())
                 })
                 .count(),
             4

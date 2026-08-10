@@ -1,6 +1,7 @@
 use crate::builtin_signatures::{
-    builtin_signature_catalog_for, builtin_signatures_for, builtin_value_catalog_for,
-    BuiltinSignature,
+    builtin_function_catalog_is_available_for, builtin_function_is_known_for,
+    builtin_signature_completion_catalog_for, builtin_signatures_for,
+    builtin_table_signature_completion_catalog_for, builtin_value_catalog_for, BuiltinSignature,
 };
 use crate::dialect::Dialect;
 use crate::dialects::common::{apply_formatter_layout, LogicalOperatorLayout};
@@ -1232,6 +1233,44 @@ fn builtin_function_context(text: &str, position: Position) -> Option<String> {
     Some(SqlParser::identifier_last_part(raw_prefix).to_ascii_lowercase())
 }
 
+fn clickhouse_table_function_context(text: &str, position: Position) -> Option<String> {
+    let offset = position_to_byte_offset(text, position).min(text.len());
+    let mut scan_start = offset.saturating_sub(SIGNATURE_HELP_MAX_SCAN_BYTES);
+    while scan_start < offset && !text.is_char_boundary(scan_start) {
+        scan_start += 1;
+    }
+    let window = text.get(scan_start..offset)?;
+    let masked = SqlParser::mask_sql_noise(window);
+    if let Some((last_non_whitespace, character)) = window
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_whitespace())
+    {
+        let masked_character = masked[last_non_whitespace..].chars().next()?;
+        if !character.is_whitespace() && masked_character == ' ' {
+            return None;
+        }
+    }
+
+    let context = SqlParser::completion_context_from_text(window, lsp_position_at_end(window));
+    if !matches!(
+        context,
+        crate::parser::CompletionContext::FromClause | crate::parser::CompletionContext::JoinClause
+    ) {
+        return None;
+    }
+
+    let prefix_start = identifier_path_start_before_cursor(window).unwrap_or(window.len());
+    let raw_prefix = window.get(prefix_start..)?.trim();
+    if raw_prefix.contains('.')
+        || raw_prefix.starts_with(['"', '\'', '`', '['])
+        || raw_prefix.ends_with([']', '"', '`'])
+    {
+        return None;
+    }
+    Some(SqlParser::identifier_last_part(raw_prefix).to_ascii_lowercase())
+}
+
 fn snippet_placeholder_label(parameter: &str) -> String {
     parameter
         .trim()
@@ -1281,27 +1320,24 @@ fn add_builtin_function_completions(
     let Some(prefix) = builtin_function_context(text, position) else {
         return;
     };
-    let full_catalog =
-        builtin_signature_catalog_for(dialect, schema.and_then(Schema::server_version_tuple));
+    let server_version = schema.and_then(Schema::server_version_tuple);
+    let mut catalog = builtin_signature_completion_catalog_for(
+        dialect,
+        server_version,
+        &prefix,
+        BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS,
+    );
     let full_values = builtin_value_catalog_for(dialect);
-    if full_catalog.is_empty() && full_values.is_empty() {
+    if catalog.is_empty()
+        && full_values.is_empty()
+        && !builtin_function_catalog_is_available_for(dialect)
+    {
         return;
     }
-    let authoritative_function_names = full_catalog
-        .iter()
-        .map(|signature| signature.name.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
     let authoritative_value_names = full_values
         .iter()
         .map(|value| value.name.to_ascii_lowercase())
         .collect::<HashSet<_>>();
-    let mut catalog = full_catalog
-        .into_iter()
-        .filter(|signature| {
-            prefix.is_empty() || signature.name.to_ascii_lowercase().starts_with(&prefix)
-        })
-        .take(BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS)
-        .collect::<Vec<_>>();
     let mut values = full_values
         .into_iter()
         .filter(|value| prefix.is_empty() || value.name.to_ascii_lowercase().starts_with(&prefix))
@@ -1327,7 +1363,7 @@ fn add_builtin_function_completions(
             return true;
         }
         if item.kind == Some(CompletionItemKind::FUNCTION)
-            && !authoritative_function_names.contains(&name)
+            && !builtin_function_is_known_for(dialect, &name, server_version)
         {
             return false;
         }
@@ -1354,7 +1390,15 @@ fn add_builtin_function_completions(
             signature.name.to_ascii_lowercase(),
             signature.label().to_ascii_lowercase()
         )),
-        filter_text: Some(signature.name.to_string()),
+        filter_text: Some(if signature
+            .name
+            .to_ascii_lowercase()
+            .starts_with(&prefix)
+        {
+            signature.name.to_string()
+        } else {
+            format!("{prefix} {}", signature.name)
+        }),
         insert_text: Some(builtin_function_snippet(&signature)),
         insert_text_format: Some(InsertTextFormat::SNIPPET),
         ..Default::default()
@@ -1374,6 +1418,54 @@ fn add_builtin_function_completions(
         insert_text: Some(value.name.to_string()),
         insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
         ..Default::default()
+    }));
+}
+
+fn add_clickhouse_table_function_completions(
+    text: &str,
+    position: Position,
+    dialect: &str,
+    items: &mut Vec<CompletionItem>,
+) {
+    let Some(prefix) = clickhouse_table_function_context(text, position) else {
+        return;
+    };
+    let catalog = builtin_table_signature_completion_catalog_for(
+        dialect,
+        &prefix,
+        BUILTIN_FUNCTION_COMPLETION_MAX_ITEMS,
+    );
+    if catalog.is_empty() {
+        return;
+    }
+    let existing_relations = items
+        .iter()
+        .filter(|item| is_relation_completion_kind(item.kind))
+        .map(|item| item.label.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    items.extend(catalog.into_iter().filter_map(|signature| {
+        if existing_relations.contains(&signature.name.to_ascii_lowercase()) {
+            return None;
+        }
+        Some(CompletionItem {
+            label: signature.name.to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some(format!("ClickHouse table function: {}", signature.label())),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "Static ClickHouse table-function signature aligned with the DBX catalog."
+                    .to_string(),
+            })),
+            sort_text: Some(format!(
+                "1:table-function:{}:{}",
+                signature.name.to_ascii_lowercase(),
+                signature.label().to_ascii_lowercase()
+            )),
+            filter_text: Some(signature.name.to_string()),
+            insert_text: Some(builtin_function_snippet(&signature)),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
     }));
 }
 
@@ -2501,6 +2593,12 @@ impl LanguageServer for SqlLspServer {
                 completion_position,
                 &dialect_identity,
                 schema.as_ref(),
+                &mut items,
+            );
+            add_clickhouse_table_function_completions(
+                completion_text,
+                completion_position,
+                &dialect_identity,
                 &mut items,
             );
             let preferences = self
@@ -7056,24 +7154,25 @@ fn infer_dialect_from_uri_and_language(
 #[cfg(test)]
 mod tests {
     use super::{
-        add_builtin_function_completions, add_insert_all_columns_completion,
-        add_insert_statement_snippets, add_join_condition_actions,
-        add_referenced_alias_completions, apply_completed_sql_context_completion_edits,
-        apply_completion_preferences, apply_qualified_identifier_completion_edits,
-        augment_schema_with_local_relations, calculate_schema_match_score,
-        client_supports_completion_documentation_resolve, code_action_kind_available,
-        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
-        completion_statement_prefix, deduplicate_simple_completion_items,
-        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, insert_value_hints, live_overload_accepts_call,
-        position_to_byte_offset, project_sql_symbol_occurrences, project_sql_symbols_match,
-        qualify_identifier_actions, range_for_offsets, resolve_completion_documentation,
-        rewrite_current_document_location_uri, rewrite_current_document_location_uris,
-        routine_call_at_position, schema_for_table_column_at_position, schema_id_for_file,
-        schema_qualifier_at_position, sql_inspection_diagnostics, table_alias_initials,
-        CompletionPreferences, CompletionResolveCache, FormattingPreferences, FromClauseLayout,
-        KeywordCase, LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
+        add_builtin_function_completions, add_clickhouse_table_function_completions,
+        add_insert_all_columns_completion, add_insert_statement_snippets,
+        add_join_condition_actions, add_referenced_alias_completions,
+        apply_completed_sql_context_completion_edits, apply_completion_preferences,
+        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
+        calculate_schema_match_score, client_supports_completion_documentation_resolve,
+        code_action_kind_available, code_action_kind_explicitly_requested,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
+        deduplicate_simple_completion_items, defer_completion_documentation,
+        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables, insert_value_hints,
+        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
+        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
+        resolve_completion_documentation, rewrite_current_document_location_uri,
+        rewrite_current_document_location_uris, routine_call_at_position,
+        schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
+        sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
+        CompletionResolveCache, FormattingPreferences, FromClauseLayout, KeywordCase,
+        LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
         LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
@@ -7280,6 +7379,73 @@ mod tests {
             &mut literal_items,
         );
         assert!(literal_items.is_empty());
+    }
+
+    #[test]
+    fn clickhouse_dbx_catalog_supports_aliases_combinators_and_table_functions() {
+        let sql = "SELECT arraym";
+        let mut items = Vec::new();
+        add_builtin_function_completions(
+            sql,
+            lsp_position_at_end(sql),
+            "clickhouse",
+            None,
+            &mut items,
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.label == "arrayMap")
+                .and_then(|item| item.insert_text.as_deref()),
+            Some("arrayMap(${1:lambda}, ${2:array}, ${3:arrays})")
+        );
+
+        let alias_sql = "SELECT uca";
+        let mut alias_items = Vec::new();
+        add_builtin_function_completions(
+            alias_sql,
+            lsp_position_at_end(alias_sql),
+            "clickhouse",
+            None,
+            &mut alias_items,
+        );
+        let upper = alias_items
+            .iter()
+            .find(|item| item.label == "upper")
+            .expect("alias lookup returns the canonical function");
+        assert_eq!(upper.filter_text.as_deref(), Some("uca upper"));
+
+        let combinator_sql = "SELECT sumarrayif";
+        let mut combinator_items = Vec::new();
+        add_builtin_function_completions(
+            combinator_sql,
+            lsp_position_at_end(combinator_sql),
+            "clickhouse",
+            None,
+            &mut combinator_items,
+        );
+        assert_eq!(
+            combinator_items
+                .iter()
+                .find(|item| item.label == "sumArrayIf")
+                .and_then(|item| item.insert_text.as_deref()),
+            Some("sumArrayIf(${1:array}, ${2:condition})")
+        );
+
+        let relation_sql = "SELECT * FROM num";
+        let mut relation_items = Vec::new();
+        add_clickhouse_table_function_completions(
+            relation_sql,
+            lsp_position_at_end(relation_sql),
+            "clickhouse",
+            &mut relation_items,
+        );
+        let numbers = relation_items
+            .iter()
+            .find(|item| item.label == "numbers")
+            .expect("ClickHouse numbers table function");
+        assert_eq!(numbers.kind, Some(CompletionItemKind::CLASS));
+        assert_eq!(numbers.insert_text.as_deref(), Some("numbers(${1:count})"));
     }
 
     #[test]
