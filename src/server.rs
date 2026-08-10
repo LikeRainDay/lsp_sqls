@@ -1484,6 +1484,180 @@ fn quote_completion_identifier(identifier: &str, dialect_name: &str) -> String {
     }
 }
 
+const INSERT_STATEMENT_SNIPPET_MAX_TABLES: usize = 32;
+const INSERT_STATEMENT_SNIPPET_MAX_COLUMNS: usize = 64;
+
+fn add_insert_statement_snippets(
+    text: &str,
+    position: Position,
+    schema: Option<&Schema>,
+    items: &mut Vec<CompletionItem>,
+    preferences: &CompletionPreferences,
+    dialect_name: &str,
+) {
+    let Some(schema) = schema else {
+        return;
+    };
+    let cursor = position_to_byte_offset(text, position);
+    let Some(text_before_cursor) = text.get(..cursor) else {
+        return;
+    };
+    let statement_start = SqlParser::active_statement_start(text_before_cursor);
+    let fragment = &text_before_cursor[statement_start..];
+    if fragment.chars().last().is_some_and(char::is_whitespace) {
+        return;
+    }
+    let prefix = fragment.trim().to_ascii_lowercase();
+    if prefix.len() < 2
+        || !prefix
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+        || !"insert".starts_with(&prefix)
+    {
+        return;
+    }
+
+    let insert = keyword_with_completion_case("INSERT", preferences.keyword_case);
+    let into = keyword_with_completion_case("INTO", preferences.keyword_case);
+    let values = keyword_with_completion_case("VALUES", preferences.keyword_case);
+    let schema_name = (!schema.database.trim().is_empty())
+        .then(|| quote_completion_identifier(schema.database.trim(), dialect_name));
+    let mut tables = schema.tables.iter().collect::<Vec<_>>();
+    tables.sort_by(|left, right| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    });
+
+    for table in tables.into_iter().take(INSERT_STATEMENT_SNIPPET_MAX_TABLES) {
+        if table
+            .object_type
+            .as_deref()
+            .is_some_and(|kind| kind.to_ascii_lowercase().contains("view"))
+        {
+            continue;
+        }
+        let writable = table
+            .columns
+            .iter()
+            .filter(|column| !column.auto_increment && !column.generated)
+            .collect::<Vec<_>>();
+        if writable.is_empty() || writable.len() > INSERT_STATEMENT_SNIPPET_MAX_COLUMNS {
+            continue;
+        }
+        let required = writable
+            .iter()
+            .copied()
+            .filter(|column| {
+                !column.nullable
+                    && column
+                        .default_value
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty())
+            })
+            .collect::<Vec<_>>();
+        if !required.is_empty() && required.len() != writable.len() {
+            push_insert_statement_snippet(
+                items,
+                table,
+                schema_name.as_deref(),
+                &required,
+                &insert,
+                &into,
+                &values,
+                dialect_name,
+                true,
+            );
+        }
+        push_insert_statement_snippet(
+            items,
+            table,
+            schema_name.as_deref(),
+            &writable,
+            &insert,
+            &into,
+            &values,
+            dialect_name,
+            false,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_insert_statement_snippet(
+    items: &mut Vec<CompletionItem>,
+    table: &Table,
+    schema_name: Option<&str>,
+    columns: &[&Column],
+    insert: &str,
+    into: &str,
+    values: &str,
+    dialect_name: &str,
+    required_only: bool,
+) {
+    let quoted_table = quote_completion_identifier(&table.name, dialect_name);
+    let relation = schema_name
+        .map(|schema| format!("{schema}.{quoted_table}"))
+        .unwrap_or(quoted_table);
+    let quoted_columns = columns
+        .iter()
+        .map(|column| quote_completion_identifier(&column.name, dialect_name))
+        .collect::<Vec<_>>();
+    let column_lines = quoted_columns.join(",\n  ");
+    let value_lines = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let placeholder = column
+                .name
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || character == '_' {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            format!("${{{}:{placeholder}_value}}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(",\n  ");
+    let label = if required_only {
+        format!("insert {} required", table.name)
+    } else {
+        format!("insert {}", table.name)
+    };
+    if items.iter().any(|item| item.label == label) {
+        return;
+    }
+    items.push(CompletionItem {
+        label,
+        kind: Some(CompletionItemKind::SNIPPET),
+        detail: Some(format!(
+            "{} INSERT · {} writable column{}",
+            if required_only {
+                "Required"
+            } else {
+                "Complete"
+            },
+            columns.len(),
+            if columns.len() == 1 { "" } else { "s" }
+        )),
+        filter_text: Some(format!("ins insert {}", table.name)),
+        sort_text: Some(format!(
+            "0:{}:{}",
+            if required_only { 0 } else { 1 },
+            table.name.to_ascii_lowercase()
+        )),
+        insert_text: Some(format!(
+            "{insert} {into} {relation} (\n  {column_lines}\n)\n{values} (\n  {value_lines}\n);"
+        )),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        ..Default::default()
+    });
+}
+
 fn add_insert_all_columns_completion(
     text: &str,
     position: Position,
@@ -2282,6 +2456,14 @@ impl LanguageServer for SqlLspServer {
                 dialect.name(),
                 "postgres" | "mysql" | "sqlite" | "hive" | "clickhouse"
             ) {
+                add_insert_statement_snippets(
+                    &text,
+                    position,
+                    schema.as_ref(),
+                    &mut items,
+                    &preferences,
+                    dialect.name(),
+                );
                 add_insert_all_columns_completion(
                     &text,
                     position,
@@ -6137,17 +6319,18 @@ fn infer_dialect_from_uri_and_language(
 mod tests {
     use super::{
         add_builtin_function_completions, add_insert_all_columns_completion,
-        add_referenced_alias_completions, apply_completed_sql_context_completion_edits,
-        apply_completion_preferences, apply_qualified_identifier_completion_edits,
-        augment_schema_with_local_relations, calculate_schema_match_score,
-        client_supports_completion_documentation_resolve, code_action_kind_available,
-        code_action_kind_explicitly_requested, completed_sql_context_keyword_at_position,
-        completion_statement_prefix, deduplicate_simple_completion_items,
-        defer_completion_documentation, expand_select_star_action, find_schema_by_qualifier,
-        find_schema_by_table_reference, infer_dialect_from_uri_and_language,
-        infer_schema_id_from_tables, live_overload_accepts_call, position_to_byte_offset,
-        project_sql_symbol_occurrences, project_sql_symbols_match, qualify_identifier_actions,
-        range_for_offsets, resolve_completion_documentation, rewrite_current_document_location_uri,
+        add_insert_statement_snippets, add_referenced_alias_completions,
+        apply_completed_sql_context_completion_edits, apply_completion_preferences,
+        apply_qualified_identifier_completion_edits, augment_schema_with_local_relations,
+        calculate_schema_match_score, client_supports_completion_documentation_resolve,
+        code_action_kind_available, code_action_kind_explicitly_requested,
+        completed_sql_context_keyword_at_position, completion_statement_prefix,
+        deduplicate_simple_completion_items, defer_completion_documentation,
+        expand_select_star_action, find_schema_by_qualifier, find_schema_by_table_reference,
+        infer_dialect_from_uri_and_language, infer_schema_id_from_tables,
+        live_overload_accepts_call, position_to_byte_offset, project_sql_symbol_occurrences,
+        project_sql_symbols_match, qualify_identifier_actions, range_for_offsets,
+        resolve_completion_documentation, rewrite_current_document_location_uri,
         rewrite_current_document_location_uris, routine_call_at_position,
         schema_for_table_column_at_position, schema_id_for_file, schema_qualifier_at_position,
         sql_inspection_diagnostics, table_alias_initials, CompletionPreferences,
@@ -7455,6 +7638,95 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("search_vector"));
+    }
+
+    #[test]
+    fn insert_statement_snippets_are_table_specific_and_database_owned_safe() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].columns = vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                auto_increment: true,
+                ..Default::default()
+            },
+            Column {
+                name: "customer_id".to_string(),
+                data_type: "bigint".to_string(),
+                ..Default::default()
+            },
+            Column {
+                name: "order note".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                ..Default::default()
+            },
+            Column {
+                name: "created_at".to_string(),
+                data_type: "timestamp".to_string(),
+                default_value: Some("CURRENT_TIMESTAMP".to_string()),
+                ..Default::default()
+            },
+            Column {
+                name: "search_vector".to_string(),
+                data_type: "tsvector".to_string(),
+                generated: true,
+                ..Default::default()
+            },
+        ];
+        schema.tables.push(Table {
+            name: "order_view".to_string(),
+            object_type: Some("VIEW".to_string()),
+            columns: vec![Column {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let sql = "ins";
+        let mut items = Vec::new();
+        add_insert_statement_snippets(
+            sql,
+            lsp_position_at_end(sql),
+            Some(&schema),
+            &mut items,
+            &CompletionPreferences::default(),
+            "postgres",
+        );
+
+        let required = items
+            .iter()
+            .find(|item| item.label == "insert orders required")
+            .expect("required table INSERT snippet");
+        assert_eq!(
+            required.insert_text.as_deref(),
+            Some(
+                "INSERT INTO app.orders (\n  customer_id\n)\nVALUES (\n  ${1:customer_id_value}\n);"
+            )
+        );
+        let complete = items
+            .iter()
+            .find(|item| item.label == "insert orders")
+            .expect("complete table INSERT snippet");
+        let complete_sql = complete.insert_text.as_deref().unwrap();
+        assert!(complete_sql.contains("\"order note\""));
+        assert!(complete_sql.contains("${2:order_note_value}"));
+        assert!(!complete_sql.contains("search_vector"));
+        assert!(!complete_sql.contains("\n  id"));
+        assert!(!items.iter().any(|item| item.label.contains("order_view")));
+
+        let mut after_keyword = Vec::new();
+        add_insert_statement_snippets(
+            "INSERT ",
+            lsp_position_at_end("INSERT "),
+            Some(&schema),
+            &mut after_keyword,
+            &CompletionPreferences::default(),
+            "postgres",
+        );
+        assert!(after_keyword.is_empty());
     }
 
     #[test]
