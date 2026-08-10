@@ -1529,7 +1529,8 @@ fn add_insert_statement_snippets(
             .cmp(&right.name.to_ascii_lowercase())
     });
 
-    for table in tables.into_iter().take(INSERT_STATEMENT_SNIPPET_MAX_TABLES) {
+    let mut emitted_tables = 0usize;
+    for table in tables {
         if table
             .object_type
             .as_deref()
@@ -1545,6 +1546,10 @@ fn add_insert_statement_snippets(
         if writable.is_empty() || writable.len() > INSERT_STATEMENT_SNIPPET_MAX_COLUMNS {
             continue;
         }
+        if emitted_tables >= INSERT_STATEMENT_SNIPPET_MAX_TABLES {
+            break;
+        }
+        emitted_tables += 1;
         let required = writable
             .iter()
             .copied()
