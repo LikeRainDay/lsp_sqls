@@ -85,6 +85,7 @@ const MYSQL_SIGNATURES: &[(&str, &[&str])] = &[
     ("DATE_FORMAT", &["date", "format"]),
     ("FROM_UNIXTIME", &["unix_timestamp"]),
     ("UNIX_TIMESTAMP", &[]),
+    ("VERSION", &[]),
     ("SYSDATE", &[]),
     ("CURRENT_DATE", &[]),
     ("CURRENT_TIME", &[]),
@@ -126,6 +127,7 @@ const MYSQL_SIGNATURES: &[(&str, &[&str])] = &[
     ("LOCATE", &["substring", "string"]),
     ("LPAD", &["string", "length", "pad"]),
     ("RPAD", &["string", "length", "pad"]),
+    ("REVERSE", &["string"]),
     ("FIND_IN_SET", &["string", "string_list"]),
     ("RAND", &[]),
     ("MD5", &["string"]),
@@ -510,7 +512,10 @@ pub(crate) fn builtin_signatures_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{builtin_signature_catalog_for, builtin_signatures_for, builtin_value_catalog_for};
+    use super::{
+        builtin_signature_catalog_for, builtin_signature_completion_catalog_for,
+        builtin_signatures_for, builtin_value_catalog_for,
+    };
 
     #[test]
     fn dialect_override_wins_over_common_signature() {
@@ -611,5 +616,44 @@ mod tests {
         );
         assert!(builtin_signatures_for("cloudflare-d1", "NOW", None).is_empty());
         assert!(!builtin_signatures_for("cloudflare-d1", "STRFTIME", None).is_empty());
+    }
+
+    #[test]
+    fn mysql_catalog_includes_version_and_reverse_without_broadening_postgres() {
+        for dialect in ["mysql", "mariadb"] {
+            assert_eq!(
+                builtin_signatures_for(dialect, "VERSION", None)[0].parameter_groups[0],
+                Vec::<&str>::new(),
+            );
+            assert_eq!(
+                builtin_signatures_for(dialect, "REVERSE", None)[0].parameter_groups[0],
+                ["string"],
+            );
+            assert!(
+                builtin_signature_completion_catalog_for(dialect, None, "ver", 10)
+                    .iter()
+                    .any(|signature| signature.name == "VERSION")
+            );
+            assert!(
+                builtin_signature_completion_catalog_for(dialect, None, "reve", 10)
+                    .iter()
+                    .any(|signature| signature.name == "REVERSE")
+            );
+        }
+
+        for dialect in ["postgres", "sqlserver"] {
+            assert!(builtin_signatures_for(dialect, "VERSION", None).is_empty());
+            assert!(builtin_signatures_for(dialect, "REVERSE", None).is_empty());
+            assert!(
+                builtin_signature_completion_catalog_for(dialect, None, "ver", 10)
+                    .iter()
+                    .all(|signature| signature.name != "VERSION")
+            );
+            assert!(
+                builtin_signature_completion_catalog_for(dialect, None, "reve", 10)
+                    .iter()
+                    .all(|signature| signature.name != "REVERSE")
+            );
+        }
     }
 }
