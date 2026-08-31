@@ -606,11 +606,7 @@ impl SqlLspServer {
                     continue;
                 }
                 self.client
-                    .publish_diagnostics(
-                        parsed_uri,
-                        diagnostics,
-                        version,
-                    )
+                    .publish_diagnostics(parsed_uri, diagnostics, version)
                     .await;
             }
         }
@@ -3199,28 +3195,34 @@ impl LanguageServer for SqlLspServer {
 
                     // 应用变更
                     current_text.replace_range(start_offset..end_offset, &change.text);
-                    self.document_manager
-                        .update(uri.clone(), current_text.clone(), params.text_document.version);
+                    self.document_manager.update(
+                        uri.clone(),
+                        current_text.clone(),
+                        params.text_document.version,
+                    );
 
                     // 重新解析并发布诊断
                     if let Some(dialect) = self.get_dialect_for_file(&uri) {
                         let schema = self.get_schema_for_file(&uri);
                         let diagnostics =
                             document_diagnostics(&*dialect, &current_text, schema.as_ref()).await;
-                            self.client
-                                .publish_diagnostics(
-                                    params.text_document.uri.clone(),
-                                    diagnostics,
-                                    self.document_manager.version(&uri),
-                                )
-                                .await;
+                        self.client
+                            .publish_diagnostics(
+                                params.text_document.uri.clone(),
+                                diagnostics,
+                                self.document_manager.version(&uri),
+                            )
+                            .await;
                     }
                 }
             } else {
                 // 完整文档更新
                 let text = change.text.clone();
-                self.document_manager
-                    .update(uri.clone(), text.clone(), params.text_document.version);
+                self.document_manager.update(
+                    uri.clone(),
+                    text.clone(),
+                    params.text_document.version,
+                );
 
                 if let Some(dialect) = self.get_dialect_for_file(&uri) {
                     let schema = self.get_schema_for_file(&uri);
