@@ -65,6 +65,8 @@ pub const POSTGRES_COMPATIBILITY_ALIASES: &[&str] = &[
 
 pub const SQLITE_COMPATIBILITY_ALIASES: &[&str] = &["cloudflare-d1", "turso"];
 
+pub const HIVE_COMPATIBILITY_ALIASES: &[&str] = &["argo"];
+
 /// 方言注册表
 pub struct DialectRegistry {
     dialects: Vec<Arc<dyn Dialect>>,
@@ -108,7 +110,10 @@ impl DialectRegistry {
 
         let hive = Arc::new(HiveDialect::new());
         registry.register(hive.clone());
-        registry.register_alias("hql", hive);
+        registry.register_alias("hql", hive.clone());
+        for alias in HIVE_COMPATIBILITY_ALIASES {
+            registry.register_alias(alias, hive.clone());
+        }
 
         let elasticsearch_eql = Arc::new(ElasticsearchEqlDialect::new());
         registry.register(elasticsearch_eql.clone());
@@ -177,5 +182,15 @@ mod tests {
             .expect("DuckDB alias should be registered");
 
         assert_eq!(dialect.name(), "sqlite");
+    }
+
+    #[test]
+    fn resolves_argo_to_the_hive_compatible_baseline() {
+        let registry = DialectRegistry::new();
+        let dialect = registry
+            .get_by_name("argo")
+            .expect("ArgoDB alias should be registered");
+
+        assert_eq!(dialect.name(), "hive");
     }
 }
