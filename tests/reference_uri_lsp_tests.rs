@@ -756,7 +756,8 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
         "SELECT * FROM orders;\n",
         "SELECT calculate(\n  amount,\n  2\n) FROM orders;\n",
         "UPDATE orders SET amount = 1;\n",
-        "INSERT INTO orders VALUES (3);"
+        "INSERT INTO orders VALUES (3);\n",
+        "INSERT INTO orders (amount) SELECT source_amount FROM staging;"
     );
     lsp.open(uri, "postgres", sql);
 
@@ -811,7 +812,7 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
             "textDocument": { "uri": uri },
             "range": {
                 "start": { "line": 0, "character": 0 },
-                "end": { "line": 6, "character": 30 }
+                "end": { "line": 7, "character": 64 }
             }
         }),
     );
@@ -826,6 +827,15 @@ fn advanced_editor_capabilities_are_advertised_and_operational() {
             .iter()
             .any(|hint| { hint.get("label").and_then(Value::as_str) == Some("amount:") })),
         "implicit INSERT columns should be resolved through synchronized metadata: {hints}"
+    );
+    assert!(
+        hints
+            .as_array()
+            .is_some_and(|items| items.iter().any(|hint| {
+                hint.get("label").and_then(Value::as_str) == Some("amount:")
+                    && hint.pointer("/position/line").and_then(Value::as_u64) == Some(7)
+            })),
+        "INSERT SELECT projections should receive target-column hints: {hints}"
     );
 
     let symbols = lsp.request(

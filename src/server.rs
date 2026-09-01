@@ -7099,7 +7099,7 @@ fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHin
         text,
         absolute_range_start.saturating_sub(INLAY_HINT_STATEMENT_SCAN_BYTES),
     );
-    let window_start = if provisional_window_start == 0 {
+    let mut window_start = if provisional_window_start == 0 {
         0
     } else {
         text[provisional_window_start..absolute_range_start]
@@ -7108,6 +7108,10 @@ fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHin
                 provisional_window_start + offset + 1
             })
     };
+    let prefix = &text[window_start..absolute_range_start];
+    if let Some(relative_body_start) = enclosing_dollar_quote_body_start(prefix, prefix.len()) {
+        window_start += relative_body_start;
+    }
     let window_end = ceil_char_boundary(
         text,
         absolute_range_end
@@ -7170,12 +7174,16 @@ fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHin
         } else {
             (None, cursor)
         };
-        let Some(values) = find_sql_keyword(&lower, "values", values_search_from, statement_end)
-        else {
-            search_from = statement_end.max(insert + "insert".len());
-            continue;
-        };
-        if find_sql_keyword(&lower, "select", values_search_from, values).is_some() {
+        let values =
+            find_sql_keyword_at_depth(&lower, "values", values_search_from, statement_end, 0);
+        let select = find_insert_source_select(
+            text_window,
+            &masked,
+            &lower,
+            values_search_from,
+            statement_end,
+        );
+        if values.is_none() && select.is_none() {
             search_from = statement_end.max(insert + "insert".len());
             continue;
         }
@@ -7198,14 +7206,34 @@ fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHin
                 .unwrap_or_default()
         });
         if !resolved_columns.is_empty() {
-            append_insert_row_hints(
-                text_window,
-                &masked,
-                (values + "values".len(), statement_end),
-                (range_start, range_end),
-                &resolved_columns,
-                &mut labels,
-            );
+            let use_select =
+                select.is_some_and(|(select, _)| values.is_none_or(|values| select < values));
+            if use_select {
+                if let Some((select, depth)) = select {
+                    append_insert_select_hints(
+                        InsertSelectProjection {
+                            text: text_window,
+                            masked: &masked,
+                            lower: &lower,
+                            select,
+                            depth,
+                            end: statement_end,
+                        },
+                        (range_start, range_end),
+                        &resolved_columns,
+                        &mut labels,
+                    );
+                }
+            } else if let Some(values) = values {
+                append_insert_row_hints(
+                    text_window,
+                    &masked,
+                    (values + "values".len(), statement_end),
+                    (range_start, range_end),
+                    &resolved_columns,
+                    &mut labels,
+                );
+            }
         }
         search_from = statement_end.max(insert + "insert".len());
     }
@@ -7225,6 +7253,318 @@ fn insert_value_hints(text: &str, range: Range, schema: &Schema) -> Vec<InlayHin
             data: None,
         })
         .collect()
+}
+
+fn enclosing_dollar_quote_body_start(text: &str, position: usize) -> Option<usize> {
+    let end = floor_char_boundary(text, position);
+    let mut cursor = 0usize;
+    let mut dollar_quote: Option<(String, usize)> = None;
+    let mut quote: Option<char> = None;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while cursor < end {
+        if let Some((tag, _)) = dollar_quote.as_ref() {
+            if text[cursor..end].starts_with(tag) {
+                cursor += tag.len();
+                dollar_quote = None;
+                continue;
+            }
+            cursor += text[cursor..].chars().next()?.len_utf8();
+            continue;
+        }
+        if line_comment {
+            let character = text[cursor..].chars().next()?;
+            cursor += character.len_utf8();
+            if character == '\n' {
+                line_comment = false;
+            }
+            continue;
+        }
+        if block_comment {
+            if text[cursor..end].starts_with("*/") {
+                cursor += 2;
+                block_comment = false;
+            } else {
+                cursor += text[cursor..].chars().next()?.len_utf8();
+            }
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            let character = text[cursor..].chars().next()?;
+            cursor += character.len_utf8();
+            if character == active_quote {
+                if text[cursor..end].starts_with(active_quote) {
+                    cursor += active_quote.len_utf8();
+                } else {
+                    quote = None;
+                }
+            }
+            continue;
+        }
+        if text[cursor..end].starts_with("--") {
+            cursor += 2;
+            line_comment = true;
+            continue;
+        }
+        if text[cursor..end].starts_with("/*") {
+            cursor += 2;
+            block_comment = true;
+            continue;
+        }
+        let character = text[cursor..].chars().next()?;
+        if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+            cursor += character.len_utf8();
+            continue;
+        }
+        if character == '$' {
+            if let Some(tag) = insert_dollar_quote_tag_at(text, cursor, end) {
+                let body_start = cursor + tag.len();
+                dollar_quote = Some((tag.to_string(), body_start));
+                cursor = body_start;
+                continue;
+            }
+        }
+        cursor += character.len_utf8();
+    }
+
+    dollar_quote.map(|(_, body_start)| body_start)
+}
+
+fn insert_dollar_quote_tag_at(text: &str, start: usize, end: usize) -> Option<&str> {
+    let bytes = text.get(start..end)?.as_bytes();
+    if bytes.first() != Some(&b'$') {
+        return None;
+    }
+    let mut offset = 1usize;
+    while offset < bytes.len() {
+        let byte = bytes[offset];
+        if byte == b'$' {
+            return text.get(start..start + offset + 1);
+        }
+        if (offset == 1 && !(byte == b'_' || byte.is_ascii_alphabetic()))
+            || (offset > 1 && !(byte == b'_' || byte.is_ascii_alphanumeric()))
+        {
+            return None;
+        }
+        offset += 1;
+        if offset > 128 {
+            return None;
+        }
+    }
+    None
+}
+
+struct InsertSelectProjection<'a> {
+    text: &'a str,
+    masked: &'a str,
+    lower: &'a str,
+    select: usize,
+    depth: usize,
+    end: usize,
+}
+
+fn append_insert_select_hints(
+    source: InsertSelectProjection<'_>,
+    requested_range: (usize, usize),
+    columns: &[String],
+    hints: &mut Vec<(usize, String)>,
+) {
+    let offsets = insert_select_projection_offsets(
+        source.text,
+        source.masked,
+        source.lower,
+        source.select,
+        source.depth,
+        source.end,
+    );
+    // A partial positional mapping is actively misleading. Unlike VALUES,
+    // SELECT projections can be hidden behind wildcards or incomplete syntax,
+    // so only label a projection when the entire target/source arity is known.
+    if offsets.len() != columns.len() {
+        return;
+    }
+    let (range_start, range_end) = requested_range;
+    for (offset, column) in offsets.into_iter().zip(columns.iter()) {
+        if offset < range_start || offset > range_end || hints.len() >= INLAY_HINT_MAX_ITEMS {
+            continue;
+        }
+        hints.push((offset, column.clone()));
+    }
+}
+
+fn find_insert_source_select(
+    text: &str,
+    masked: &str,
+    lower: &str,
+    from: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    let source_start = skip_sql_whitespace(text, from, end);
+    if masked[source_start..end].starts_with('(') {
+        let inner = skip_sql_whitespace(text, source_start + 1, end);
+        if sql_keyword_at(lower, "select", inner, end) {
+            return Some((inner, 1));
+        }
+    }
+    find_sql_keyword_at_depth(lower, "select", from, end, 0).map(|offset| (offset, 0))
+}
+
+fn insert_select_projection_offsets(
+    text: &str,
+    masked: &str,
+    lower: &str,
+    select: usize,
+    select_depth: usize,
+    end: usize,
+) -> Vec<usize> {
+    let mut cursor = skip_sql_whitespace(text, select + "select".len(), end);
+    if sql_keyword_at(lower, "all", cursor, end) {
+        cursor = skip_sql_whitespace(text, cursor + "all".len(), end);
+    } else if sql_keyword_at(lower, "distinct", cursor, end) {
+        cursor = skip_sql_whitespace(text, cursor + "distinct".len(), end);
+        if sql_keyword_at(lower, "on", cursor, end) {
+            let open = skip_sql_whitespace(text, cursor + "on".len(), end);
+            if !masked[open..end].starts_with('(') {
+                return Vec::new();
+            }
+            let Some(close) = matching_sql_paren(masked, open, end) else {
+                return Vec::new();
+            };
+            cursor = skip_sql_whitespace(text, close + 1, end);
+        }
+    }
+
+    if sql_keyword_at(lower, "top", cursor, end) {
+        cursor = skip_sql_whitespace(text, cursor + "top".len(), end);
+        if masked[cursor..end].starts_with('(') {
+            let Some(close) = matching_sql_paren(masked, cursor, end) else {
+                return Vec::new();
+            };
+            cursor = skip_sql_whitespace(text, close + 1, end);
+        } else {
+            let value_start = cursor;
+            while cursor < end {
+                let Some(character) = masked[cursor..].chars().next() else {
+                    break;
+                };
+                if character.is_whitespace() || character == ',' {
+                    break;
+                }
+                cursor += character.len_utf8();
+            }
+            if cursor == value_start {
+                return Vec::new();
+            }
+            cursor = skip_sql_whitespace(text, cursor, end);
+        }
+        if sql_keyword_at(lower, "percent", cursor, end) {
+            cursor = skip_sql_whitespace(text, cursor + "percent".len(), end);
+        }
+        if sql_keyword_at(lower, "with", cursor, end) {
+            let ties = skip_sql_whitespace(text, cursor + "with".len(), end);
+            if sql_keyword_at(lower, "ties", ties, end) {
+                cursor = skip_sql_whitespace(text, ties + "ties".len(), end);
+            }
+        }
+    }
+
+    let mut offsets = Vec::new();
+    let mut expression_start = cursor;
+    let mut depth = select_depth;
+    while cursor < end {
+        let Some(character) = masked[cursor..].chars().next() else {
+            break;
+        };
+        if depth == select_depth
+            && SELECT_PROJECTION_BOUNDARIES
+                .iter()
+                .any(|keyword| sql_keyword_at(lower, keyword, cursor, end))
+        {
+            break;
+        }
+        match character {
+            '(' => depth += 1,
+            ')' if depth == select_depth => break,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == select_depth => {
+                let Some(offset) =
+                    first_insert_value_offset(text, masked, expression_start, cursor)
+                else {
+                    return Vec::new();
+                };
+                if insert_select_projection_is_wildcard(masked, expression_start, cursor) {
+                    return Vec::new();
+                }
+                offsets.push(offset);
+                expression_start = cursor + 1;
+            }
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    let Some(offset) = first_insert_value_offset(text, masked, expression_start, cursor) else {
+        return Vec::new();
+    };
+    if insert_select_projection_is_wildcard(masked, expression_start, cursor) {
+        return Vec::new();
+    }
+    offsets.push(offset);
+    offsets
+}
+
+const SELECT_PROJECTION_BOUNDARIES: [&str; 16] = [
+    "from",
+    "into",
+    "where",
+    "group",
+    "having",
+    "order",
+    "offset",
+    "fetch",
+    "for",
+    "option",
+    "union",
+    "except",
+    "intersect",
+    "limit",
+    "qualify",
+    "window",
+];
+
+fn insert_select_projection_is_wildcard(masked: &str, from: usize, to: usize) -> bool {
+    let mut compact = String::new();
+    let mut depth = 0usize;
+    let mut cursor = from;
+    while cursor < to {
+        let Some(character) = masked[cursor..].chars().next() else {
+            break;
+        };
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !character.is_whitespace() => compact.push(character),
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    if compact == "*" || compact == ".*" {
+        return true;
+    }
+    let Some(qualifier) = compact.strip_suffix(".*") else {
+        return false;
+    };
+    !qualifier.is_empty()
+        && qualifier.chars().all(|character| {
+            character == '_'
+                || character == '$'
+                || character == '#'
+                || character == '.'
+                || character == '['
+                || character == ']'
+                || character.is_alphanumeric()
+        })
 }
 
 fn append_insert_row_hints(
@@ -7468,6 +7808,30 @@ fn find_sql_keyword(lower: &str, keyword: &str, from: usize, end: usize) -> Opti
             return Some(candidate);
         }
         cursor = candidate + keyword.len();
+    }
+    None
+}
+
+fn find_sql_keyword_at_depth(
+    lower: &str,
+    keyword: &str,
+    from: usize,
+    end: usize,
+    target_depth: usize,
+) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = from;
+    while cursor < end {
+        if depth == target_depth && sql_keyword_at(lower, keyword, cursor, end) {
+            return Some(cursor);
+        }
+        let character = lower[cursor..].chars().next()?;
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        cursor += character.len_utf8();
     }
     None
 }
@@ -9728,14 +10092,103 @@ mod tests {
     }
 
     #[test]
-    fn insert_value_hints_ignore_comments_strings_and_insert_select() {
+    fn insert_value_hints_ignore_comments_and_strings() {
         let sql = concat!(
             "-- INSERT INTO app.orders VALUES (1, 2, 3);\n",
-            "SELECT 'INSERT INTO app.orders VALUES (4, 5, 6)';\n",
-            "INSERT INTO app.orders (id, total) SELECT id, total FROM staging;"
+            "SELECT 'INSERT INTO app.orders VALUES (4, 5, 6)';"
         );
 
         assert!(inlay_labels(sql, &completion_schema_with_columns()).is_empty());
+    }
+
+    #[test]
+    fn insert_value_hints_map_insert_select_projection_to_explicit_columns() {
+        let sql =
+            "INSERT INTO app.orders (id, total) SELECT source_id, coalesce(total, 0) FROM staging;";
+
+        assert_eq!(
+            inlay_labels(sql, &completion_schema_with_columns()),
+            vec!["id:", "total:"]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_skip_select_modifiers_and_nested_commas() {
+        let sql = concat!(
+            "INSERT INTO app.orders (customer_id, total) ",
+            "SELECT DISTINCT TOP (10) coalesce(primary_id, backup_id), count(*) ",
+            "FROM staging;"
+        );
+
+        assert_eq!(
+            inlay_labels(sql, &completion_schema_with_columns()),
+            vec!["customer_id:", "total:"]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_support_distinct_on_parenthesized_and_cte_select_sources() {
+        let sql = concat!(
+            "INSERT INTO app.orders (id, total) SELECT DISTINCT ON (tenant_id) source_id, total FROM staging;\n",
+            "INSERT INTO app.orders (id, total) (SELECT source_id, total FROM staging);\n",
+            "INSERT INTO app.orders (id, total) WITH staged AS (SELECT 1) SELECT source_id, total FROM staged;"
+        );
+
+        assert_eq!(
+            inlay_labels(sql, &completion_schema_with_columns()),
+            vec!["id:", "total:", "id:", "total:", "id:", "total:"]
+        );
+    }
+
+    #[test]
+    fn insert_value_hints_resolve_implicit_insert_select_columns_from_metadata() {
+        let mut schema = completion_schema_with_columns();
+        schema.tables[0].columns[0].auto_increment = true;
+        let sql = "INSERT INTO app.orders SELECT source_customer_id, source_total FROM staging;";
+
+        assert_eq!(inlay_labels(sql, &schema), vec!["customer_id:", "total:"]);
+    }
+
+    #[test]
+    fn insert_value_hints_fail_closed_for_select_wildcards_and_arity_mismatch() {
+        let schema = completion_schema_with_columns();
+        for sql in [
+            "INSERT INTO app.orders (id, total) SELECT * FROM staging;",
+            "INSERT INTO app.orders (id, total) SELECT source.* FROM staging AS source;",
+            "INSERT INTO app.orders (id, total) SELECT source_id FROM staging;",
+            "INSERT INTO app.orders (id, total) SELECT source_id, total, extra FROM staging;",
+        ] {
+            assert!(inlay_labels(sql, &schema).is_empty(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn insert_value_hints_parse_visible_statement_inside_dollar_quoted_routine_body() {
+        let sql = concat!(
+            "CREATE FUNCTION copy_orders() RETURNS void AS $oxide$\n",
+            "BEGIN\n",
+            "  INSERT INTO app.orders (id, total) SELECT source_id, total FROM staging;\n",
+            "END\n",
+            "$oxide$ LANGUAGE plpgsql;"
+        );
+        let insert = sql.find("INSERT INTO").unwrap();
+        let statement_end = sql[insert..].find(';').unwrap() + insert;
+        let hints = insert_value_hints(
+            sql,
+            range_for_offsets(sql, insert, statement_end),
+            &completion_schema_with_columns(),
+        );
+
+        assert_eq!(
+            hints
+                .into_iter()
+                .filter_map(|hint| match hint.label {
+                    InlayHintLabel::String(label) => Some(label),
+                    InlayHintLabel::LabelParts(_) => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["id:", "total:"]
+        );
     }
 
     #[test]
