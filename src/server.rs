@@ -8230,6 +8230,50 @@ mod tests {
     }
 
     #[test]
+    fn mysql_long_tail_functions_emit_dbx_aligned_snippets() {
+        for (sql, label, expected) in [
+            (
+                "SELECT json_ins",
+                "JSON_INSERT",
+                "JSON_INSERT(${1:json}, ${2:path}, ${3:value}, ${4:path_value_pairs})",
+            ),
+            (
+                "SELECT make",
+                "MAKEDATE",
+                "MAKEDATE(${1:year}, ${2:day_of_year})",
+            ),
+            ("SELECT uuid_s", "UUID_SHORT", "UUID_SHORT()"),
+        ] {
+            let mut items = Vec::new();
+            add_builtin_function_completions(
+                sql,
+                lsp_position_at_end(sql),
+                "mysql",
+                None,
+                &mut items,
+            );
+            let item = items
+                .iter()
+                .find(|item| item.label == label)
+                .unwrap_or_else(|| panic!("missing MySQL completion {label}"));
+            assert_eq!(item.kind, Some(CompletionItemKind::FUNCTION));
+            assert_eq!(item.insert_text.as_deref(), Some(expected));
+            assert_eq!(item.insert_text_format, Some(InsertTextFormat::SNIPPET));
+        }
+
+        let sql = "SELECT uuid_s";
+        let mut postgres_items = Vec::new();
+        add_builtin_function_completions(
+            sql,
+            lsp_position_at_end(sql),
+            "postgres",
+            None,
+            &mut postgres_items,
+        );
+        assert!(!postgres_items.iter().any(|item| item.label == "UUID_SHORT"));
+    }
+
+    #[test]
     fn oracle_system_value_completion_is_bare_and_expression_scoped() {
         let sql = "SELECT sys";
         let mut items = Vec::new();

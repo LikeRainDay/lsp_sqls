@@ -116,6 +116,20 @@ const MYSQL_SIGNATURES: &[(&str, &[&str])] = &[
     ("DAYOFYEAR", &["date"]),
     ("LAST_DAY", &["date"]),
     ("STR_TO_DATE", &["string", "format"]),
+    ("MONTHNAME", &["date"]),
+    ("DAYOFMONTH", &["date"]),
+    ("WEEKDAY", &["date"]),
+    ("WEEK", &["date", "mode"]),
+    ("QUARTER", &["date"]),
+    ("ADDDATE", &["date", "days"]),
+    ("SUBDATE", &["date", "days"]),
+    ("ADDTIME", &["datetime", "time"]),
+    ("SUBTIME", &["datetime", "time"]),
+    ("TIMEDIFF", &["datetime1", "datetime2"]),
+    ("FROM_DAYS", &["day_number"]),
+    ("TO_DAYS", &["date"]),
+    ("MAKEDATE", &["year", "day_of_year"]),
+    ("MAKETIME", &["hour", "minute", "second"]),
     ("IFNULL", &["expression", "fallback"]),
     ("IF", &["condition", "true_value", "false_value"]),
     ("CONCAT_WS", &["separator", "...values"]),
@@ -128,15 +142,71 @@ const MYSQL_SIGNATURES: &[(&str, &[&str])] = &[
     ("LPAD", &["string", "length", "pad"]),
     ("RPAD", &["string", "length", "pad"]),
     ("REVERSE", &["string"]),
+    ("POSITION", &["substring", "string"]),
+    ("REPEAT", &["string", "count"]),
+    ("STRCMP", &["string1", "string2"]),
     ("FIND_IN_SET", &["string", "string_list"]),
+    ("ELT", &["index", "string1", "...strings"]),
+    ("FIELD", &["value", "value1", "...values"]),
+    ("MAKE_SET", &["bits", "string1", "...strings"]),
     ("RAND", &[]),
+    ("POW", &["base", "exponent"]),
+    ("EXP", &["number"]),
+    ("LN", &["number"]),
+    ("LOG", &["base", "number"]),
+    ("LOG10", &["number"]),
+    ("LOG2", &["number"]),
+    ("SIN", &["number"]),
+    ("PI", &[]),
+    ("COS", &["number"]),
+    ("TAN", &["number"]),
+    ("ASIN", &["number"]),
+    ("ACOS", &["number"]),
+    ("ATAN", &["number"]),
+    ("ATAN2", &["y", "x"]),
+    ("DEGREES", &["radians"]),
+    ("RADIANS", &["degrees"]),
+    ("BIN", &["number"]),
+    ("HEX", &["value"]),
+    ("UNHEX", &["string"]),
+    ("OCT", &["number"]),
+    ("CONV", &["number", "from_base", "to_base"]),
+    ("TRUNCATE", &["number", "decimals"]),
     ("MD5", &["string"]),
     ("SHA1", &["string"]),
     ("SHA2", &["string", "bit_length"]),
     ("JSON_EXTRACT", &["json", "path"]),
     ("JSON_UNQUOTE", &["json"]),
+    ("JSON_OBJECT", &["key", "value", "...pairs"]),
+    ("JSON_ARRAY", &["...values"]),
+    (
+        "JSON_SET",
+        &["json", "path", "value", "...path_value_pairs"],
+    ),
+    (
+        "JSON_INSERT",
+        &["json", "path", "value", "...path_value_pairs"],
+    ),
+    (
+        "JSON_REPLACE",
+        &["json", "path", "value", "...path_value_pairs"],
+    ),
+    ("JSON_REMOVE", &["json", "path", "...paths"]),
+    ("JSON_CONTAINS", &["target", "candidate"]),
+    ("JSON_LENGTH", &["json"]),
     ("GROUP_CONCAT", &["expression"]),
+    ("PASSWORD", &["string"]),
+    ("DATABASE", &[]),
+    ("SCHEMA", &[]),
+    ("USER", &[]),
+    ("CURRENT_USER", &[]),
+    ("COLLATION", &["string"]),
+    ("FOUND_ROWS", &[]),
+    ("LAST_INSERT_ID", &[]),
+    ("BENCHMARK", &["count", "expression"]),
+    ("SLEEP", &["seconds"]),
     ("UUID", &[]),
+    ("UUID_SHORT", &[]),
     ("NOW", &[]),
 ];
 
@@ -654,6 +724,57 @@ mod tests {
                     .iter()
                     .all(|signature| signature.name != "REVERSE")
             );
+        }
+    }
+
+    #[test]
+    fn mysql_long_tail_catalog_matches_dbx_without_leaking_to_other_dialects() {
+        let expected = [
+            "MONTHNAME",
+            "WEEK",
+            "ADDTIME",
+            "MAKEDATE",
+            "POSITION",
+            "MAKE_SET",
+            "LOG2",
+            "ATAN2",
+            "CONV",
+            "JSON_OBJECT",
+            "JSON_INSERT",
+            "JSON_REMOVE",
+            "DATABASE",
+            "LAST_INSERT_ID",
+            "UUID_SHORT",
+        ];
+        for dialect in ["mysql", "mariadb"] {
+            for name in expected {
+                assert!(
+                    !builtin_signatures_for(dialect, name, None).is_empty(),
+                    "{dialect} should expose {name}"
+                );
+            }
+            assert_eq!(
+                builtin_signatures_for(dialect, "WEEK", None)[0].parameter_groups[0],
+                ["date", "mode"]
+            );
+            assert_eq!(
+                builtin_signatures_for(dialect, "JSON_INSERT", None)[0].parameter_groups[0],
+                ["json", "path", "value", "...path_value_pairs"]
+            );
+            assert!(
+                builtin_signature_completion_catalog_for(dialect, None, "uuid_s", 10)
+                    .iter()
+                    .any(|signature| signature.name == "UUID_SHORT")
+            );
+        }
+
+        for dialect in ["postgres", "oracle", "db2", "dameng", "sqlserver"] {
+            for name in expected {
+                assert!(
+                    builtin_signatures_for(dialect, name, None).is_empty(),
+                    "{dialect} must not inherit MySQL-only {name}"
+                );
+            }
         }
     }
 }
