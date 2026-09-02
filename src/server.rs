@@ -8165,6 +8165,27 @@ fn infer_dialect_from_uri_and_language(
         return "sqlite".to_string();
     } else if uri_lower.ends_with(".hive.sql") || uri_lower.ends_with(".hql") {
         return "hive".to_string();
+    } else if uri_lower.ends_with(".sqlserver.sql") || uri_lower.ends_with(".sqlserver") {
+        return "sqlserver".to_string();
+    } else if uri_lower.ends_with(".oceanbase-oracle.sql")
+        || uri_lower.ends_with(".oceanbase-oracle")
+    {
+        return "oceanbase-oracle".to_string();
+    } else if uri_lower.ends_with(".oracle.sql") || uri_lower.ends_with(".oracle") {
+        return "oracle".to_string();
+    } else if uri_lower.ends_with(".dameng.sql") || uri_lower.ends_with(".dameng") {
+        return "dameng".to_string();
+    } else if uri_lower.ends_with(".db2.sql") || uri_lower.ends_with(".db2") {
+        return "db2".to_string();
+    } else if uri_lower.ends_with(".h2.sql") || uri_lower.ends_with(".h2") {
+        return "h2".to_string();
+    } else if uri_lower.ends_with(".informix.sql") || uri_lower.ends_with(".informix") {
+        return "informix".to_string();
+    } else if uri_lower.ends_with(".questdb.sql") || uri_lower.ends_with(".questdb") {
+        return "questdb".to_string();
+    } else if uri_lower.ends_with(".manticoresearch.sql") || uri_lower.ends_with(".manticoresearch")
+    {
+        return "manticoresearch".to_string();
     } else if uri_lower.ends_with(".es.eql") || uri_lower.ends_with(".eql") {
         return "elasticsearch-eql".to_string();
     } else if uri_lower.ends_with(".es.dsl")
@@ -9247,6 +9268,29 @@ mod tests {
             ),
             "sqlite"
         );
+        for (uri, expected) in [
+            ("file:///query.audit.sqlserver.sql", "sqlserver"),
+            ("file:///query.package.oracle.sql", "oracle"),
+            (
+                "file:///query.compat.oceanbase-oracle.sql",
+                "oceanbase-oracle",
+            ),
+            ("file:///query.report.dameng.sql", "dameng"),
+            ("file:///query.report.db2.sql", "db2"),
+            ("file:///query.local.h2.sql", "h2"),
+            ("file:///query.legacy.informix.sql", "informix"),
+            ("file:///query.metrics.questdb.sql", "questdb"),
+            (
+                "file:///query.search.manticoresearch.sql",
+                "manticoresearch",
+            ),
+        ] {
+            assert_eq!(
+                infer_dialect_from_uri_and_language(uri, "sql", "mysql"),
+                expected,
+                "{uri} should not fall back before configuration sync"
+            );
+        }
     }
 
     #[test]
