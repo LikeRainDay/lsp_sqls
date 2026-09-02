@@ -8126,6 +8126,57 @@ fn schema_for_table_column_at_position(
     find_schema_by_table_reference(schema_manager, table_reference)
 }
 
+/// Product identities registered as compatibility aliases but not represented
+/// by a standalone parser. Their suffix is enough to retain product-specific
+/// completions while a client configuration update is still in flight.
+const PRODUCT_SQL_FILE_SUFFIX_DIALECTS: &[(&str, &str)] = &[
+    ("access", "access"),
+    ("argo", "argo"),
+    ("cloudflare-d1", "cloudflare-d1"),
+    ("cockroachdb", "cockroachdb"),
+    ("dameng", "dameng"),
+    ("databend", "databend"),
+    ("db2", "db2"),
+    ("doris", "doris"),
+    ("exasol", "exasol"),
+    ("firebird", "firebird"),
+    ("gaussdb", "gaussdb"),
+    ("gbase", "gbase"),
+    ("goldendb", "goldendb"),
+    ("greenplum", "greenplum"),
+    ("h2", "h2"),
+    ("highgo", "highgo"),
+    ("informix", "informix"),
+    ("iris", "iris"),
+    ("kingbase", "kingbase"),
+    ("kwdb", "kwdb"),
+    ("manticoresearch", "manticoresearch"),
+    ("oceanbase-oracle", "oceanbase-oracle"),
+    ("opengauss", "opengauss"),
+    ("oracle", "oracle"),
+    ("questdb", "questdb"),
+    ("redshift", "redshift"),
+    ("sqlserver", "sqlserver"),
+    ("starrocks", "starrocks"),
+    ("sundb", "sundb"),
+    ("tidb", "tidb"),
+    ("timescaledb", "timescaledb"),
+    ("turso", "turso"),
+    ("vastbase", "vastbase"),
+    ("vertica", "vertica"),
+    ("xugu", "xugu"),
+    ("yashandb", "yashandb"),
+    ("yugabytedb", "yugabytedb"),
+];
+
+fn product_sql_file_suffix_dialect(uri_lower: &str) -> Option<&'static str> {
+    let stem = uri_lower.strip_suffix(".sql").unwrap_or(uri_lower);
+    let (_, suffix) = stem.rsplit_once('.')?;
+    PRODUCT_SQL_FILE_SUFFIX_DIALECTS
+        .iter()
+        .find_map(|(product, dialect)| (*product == suffix).then_some(*dialect))
+}
+
 /// 从 URI 和 languageId 推断方言类型
 ///
 /// 支持多种 URI scheme：
@@ -8165,27 +8216,8 @@ fn infer_dialect_from_uri_and_language(
         return "sqlite".to_string();
     } else if uri_lower.ends_with(".hive.sql") || uri_lower.ends_with(".hql") {
         return "hive".to_string();
-    } else if uri_lower.ends_with(".sqlserver.sql") || uri_lower.ends_with(".sqlserver") {
-        return "sqlserver".to_string();
-    } else if uri_lower.ends_with(".oceanbase-oracle.sql")
-        || uri_lower.ends_with(".oceanbase-oracle")
-    {
-        return "oceanbase-oracle".to_string();
-    } else if uri_lower.ends_with(".oracle.sql") || uri_lower.ends_with(".oracle") {
-        return "oracle".to_string();
-    } else if uri_lower.ends_with(".dameng.sql") || uri_lower.ends_with(".dameng") {
-        return "dameng".to_string();
-    } else if uri_lower.ends_with(".db2.sql") || uri_lower.ends_with(".db2") {
-        return "db2".to_string();
-    } else if uri_lower.ends_with(".h2.sql") || uri_lower.ends_with(".h2") {
-        return "h2".to_string();
-    } else if uri_lower.ends_with(".informix.sql") || uri_lower.ends_with(".informix") {
-        return "informix".to_string();
-    } else if uri_lower.ends_with(".questdb.sql") || uri_lower.ends_with(".questdb") {
-        return "questdb".to_string();
-    } else if uri_lower.ends_with(".manticoresearch.sql") || uri_lower.ends_with(".manticoresearch")
-    {
-        return "manticoresearch".to_string();
+    } else if let Some(dialect) = product_sql_file_suffix_dialect(&uri_lower) {
+        return dialect.to_string();
     } else if uri_lower.ends_with(".es.eql") || uri_lower.ends_with(".eql") {
         return "elasticsearch-eql".to_string();
     } else if uri_lower.ends_with(".es.dsl")
@@ -8249,7 +8281,8 @@ mod tests {
         LogicalOperatorNewline, ProjectSqlSymbolKind, ProjectSqlSymbolOccurrence,
         ProjectSqlSymbolRole, RoutineCallContext, TableAliasStyle,
         COMPLETION_RESOLVE_CACHE_MAX_ENTRIES, COMPLETION_RESOLVE_DOCUMENTATION_MAX_BYTES,
-        LOCAL_RELATION_SCAN_MAX_BYTES, PROJECT_SQL_INDEX_MAX_BYTES,
+        LOCAL_RELATION_SCAN_MAX_BYTES, PRODUCT_SQL_FILE_SUFFIX_DIALECTS,
+        PROJECT_SQL_INDEX_MAX_BYTES,
     };
     use crate::dialects::DialectRegistry;
     use crate::position::lsp_position_at_end;
@@ -9268,27 +9301,18 @@ mod tests {
             ),
             "sqlite"
         );
-        for (uri, expected) in [
-            ("file:///query.audit.sqlserver.sql", "sqlserver"),
-            ("file:///query.package.oracle.sql", "oracle"),
-            (
-                "file:///query.compat.oceanbase-oracle.sql",
-                "oceanbase-oracle",
-            ),
-            ("file:///query.report.dameng.sql", "dameng"),
-            ("file:///query.report.db2.sql", "db2"),
-            ("file:///query.local.h2.sql", "h2"),
-            ("file:///query.legacy.informix.sql", "informix"),
-            ("file:///query.metrics.questdb.sql", "questdb"),
-            (
-                "file:///query.search.manticoresearch.sql",
-                "manticoresearch",
-            ),
-        ] {
+        for (product, expected) in PRODUCT_SQL_FILE_SUFFIX_DIALECTS {
+            let uri = format!("file:///query.audit.{product}.sql");
             assert_eq!(
-                infer_dialect_from_uri_and_language(uri, "sql", "mysql"),
-                expected,
+                infer_dialect_from_uri_and_language(&uri, "sql", "mysql"),
+                *expected,
                 "{uri} should not fall back before configuration sync"
+            );
+            let extension_uri = format!("file:///query.audit.{product}");
+            assert_eq!(
+                infer_dialect_from_uri_and_language(&extension_uri, "sql", "mysql"),
+                *expected,
+                "{extension_uri} should not fall back before configuration sync"
             );
         }
     }
